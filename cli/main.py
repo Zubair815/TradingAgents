@@ -2,31 +2,21 @@ import datetime
 import os
 import sys
 import time
-from collections import deque
 from functools import wraps
 from pathlib import Path
 
 import typer
-from rich import box
 from rich.align import Align
 from rich.console import Console
-from rich.layout import Layout
 from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.rule import Rule
-from rich.spinner import Spinner
-from rich.table import Table
-from rich.text import Text
 
 from cli.announcements import display_announcements, fetch_announcements
 from cli.display import (
-    MessageBuffer,
     classify_message_type,
     create_layout,
-    extract_content_string,
-    format_tokens,
-    format_tool_args,
     message_buffer,
     update_display,
 )

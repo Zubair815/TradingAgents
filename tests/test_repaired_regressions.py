@@ -7,11 +7,8 @@ Covers:
 - Issue 14: Canonical debater and deprecated debator alias behavior
 """
 
-import threading
 import warnings
 from concurrent.futures import ThreadPoolExecutor
-
-import pytest
 
 from tradingagents.agents.risk_mgmt.aggressive_debater import (
     create_aggressive_debater,
@@ -24,7 +21,7 @@ from tradingagents.graph.checkpointer import (
     get_checkpointer,
     thread_id,
 )
-from tradingagents.graph.trading_graph import TradingAgentsGraph, _deep_merge_chunks
+from tradingagents.graph.trading_graph import _deep_merge_chunks
 
 
 def test_nested_debug_state_merge_preserves_debate_fields():
