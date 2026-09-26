@@ -1,0 +1,256 @@
+"""Tests for TradingAgents Web Dashboard backend."""
+
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+from fastapi.testclient import TestClient
+
+from tradingagents.default_config import DEFAULT_CONFIG
+from web import server
+from web.server import AnalysisRequest, app
+
+
+@pytest.fixture
+def client():
+    return TestClient(app)
+
+
+# ---------------------------------------------------------------------------
+# Ticker Validation Tests
+# ---------------------------------------------------------------------------
+@pytest.mark.unit
+class TestTickerValidation:
+    def test_valid_tickers_accepted(self):
+        for ticker in ("NVDA", "AAPL", "BRK-B", "BRK.A", "0700.HK", "GC=F", "EURUSD+"):
+            req = AnalysisRequest(ticker=ticker)
+            assert req.ticker == ticker.upper()
+
+    def test_empty_ticker_rejected(self):
+        with pytest.raises(ValueError):
+            AnalysisRequest(ticker="")
+
+    def test_xss_and_malicious_tickers_rejected(self):
+        for bad in (
+            "<script>alert(1)</script>",
+            "<img src=x onerror=alert(1)>",
+            "../../../etc/passwd",
+            "AAPL\x00",
+            "AAPL; rm -rf /",
+            "A B C",
+            "A" * 35,
+            "..",
+            "...",
+        ):
+            with pytest.raises(ValueError):
+                AnalysisRequest(ticker=bad)
+
+    def test_api_rejects_malicious_ticker_with_422(self, client):
+        res = client.get("/")
+        assert res.status_code == 200
+
+        bad_payload = {"ticker": "<script>alert('xss')</script>"}
+        res = client.post("/api/analyze", json=bad_payload)
+        assert res.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Authentication Tests
+# ---------------------------------------------------------------------------
+@pytest.mark.unit
+class TestDashboardAuth:
+    def test_unauthenticated_request_rejected_with_401(self, client):
+        # A direct client without session cookies or API key
+        fresh_client = TestClient(app)
+        res = fresh_client.post("/api/analyze", json={"ticker": "AAPL"})
+        assert res.status_code == 401
+        assert "Unauthorized" in res.json().get("detail", "")
+
+    def test_session_cookie_authenticates_browser_client(self, client):
+        # Visiting / establishes session cookie
+        res = client.get("/")
+        assert res.status_code == 200
+        assert "tradingagents_session" in client.cookies
+
+        with patch("web.server._run_analysis"):
+            post_res = client.post("/api/analyze", json={"ticker": "AAPL"})
+            assert post_res.status_code == 200
+            assert "run_id" in post_res.json()
+
+    def test_session_token_header_authenticates(self):
+        fresh_client = TestClient(app)
+        headers = {"X-Session-Token": server._SESSION_TOKEN}
+        with patch("web.server._run_analysis"):
+            res = fresh_client.post("/api/analyze", json={"ticker": "AAPL"}, headers=headers)
+            assert res.status_code == 200
+
+    def test_configured_api_key_enforced(self):
+        fresh_client = TestClient(app)
+        with patch.object(server, "DASHBOARD_API_KEY", "super-secret-key-123"):
+            # Session cookie alone must NOT suffice when explicit API key is configured
+            fresh_client.cookies.set("tradingagents_session", server._SESSION_TOKEN)
+            res = fresh_client.post("/api/analyze", json={"ticker": "AAPL"})
+            assert res.status_code == 401
+
+            # Wrong key rejected
+            res = fresh_client.post(
+                "/api/analyze", json={"ticker": "AAPL"}, headers={"X-API-Key": "wrong"}
+            )
+            assert res.status_code == 401
+
+            # Correct key accepted
+            with patch("web.server._run_analysis"):
+                res = fresh_client.post(
+                    "/api/analyze",
+                    json={"ticker": "AAPL"},
+                    headers={"X-API-Key": "super-secret-key-123"},
+                )
+                assert res.status_code == 200
+
+            # Bearer token also accepted
+            with patch("web.server._run_analysis"):
+                res = fresh_client.post(
+                    "/api/analyze",
+                    json={"ticker": "AAPL"},
+                    headers={"Authorization": "Bearer super-secret-key-123"},
+                )
+                assert res.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# CORS Configuration Tests
+# ---------------------------------------------------------------------------
+@pytest.mark.unit
+class TestCORSConfig:
+    def test_cors_does_not_allow_all_origins(self):
+        for middleware in app.user_middleware:
+            if "CORSMiddleware" in str(middleware.cls):
+                kwargs = getattr(middleware, "kwargs", {})
+                allow_origins = kwargs.get("allow_origins", [])
+                assert "*" not in allow_origins
+                assert "http://localhost:8050" in allow_origins
+                assert "http://127.0.0.1:8050" in allow_origins
+
+
+# ---------------------------------------------------------------------------
+# History and Report Retrieval from Disk Tests
+# ---------------------------------------------------------------------------
+@pytest.mark.unit
+class TestHistoryAndReportsPersistence:
+    def test_history_and_report_loaded_from_disk_after_restart(self, client, tmp_path):
+        # Create a mock report tree on disk under tmp_path
+        reports_dir = tmp_path / "reports"
+        run_folder = reports_dir / "TSLA_20260926_153000"
+        run_folder.mkdir(parents=True)
+
+        analysts_dir = run_folder / "1_analysts"
+        analysts_dir.mkdir()
+        (analysts_dir / "market.md").write_text("Bullish market trend", encoding="utf-8")
+
+        research_dir = run_folder / "2_research"
+        research_dir.mkdir()
+        (research_dir / "bull.md").write_text("Strong growth catalysts", encoding="utf-8")
+        (research_dir / "manager.md").write_text("Approve long thesis", encoding="utf-8")
+
+        portfolio_dir = run_folder / "5_portfolio"
+        portfolio_dir.mkdir()
+        (portfolio_dir / "decision.md").write_text(
+            "Final Trade Decision: BUY\nTarget allocation: 5%", encoding="utf-8"
+        )
+
+        complete_md = run_folder / "complete_report.md"
+        complete_md.write_text(
+            "# Trading Analysis Report: TSLA\n\nGenerated: 2026-09-26 15:30:00\n\nFinal Trade Decision: BUY",
+            encoding="utf-8",
+        )
+
+        with patch.dict(DEFAULT_CONFIG, {"results_dir": str(tmp_path)}):
+            # 1. /api/history returns the saved report
+            res = client.get("/api/history")
+            assert res.status_code == 200
+            data = res.json()
+            history = data.get("history", [])
+            assert len(history) >= 1
+            item = next((h for h in history if h["ticker"] == "TSLA"), None)
+            assert item is not None
+            assert item["ticker"] == "TSLA"
+            assert item["date"] == "2026-09-26"
+            assert item["signal"] == "Buy"
+            assert item["status"] == "completed"
+
+            # 2. /api/runs/{run_id}/report retrieves the report from disk even with empty _completed_reports
+            report_res = client.get(f"/api/runs/{item['id']}/report")
+            assert report_res.status_code == 200
+            report_data = report_res.json()
+            assert report_data["ticker"] == "TSLA"
+            assert report_data["signal"] == "Buy"
+            assert report_data["market_report"] == "Bullish market trend"
+            assert report_data["investment_debate"]["bull_history"] == "Strong growth catalysts"
+            assert "BUY" in report_data["final_decision"]
+
+
+# ---------------------------------------------------------------------------
+# Pipeline Progress Event Tests
+# ---------------------------------------------------------------------------
+@pytest.mark.unit
+class TestPipelineProgress:
+    def test_pipeline_progress_emits_increasing_node_stages(self):
+        from unittest.mock import MagicMock
+
+        from web.server import AnalysisRequest, _run_analysis, _run_events, _runs
+
+        run_id = "testrun1"
+        _runs[run_id] = {
+            "run_id": run_id,
+            "ticker": "NVDA",
+            "date": "2026-09-26",
+            "status": "queued",
+            "started_at": "2026-09-26T12:00:00",
+        }
+        _run_events[run_id] = []
+
+        mock_chunks = [
+            {"market_report": "market report"},
+            {"sentiment_report": "sentiment report"},
+            {"news_report": "news report"},
+            {"fundamentals_report": "fundamentals report"},
+            {"investment_debate_state": {"bull_history": "bull", "last_speaker": "bull"}},
+            {"investment_debate_state": {"bear_history": "bear", "last_speaker": "bear"}},
+            {"investment_debate_state": {"judge_decision": "manager approved"}},
+            {"trader_investment_plan": "trader plan"},
+            {"risk_debate_state": {"aggressive_history": "agg", "latest_speaker": "Aggressive"}},
+            {"risk_debate_state": {"conservative_history": "cons", "latest_speaker": "Conservative"}},
+            {"risk_debate_state": {"neutral_history": "neu", "latest_speaker": "Neutral"}},
+            {"risk_debate_state": {"judge_decision": "portfolio approved"}},
+            {"final_trade_decision": "Rating: Buy"},
+        ]
+
+        mock_graph = MagicMock()
+        mock_graph.checkpoint_scope.return_value.__enter__.return_value = "thread-1"
+        mock_graph.create_run_state.return_value = {}
+        mock_graph.checkpoint_input.return_value = {}
+        mock_graph.propagator.get_graph_args.return_value = {}
+        mock_graph.graph.stream.return_value = iter(mock_chunks)
+        mock_graph.process_signal.return_value = "Buy"
+        mock_graph.save_reports.return_value = Path("reports/NVDA_20260926_120000/complete_report.md")
+
+        req = AnalysisRequest(ticker="NVDA", analysts=["market", "social", "news", "fundamentals"])
+
+        with patch("web.server.TradingAgentsGraph", return_value=mock_graph):
+            _run_analysis(run_id, req)
+
+        events = _run_events[run_id]
+        node_events = [e for e in events if e["type"] == "node"]
+        assert len(node_events) > 5
+
+        # Verify progress advances
+        progresses = [e["data"]["progress"] for e in node_events]
+        assert progresses[0] > 0.0
+        assert progresses[-1] > progresses[0]
+        # Verify node identifiers include analysts and debate participants
+        emitted_nodes = [e["data"]["node"] for e in node_events]
+        assert "market_analyst" in emitted_nodes
+        assert "social_media_analyst" in emitted_nodes
+        assert "bull_researcher" in emitted_nodes
+        assert "trader" in emitted_nodes
+        assert "portfolio_manager" in emitted_nodes

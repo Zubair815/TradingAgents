@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="TradingAgents — Multi-Agent AI Trading Analysis Dashboard">
+  <title>TradingAgents — AI Trading Terminal</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📊</text></svg>">
+</head>
+<body>
+
+  <!-- ===== Header ===== -->
+  <header class="header">
+    <div class="header-inner">
+      <a href="/" class="logo">
+        <img src="/static/hero.jpg" alt="Logo" class="logo-icon">
+        <span class="logo-text">TradingAgents</span>
+        <span class="logo-badge">AI Terminal</span>
+      </a>
+      <div class="header-status">
+        <div class="status-dot" id="serverDot"></div>
+        <span class="status-label" id="serverStatus">Connected</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- ===== Main App ===== -->
+  <div class="app-container">
+
+    <!-- Tabs -->
+    <div class="tabs" role="tablist">
+      <button class="tab active" data-view="analyze" role="tab" aria-selected="true">
+        ⚡ Analyze
+      </button>
+      <button class="tab" data-view="report" role="tab">
+        📋 Report
+      </button>
+      <button class="tab" data-view="history" role="tab">
+        📊 History
+      </button>
+    </div>
+
+    <!-- ===== ANALYZE VIEW ===== -->
+    <div class="view active" id="view-analyze">
+      <div class="analysis-grid">
+
+        <!-- Left: Config Card -->
+        <div class="card">
+          <div class="card-header">
+            <h2 class="card-title">
+              <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+              Configuration
+            </h2>
+          </div>
+
+          <form id="analysisForm" autocomplete="off">
+            <div class="form-group" style="margin-bottom: 1rem;">
+              <label class="form-label" for="ticker">Ticker Symbol</label>
+              <input type="text" class="form-input" id="ticker" value="NVDA" placeholder="e.g. NVDA, AAPL, TSLA" spellcheck="false">
+            </div>
+
+            <div class="form-group" style="margin-bottom: 1rem;">
+              <label class="form-label" for="tradeDate">Analysis Date</label>
+              <input type="date" class="form-input" id="tradeDate">
+            </div>
+
+            <div class="form-group" id="apiKeyGroup" style="margin-bottom: 1rem; display: none;">
+              <label class="form-label" for="apiKey">Dashboard API Key</label>
+              <input type="password" class="form-input" id="apiKey" placeholder="Enter API key if configured" spellcheck="false">
+            </div>
+
+            <div class="form-group" style="margin-bottom: 1rem;">
+              <label class="form-label" for="provider">LLM Provider</label>
+              <select class="form-select" id="provider">
+                <option value="">Loading...</option>
+              </select>
+            </div>
+
+            <div class="form-group" style="margin-bottom: 1rem;">
+              <label class="form-label" for="quickModel">Quick Think Model</label>
+              <select class="form-select" id="quickModel">
+                <option value="">Select provider first</option>
+              </select>
+            </div>
+
+            <div class="form-group" style="margin-bottom: 1rem;">
+              <label class="form-label" for="deepModel">Deep Think Model</label>
+              <select class="form-select" id="deepModel">
+                <option value="">Select provider first</option>
+              </select>
+            </div>
+
+            <div class="form-group" style="margin-bottom: 1rem;">
+              <label class="form-label">Active Analysts</label>
+              <div class="analyst-toggles" id="analystToggles">
+                <button type="button" class="analyst-toggle active" data-analyst="market">
+                  <span class="dot"></span> Market
+                </button>
+                <button type="button" class="analyst-toggle active" data-analyst="social">
+                  <span class="dot"></span> Sentiment
+                </button>
+                <button type="button" class="analyst-toggle active" data-analyst="news">
+                  <span class="dot"></span> News
+                </button>
+                <button type="button" class="analyst-toggle active" data-analyst="fundamentals">
+                  <span class="dot"></span> Fundamentals
+                </button>
+              </div>
+            </div>
+
+            <button type="submit" class="btn-run" id="btnRun">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+              Launch Analysis
+            </button>
+          </form>
+        </div>
+
+        <!-- Right: Pipeline Progress -->
+        <div class="card" id="pipelineCard">
+          <div class="card-header">
+            <h2 class="card-title">
+              <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+              Agent Pipeline
+            </h2>
+          </div>
+
+          <div id="pipelineContent">
+            <div class="empty-state">
+              <div class="empty-state-icon">🤖</div>
+              <div class="empty-state-title">Ready to Analyze</div>
+              <div class="empty-state-desc">
+                Configure your analysis on the left and hit Launch to start the multi-agent pipeline.
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== REPORT VIEW ===== -->
+    <div class="view" id="view-report">
+      <div id="reportContent">
+        <div class="empty-state">
+          <div class="empty-state-icon">📋</div>
+          <div class="empty-state-title">No Report Yet</div>
+          <div class="empty-state-desc">
+            Run an analysis first. The complete report will appear here with all agent sections.
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== HISTORY VIEW ===== -->
+    <div class="view" id="view-history">
+      <div class="card">
+        <div class="card-header">
+          <h2 class="card-title">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+            Analysis History
+          </h2>
+        </div>
+        <div id="historyContent">
+          <div class="empty-state">
+            <div class="empty-state-icon">📊</div>
+            <div class="empty-state-title">No History</div>
+            <div class="empty-state-desc">
+              Completed analyses will appear here.
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== Report Detail Overlay ===== -->
+  <div class="report-overlay" id="reportOverlay">
+    <div class="report-modal">
+      <div class="report-modal-header">
+        <div class="report-modal-title" id="reportModalTitle">Report</div>
+        <button class="report-modal-close" id="reportModalClose">&times;</button>
+      </div>
+      <div class="report-modal-body" id="reportModalBody"></div>
+    </div>
+  </div>
+
+  <!-- ===== Toast ===== -->
+  <div class="toast" id="toast"></div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

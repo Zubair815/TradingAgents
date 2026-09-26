@@ -1,0 +1,3 @@
+# Single source of truth for dependencies is pyproject.toml.
+# This file delegates to pyproject.toml via pip install . for compatibility with legacy workflows.
+.
