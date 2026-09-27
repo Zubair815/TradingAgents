@@ -1245,6 +1245,8 @@ async def start_forex_analysis(
     now_iso = datetime.now(timezone.utc).isoformat()
     run_entry = {
         "run_id": run_id,
+        "run_type": "forex",
+        "asset_type": "forex",
         "pair": req.pair,
         "timeframe": req.timeframe,
         "date": req.date,
@@ -1279,6 +1281,8 @@ async def start_forex_analysis(
         "status": "queued",
         "pair": req.pair,
         "timeframe": req.timeframe,
+        "run_type": "forex",
+        "asset_type": "forex",
         "message": f"Forex analysis started for {req.pair}",
     }
 
@@ -1331,6 +1335,35 @@ async def stream_forex_events(run_id: str, request: Request):
             "X-Accel-Buffering": "no",
         },
     )
+
+
+# ---------------------------------------------------------------------------
+# Compatibility Aliases for Analysis Routes
+# ---------------------------------------------------------------------------
+
+@router.get("/analyze/{run_id}/stream")
+async def stream_forex_events_alias(run_id: str, request: Request):
+    """Compatibility alias for /runs/{run_id}/events."""
+    return await stream_forex_events(run_id, request)
+
+
+@router.get("/analyze/{run_id}/report")
+async def get_forex_report_alias(run_id: str):
+    """Compatibility alias for /runs/{run_id} report retrieval."""
+    if run_id not in _forex_runs:
+        raise HTTPException(status_code=404, detail="Run not found")
+    report = _forex_completed_reports.get(run_id)
+    if report is None:
+        return {"run_id": run_id, "status": _forex_runs[run_id].get("status", "running"), "report": None}
+    return report
+
+
+@router.get("/analyze/{run_id}/status")
+async def get_forex_status_alias(run_id: str):
+    """Compatibility alias for run status inspection."""
+    if run_id not in _forex_runs:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return _forex_runs[run_id]
 
 
 # ---------------------------------------------------------------------------

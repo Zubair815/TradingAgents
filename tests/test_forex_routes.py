@@ -507,18 +507,101 @@ class TestForexAnalysisRuns:
         assert data["timeframe"] == "M15"
 
         run_id = data["run_id"]
+        assert data["asset_type"] == "forex"
+        assert data["run_type"] == "forex"
+
         # Verify listing
         runs_res = client.get("/api/forex/runs")
         assert runs_res.status_code == 200
         run_items = runs_res.json()["runs"]
-        assert any(r["run_id"] == run_id for r in run_items)
+        matched = next(r for r in run_items if r["run_id"] == run_id)
+        assert matched["asset_type"] == "forex"
+        assert matched["run_type"] == "forex"
 
-        # Verify get run detail
+        # Verify get run detail with run and report keys
         get_res = client.get(f"/api/forex/runs/{run_id}")
         assert get_res.status_code == 200
-        run_detail = get_res.json()["run"]
+        body = get_res.json()
+        assert "run" in body
+        assert "report" in body
+        run_detail = body["run"]
         assert run_detail["run_id"] == run_id
         assert run_detail["pair"] == "EURUSD"
+        assert run_detail["asset_type"] == "forex"
+
+    def test_canonical_routes_and_compatibility_aliases(self, client):
+        """Verify canonical endpoints /runs/{id}, /events and compatibility aliases."""
+        run_id = "fx_alias_test_789"
+        _forex_runs[run_id] = {
+            "run_id": run_id,
+            "run_type": "forex",
+            "asset_type": "forex",
+            "pair": "GBPUSD",
+            "timeframe": "H1",
+            "date": None,
+            "status": "completed",
+            "provider": "",
+            "quick_model": "",
+            "deep_model": "",
+            "account_balance": 50000.0,
+            "risk_percent": 1.0,
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "finished_at": datetime.now(timezone.utc).isoformat(),
+            "error": None,
+            "signal": "SHORT",
+            "proposal_id": "prop_test",
+            "report_id": "rep_test",
+            "report_path": None,
+        }
+        _forex_run_events[run_id] = [
+            {"type": "preparing_data", "data": {"status": "ok"}, "ts": 1.0},
+            {"type": "complete", "data": {"signal": "SHORT"}, "ts": 2.0},
+        ]
+        _forex_completed_reports[run_id] = {
+            "run_id": run_id,
+            "signal": "SHORT",
+            "pair": "GBPUSD",
+            "report": "Mock short report",
+        }
+
+        # Canonical SSE /runs/{id}/events
+        events_res = client.get(f"/api/forex/runs/{run_id}/events")
+        assert events_res.status_code == 200
+        assert "event: preparing_data" in events_res.text
+        assert "event: complete" in events_res.text
+
+        # Compatibility alias /analyze/{id}/stream
+        stream_res = client.get(f"/api/forex/analyze/{run_id}/stream")
+        assert stream_res.status_code == 200
+        assert "event: complete" in stream_res.text
+
+        # Compatibility alias /analyze/{id}/report
+        rep_res = client.get(f"/api/forex/analyze/{run_id}/report")
+        assert rep_res.status_code == 200
+        assert rep_res.json()["signal"] == "SHORT"
+
+        # Compatibility alias /analyze/{id}/status
+        stat_res = client.get(f"/api/forex/analyze/{run_id}/status")
+        assert stat_res.status_code == 200
+        assert stat_res.json()["status"] == "completed"
+
+    def test_invalid_run_returns_404_on_all_endpoints(self, client):
+        """Verify 404 behavior for non-existent runs across canonical and alias routes."""
+        invalid_id = "fx_nonexistent_999"
+
+        # Canonical get run
+        res = client.get(f"/api/forex/runs/{invalid_id}")
+        assert res.status_code == 404
+        assert res.json()["detail"] == "Run not found"
+
+        # Canonical events
+        res = client.get(f"/api/forex/runs/{invalid_id}/events")
+        assert res.status_code == 404
+
+        # Aliases
+        assert client.get(f"/api/forex/analyze/{invalid_id}/stream").status_code == 404
+        assert client.get(f"/api/forex/analyze/{invalid_id}/report").status_code == 404
+        assert client.get(f"/api/forex/analyze/{invalid_id}/status").status_code == 404
 
     def test_run_forex_analysis_worker_and_sse_events(self, client, tmp_path):
         run_id = "fx_test_worker_123"

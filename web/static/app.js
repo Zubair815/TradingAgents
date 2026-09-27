@@ -664,7 +664,7 @@
       eventSource = null;
     }
 
-    eventSource = new EventSource(`/api/forex/analyze/${encodeURIComponent(runId)}/stream`);
+    eventSource = new EventSource(`/api/forex/runs/${encodeURIComponent(runId)}/events`);
 
     // Dynamic pipeline events
     FOREX_PIPELINE_NODES.forEach((node, idx) => {
@@ -846,15 +846,25 @@
   // ---- Report Loading & Rendering ----
   async function loadForexReport(runId) {
     try {
-      const res = await fetch(`/api/forex/analyze/${encodeURIComponent(runId)}/report`);
-      if (!res.ok) return;
+      const res = await fetch(`/api/forex/runs/${encodeURIComponent(runId)}`);
+      if (!res.ok) {
+        if (res.status === 404) {
+          showToast('Forex run not found', 'error');
+        } else {
+          showToast('Failed to load Forex report', 'error');
+        }
+        return;
+      }
       const data = await res.json();
-      renderForexReport(data);
+      const reportPayload = data.report || {};
+      renderForexReport(reportPayload, data.run);
 
       // Switch to report tab automatically
       const reportTab = [...DOM.tabs].find(t => t.dataset.view === 'report');
       if (reportTab) reportTab.click();
-    } catch (_) {}
+    } catch (_) {
+      showToast('Error retrieving Forex report', 'error');
+    }
   }
 
   function renderForexReport(data) {
@@ -956,12 +966,16 @@
 
   async function loadRuns() {
     try {
-      const res = await fetch('/api/runs');
-      if (res.ok) {
-        const data = await res.json();
-        inMemoryRuns = data.runs || [];
-        renderCombinedHistory();
-      }
+      const [eqRes, fxRes] = await Promise.all([
+        fetch('/api/runs').catch(() => null),
+        fetch('/api/forex/runs').catch(() => null),
+      ]);
+      const eqRuns = eqRes && eqRes.ok ? (await eqRes.json()).runs || [] : [];
+      const fxRuns = fxRes && fxRes.ok ? (await fxRes.json()).runs || [] : [];
+      eqRuns.forEach(r => { r.asset_type = r.asset_type || 'equities'; r.run_type = r.run_type || 'equities'; });
+      fxRuns.forEach(r => { r.asset_type = 'forex'; r.run_type = 'forex'; });
+      inMemoryRuns = [...fxRuns, ...eqRuns];
+      renderCombinedHistory();
     } catch (_) {}
   }
 
@@ -989,9 +1003,12 @@
       const id = h.run_id || h.id;
       if (!seenIds.has(id)) {
         seenIds.add(id);
+        const isForex = h.asset_type === 'forex' || h.run_type === 'forex' || Boolean(h.pair);
         combined.push({
           run_id: id,
           ticker: h.ticker || h.pair || 'ASSET',
+          asset_type: isForex ? 'forex' : 'equities',
+          run_type: isForex ? 'forex' : 'equities',
           date: h.date || h.timestamp || '',
           provider: h.provider || 'Saved',
           status: h.status || 'completed',
@@ -1017,6 +1034,7 @@
         <thead>
           <tr>
             <th>Asset</th>
+            <th>Type</th>
             <th>Date</th>
             <th>Provider</th>
             <th>Status</th>
@@ -1027,9 +1045,12 @@
         <tbody id="historyTableBody">
           ${combined.map(run => {
             const signalClass = (run.signal || 'unknown').toLowerCase().replace(/[^a-z]/g, '');
+            const assetType = run.asset_type || run.run_type || (run.pair ? 'forex' : 'equities');
+            const assetBadge = assetType === 'forex' ? 'FOREX' : 'EQUITY';
             return `
-              <tr data-run-id="${escapeText(run.run_id)}">
+              <tr data-run-id="${escapeText(run.run_id)}" data-asset-type="${escapeText(assetType)}">
                 <td style="font-weight:700; color:var(--cyan);">${escapeText(run.ticker || run.pair)}</td>
+                <td><span class="lesson-tag" style="font-size:0.65rem;">${escapeText(assetBadge)}</span></td>
                 <td>${escapeText(run.date)}</td>
                 <td>${escapeText(run.provider || '-')}</td>
                 <td><span class="status-cell ${escapeText(run.status)}">${escapeText(run.status)}</span></td>
@@ -1047,14 +1068,15 @@
       tbody.querySelectorAll('tr').forEach(row => {
         row.addEventListener('click', () => {
           const runId = row.getAttribute('data-run-id');
-          if (runId) viewReport(runId);
+          const assetType = row.getAttribute('data-asset-type');
+          if (runId) viewReport(runId, assetType);
         });
       });
     }
   }
 
-  async function viewReport(runId) {
-    if (runId.startsWith('fxrun_')) {
+  async function viewReport(runId, assetType) {
+    if (assetType === 'forex' || runId.startsWith('fx_') || runId.startsWith('fxrun_')) {
       await loadForexReport(runId);
       return;
     }
