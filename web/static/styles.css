@@ -302,6 +302,17 @@ body::before {
   background: currentColor;
 }
 
+.analyst-toggle.mandatory-stage {
+  cursor: default;
+  opacity: 0.9;
+  border-style: dashed;
+}
+.analyst-toggle.mandatory-stage:hover {
+  border-color: var(--cyan);
+  color: var(--cyan);
+}
+
+
 /* Run button */
 .btn-run {
   display: flex; align-items: center; justify-content: center; gap: 10px;

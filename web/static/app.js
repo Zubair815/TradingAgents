@@ -145,7 +145,10 @@
       btn.addEventListener('click', () => btn.classList.toggle('active'));
     });
     DOM.forexAnalystToggles.forEach(btn => {
-      btn.addEventListener('click', () => btn.classList.toggle('active'));
+      btn.addEventListener('click', () => {
+        if (btn.classList.contains('mandatory-stage') || btn.disabled) return;
+        btn.classList.toggle('active');
+      });
     });
 
     DOM.provider.addEventListener('change', updateModelSelects);
@@ -503,11 +506,27 @@
     const balance = parseFloat(DOM.accountBalance.value) || 100000;
     const riskPct = parseFloat(DOM.riskPercent.value) || 1.0;
 
+    const selectedAnalysts = [];
+    DOM.forexAnalystToggles.forEach(btn => {
+      if (btn.classList.contains('active')) {
+        const val = btn.dataset.fxanalyst;
+        if (val === 'technical' || val === 'forex_technical') selectedAnalysts.push('forex_technical');
+        else if (val === 'macro' || val === 'forex_macro') selectedAnalysts.push('forex_macro');
+        else if (val === 'news' || val === 'forex_news') selectedAnalysts.push('forex_news');
+      }
+    });
+
+    if (selectedAnalysts.length === 0) {
+      showToast('At least one Forex analyst (Technical, Macro, or News) must be selected', 'error');
+      return;
+    }
+
     const payload = {
       pair: pair,
       timeframe: timeframe,
       account_balance: balance,
       risk_percent: riskPct,
+      analysts: selectedAnalysts,
       provider: DOM.provider.value || null,
       quick_model: DOM.quickModel.value || null,
       deep_model: DOM.deepModel.value || null,

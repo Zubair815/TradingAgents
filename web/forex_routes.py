@@ -1151,6 +1151,7 @@ def _run_forex_analysis(run_id: str, req: ForexAnalysisRequest) -> None:
             "run_id": run_id,
             "pair": req.pair,
             "timeframe": req.timeframe,
+            "analysts": list(req.analysts),
             "date": req.date,
             "signal": signal,
             "proposal_id": proposal_id,
@@ -1229,6 +1230,12 @@ async def start_forex_analysis(
     """Start asynchronous Forex multi-agent analysis with live agent execution and SSE updates."""
     verify_optional_auth(request)
 
+    if not req.analysts:
+        raise HTTPException(status_code=422, detail="At least one Forex analyst must be selected")
+    invalid = set(req.analysts) - {"forex_technical", "forex_macro", "forex_news"}
+    if invalid:
+        raise HTTPException(status_code=422, detail=f"Unsupported analyst(s): {sorted(invalid)}")
+
     run_id = f"fx_{uuid.uuid4().hex[:10]}"
     now_iso = datetime.now(timezone.utc).isoformat()
     run_entry = {
@@ -1238,6 +1245,7 @@ async def start_forex_analysis(
         "pair": req.pair,
         "timeframe": req.timeframe,
         "date": req.date,
+        "analysts": list(req.analysts),
         "status": "queued",
         "provider": req.provider or "",
         "quick_model": req.quick_model or "",
@@ -1269,6 +1277,7 @@ async def start_forex_analysis(
         "status": "queued",
         "pair": req.pair,
         "timeframe": req.timeframe,
+        "analysts": list(req.analysts),
         "run_type": "forex",
         "asset_type": "forex",
         "message": f"Forex analysis started for {req.pair}",

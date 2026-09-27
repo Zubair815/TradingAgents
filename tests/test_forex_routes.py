@@ -1035,3 +1035,119 @@ class TestLearningRoutes:
         assert data["status"] == "COMPLETED"
         assert "reflection" in data
         assert "rating" in data["reflection"]
+
+
+# ---------------------------------------------------------------------------
+# 8. Forex Analyst Selection Tests (Phase 1)
+# ---------------------------------------------------------------------------
+
+class TestForexAnalystSelection:
+    def test_technical_only_accepted(self, client):
+        res = client.post("/api/forex/analyze", json={"pair": "EURUSD", "analysts": ["forex_technical"]})
+        assert res.status_code == 200
+        data = res.json()
+        assert data["analysts"] == ["forex_technical"]
+
+    def test_macro_only_accepted(self, client):
+        res = client.post("/api/forex/analyze", json={"pair": "EURUSD", "analysts": ["forex_macro"]})
+        assert res.status_code == 200
+        data = res.json()
+        assert data["analysts"] == ["forex_macro"]
+
+    def test_news_only_accepted(self, client):
+        res = client.post("/api/forex/analyze", json={"pair": "EURUSD", "analysts": ["forex_news"]})
+        assert res.status_code == 200
+        data = res.json()
+        assert data["analysts"] == ["forex_news"]
+
+    def test_technical_and_macro_accepted(self, client):
+        res = client.post("/api/forex/analyze", json={"pair": "EURUSD", "analysts": ["forex_technical", "forex_macro"]})
+        assert res.status_code == 200
+        data = res.json()
+        assert data["analysts"] == ["forex_technical", "forex_macro"]
+
+    def test_all_three_analysts_accepted(self, client):
+        res = client.post(
+            "/api/forex/analyze",
+            json={"pair": "EURUSD", "analysts": ["forex_technical", "forex_macro", "forex_news"]},
+        )
+        assert res.status_code == 200
+        data = res.json()
+        assert data["analysts"] == ["forex_technical", "forex_macro", "forex_news"]
+
+    def test_empty_analysts_rejected(self, client):
+        res = client.post("/api/forex/analyze", json={"pair": "EURUSD", "analysts": []})
+        assert res.status_code == 422
+
+    def test_invalid_analyst_rejected(self, client):
+        res = client.post("/api/forex/analyze", json={"pair": "EURUSD", "analysts": ["unsupported_analyst"]})
+        assert res.status_code == 422
+
+    def test_duplicate_analysts_rejected(self, client):
+        res = client.post(
+            "/api/forex/analyze",
+            json={"pair": "EURUSD", "analysts": ["forex_technical", "forex_technical"]},
+        )
+        assert res.status_code == 422
+
+    def test_risk_engine_remains_mandatory_in_graph(self):
+        from unittest.mock import MagicMock
+
+        from tradingagents.graph.forex_graph import ForexTradingAgentsGraph
+
+        mock_llm = MagicMock()
+        # Test technical only
+        graph_tech = ForexTradingAgentsGraph(
+            selected_analysts=("forex_technical",),
+            quick_thinking_llm=mock_llm,
+            deep_thinking_llm=mock_llm,
+        )
+        assert "Forex Risk Evaluator" in graph_tech.workflow.nodes
+        assert "Forex Trader" in graph_tech.workflow.nodes
+        assert "Research Manager" in graph_tech.workflow.nodes
+        assert "Forex Technical Analyst" in graph_tech.workflow.nodes
+        assert "Forex Macro Analyst" not in graph_tech.workflow.nodes
+        assert "Forex News Analyst" not in graph_tech.workflow.nodes
+
+        # Test macro only
+        graph_macro = ForexTradingAgentsGraph(
+            selected_analysts=("forex_macro",),
+            quick_thinking_llm=mock_llm,
+            deep_thinking_llm=mock_llm,
+        )
+        assert "Forex Risk Evaluator" in graph_macro.workflow.nodes
+        assert "Forex Macro Analyst" in graph_macro.workflow.nodes
+        assert "Forex Technical Analyst" not in graph_macro.workflow.nodes
+
+    def test_backend_selection_reaches_graph_worker(self, monkeypatch, client):
+        from web import forex_routes
+
+        captured_kwargs = {}
+
+        class MockGraph:
+            def __init__(self, **kwargs):
+                captured_kwargs.update(kwargs)
+            def stream(self, *args, **kwargs):
+                return iter([])
+            def get_state(self):
+                return {}
+            def process_signal(self, state):
+                return "NO_TRADE"
+            def get_last_proposal(self):
+                return None
+            def get_last_risk_decision(self):
+                return None
+            def get_last_sizing_result(self):
+                return None
+
+        monkeypatch.setattr(forex_routes, "ForexTradingAgentsGraph", MockGraph)
+        res = client.post(
+            "/api/forex/analyze",
+            json={"pair": "EURUSD", "analysts": ["forex_technical", "forex_news"]},
+        )
+        assert res.status_code == 200
+        # Allow worker thread to invoke Graph
+        import time
+        time.sleep(0.15)
+        assert captured_kwargs.get("selected_analysts") == ("forex_technical", "forex_news")
+
