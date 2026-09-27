@@ -56,6 +56,12 @@ class MT5ConnectionManager:
             except ImportError:
                 self._mt5 = None
 
+    def __repr__(self) -> str:
+        return (
+            f"MT5Connection(login={self.login}, server={self.server!r}, "
+            f"status={self.status.value!r}, password={'***' if self.password else None})"
+        )
+
     @property
     def api(self) -> Any:
         """Return the underlying MetaTrader 5 API module."""
@@ -211,3 +217,7 @@ class MT5ConnectionManager:
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         self.disconnect()
+
+
+# Backward-compatible alias
+MT5Connection = MT5ConnectionManager

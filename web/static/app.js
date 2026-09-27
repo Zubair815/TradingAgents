@@ -11,6 +11,7 @@
   let eventSource = null;
   let currentAssetMode = 'forex'; // 'forex' or 'equities'
   let activePipelineType = 'forex';
+  let inMemoryApiKey = '';
 
   // ---- DOM refs ----
   const $ = (sel) => document.querySelector(sel);
@@ -175,7 +176,7 @@
 
     if (DOM.apiKey) {
       DOM.apiKey.addEventListener('input', () => {
-        localStorage.setItem('tradingagents_api_key', DOM.apiKey.value.trim());
+        inMemoryApiKey = DOM.apiKey.value.trim();
       });
     }
   }
@@ -203,10 +204,11 @@
       populateProviders();
       if (configData.auth_required && DOM.apiKeyGroup) {
         DOM.apiKeyGroup.style.display = 'block';
-        const savedKey = localStorage.getItem('tradingagents_api_key');
-        if (savedKey && DOM.apiKey) {
-          DOM.apiKey.value = savedKey;
-        }
+        // Security hardening: purge any legacy stored secrets from web storage
+        try {
+          localStorage.removeItem('tradingagents_api_key');
+          sessionStorage.removeItem('tradingagents_api_key');
+        } catch (_) {}
       }
       DOM.serverDot.style.background = 'var(--green)';
       DOM.serverStatus.textContent = 'Connected';
@@ -587,7 +589,7 @@
     `;
 
     const headers = { 'Content-Type': 'application/json' };
-    const savedApiKey = (DOM.apiKey ? DOM.apiKey.value.trim() : '') || localStorage.getItem('tradingagents_api_key');
+    const savedApiKey = inMemoryApiKey || (DOM.apiKey ? DOM.apiKey.value.trim() : '');
     if (savedApiKey) headers['X-API-Key'] = savedApiKey;
 
     try {
@@ -646,7 +648,7 @@
     `;
 
     const headers = { 'Content-Type': 'application/json' };
-    const savedApiKey = (DOM.apiKey ? DOM.apiKey.value.trim() : '') || localStorage.getItem('tradingagents_api_key');
+    const savedApiKey = inMemoryApiKey || (DOM.apiKey ? DOM.apiKey.value.trim() : '');
     if (savedApiKey) headers['X-API-Key'] = savedApiKey;
 
     try {

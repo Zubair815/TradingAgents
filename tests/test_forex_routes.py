@@ -1494,4 +1494,48 @@ class TestForexAuthentication:
         assert exc_info.value.status_code == 401
 
 
+class TestCredentialSecurity:
+    """Validate that API keys and broker credentials are never leaked or persisted insecurely."""
+
+    def test_mt5_connect_request_does_not_leak_password_in_repr(self):
+        from web.forex_routes import MT5ConnectRequest
+
+        req = MT5ConnectRequest(login=12345, password="super_secret_broker_password_987", server="DemoServer")
+        req_repr = repr(req)
+        req_str = str(req)
+
+        assert "super_secret_broker_password_987" not in req_repr
+        assert "super_secret_broker_password_987" not in req_str
+
+    def test_mt5_connection_repr_masks_password(self):
+        from tradingagents.mt5.connection import MT5Connection
+
+        conn = MT5Connection(
+            login=999888,
+            password="sensitive_broker_pass_abc",
+            server="LiveBroker",
+            mt5_api=MagicMock(),
+        )
+        conn_repr = repr(conn)
+
+        assert "sensitive_broker_pass_abc" not in conn_repr
+        assert "***" in conn_repr
+
+    def test_frontend_does_not_persist_secrets_in_web_storage(self):
+        from pathlib import Path
+
+        app_js_path = Path(__file__).resolve().parent.parent / "web" / "static" / "app.js"
+        content = app_js_path.read_text(encoding="utf-8")
+
+        # Must NOT write API keys or broker secrets to web storage
+        assert "localStorage.setItem('tradingagents_api_key'" not in content
+        assert "localStorage.setItem(\"tradingagents_api_key\"" not in content
+        assert "sessionStorage.setItem('tradingagents_api_key'" not in content
+        assert "sessionStorage.setItem(\"tradingagents_api_key\"" not in content
+
+        # Must actively purge legacy secrets
+        assert "localStorage.removeItem('tradingagents_api_key')" in content
+
+
+
 

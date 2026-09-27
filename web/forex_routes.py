@@ -292,7 +292,7 @@ class ReconcilePositionsRequest(BaseModel):
 class MT5ConnectRequest(BaseModel):
     path: str | None = Field(default=None, description="Terminal executable path")
     login: int | None = Field(default=None, description="Account login")
-    password: str | None = Field(default=None, description="Broker account password")
+    password: str | None = Field(default=None, repr=False, description="Broker account password")
     server: str | None = Field(default=None, description="Broker server name")
 
 
