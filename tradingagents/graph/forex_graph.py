@@ -286,6 +286,13 @@ def create_forex_portfolio_manager(
                     metadata={"trade_date": curr_date, "pair": pair},
                 )
 
+                # Newer analysis supersedes older unexecuted proposals for the same pair
+                if (
+                    status in (ProposalStatus.APPROVED, ProposalStatus.MODIFIED, ProposalStatus.PROPOSED)
+                    and hasattr(journal, "supersede_proposals")
+                ):
+                    journal.supersede_proposals(pair=pair, exclude_proposal_id=proposal_id)
+
             except Exception as exc:
                 logger.error("Failed auto-logging Forex proposal to journal: %s", exc, exc_info=True)
                 raise

@@ -267,6 +267,10 @@ class ForexTraderProposal(BaseModel):
         default="",
         description="Concise 1–2 sentence executive summary of the trade plan",
     )
+    valid_until: str | None = Field(
+        default=None,
+        description="ISO timestamp UTC until which the trade proposal is valid before expiring",
+    )
 
     @field_validator(
         "entry_price",

@@ -66,7 +66,9 @@ from tradingagents.forex.domain import (
     normalize_forex_pair,
 )
 from tradingagents.forex.pips import pip_size_for
+from tradingagents.journal.lifecycle import LifecycleError, LifecycleTransitionError
 from tradingagents.journal.manager import ForexJournalManager
+from tradingagents.journal.models import LifecycleState
 from tradingagents.learning.manager import ForexLearningManager
 from tradingagents.mt5.errors import MT5Error
 from tradingagents.mt5.observer import MT5Observer
@@ -282,7 +284,8 @@ class PositionSizeRequest(BaseModel):
 
 
 class UpdateProposalStatusRequest(BaseModel):
-    status: str = Field(..., description="New ProposalStatus: APPROVED, REJECTED, CANCELLED, EXPIRED")
+    status: str = Field(..., description="New ProposalStatus or user action: EXECUTED, SKIPPED, WAIT, APPROVED, REJECTED, CANCELLED, EXPIRED")
+    reason: str = Field(default="", description="Optional rationale or context for status transition")
 
 
 class ReconcilePositionsRequest(BaseModel):
@@ -802,23 +805,44 @@ async def update_proposal_status(
     proposal_id: str,
     req: UpdateProposalStatusRequest,
     request: Request,
-    journal: ForexTradeJournal = Depends(get_journal),
+    journal_mgr: ForexJournalManager = Depends(get_journal_manager),
 ):
-    """Update status of a proposal (e.g. APPROVED, REJECTED, CANCELLED, EXPIRED)."""
+    """Update status of a proposal or record user decision (EXECUTED, SKIPPED, WAIT)."""
     verify_forex_auth(request)
+    journal = journal_mgr.journal
+    clean_status = req.status.strip().upper()
+
+    if clean_status in ("EXECUTED", "EXECUTE", "SKIPPED", "SKIP", "WAIT", "WAITING", "WAITING_USER"):
+        try:
+            next_status = journal_mgr.record_user_action(
+                proposal_id=proposal_id,
+                action=clean_status,
+                reason=req.reason,
+            )
+            saved = journal.get_proposal(proposal_id)
+            return {"proposal": _safe_model_dump(saved), "status": next_status.value}
+        except LifecycleTransitionError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except LifecycleError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
     try:
-        new_status = ProposalStatus(req.status.upper())
-        success = journal.update_proposal_status(proposal_id=proposal_id, status=new_status)
-        if not success:
+        new_status = ProposalStatus.from_str(clean_status)
+        existing = journal.get_proposal(proposal_id)
+        if not existing:
             raise HTTPException(status_code=404, detail=f"Proposal {proposal_id} not found")
+        curr_state = LifecycleState(existing.status.value)
+        next_state = LifecycleState(new_status.value)
+        journal_mgr.lifecycle.validate_transition(curr_state, next_state)
+        journal.update_proposal_status(proposal_id=proposal_id, status=new_status)
         saved = journal.get_proposal(proposal_id)
         return {"proposal": _safe_model_dump(saved), "status": new_status.value}
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=f"Invalid status: {req.status}") from exc
+    except (LifecycleTransitionError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid transition/status: {exc}") from exc
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 

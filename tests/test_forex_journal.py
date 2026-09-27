@@ -72,6 +72,7 @@ def make_proposal(
     sl: float = 1.0810,
     tp1: float = 1.0930,
     lots: float = 0.50,
+    reasoning: str = "Strong trend continuation pattern.",
 ) -> ForexTraderProposal:
     return ForexTraderProposal(
         pair=pair,
@@ -87,7 +88,7 @@ def make_proposal(
         suggested_lot_size=lots,
         suggested_risk_percent=1.0,
         confluence_factors=["EMA 20/50 Bullish Cross", "London-NY Overlap"],
-        reasoning="Strong trend continuation pattern.",
+        reasoning=reasoning,
         trade_rationale_summary="Long EURUSD on continuation.",
     )
 
@@ -668,3 +669,180 @@ class TestForexPackageExports:
         manager = fx.ForexJournalManager(db_path=":memory:")
         assert manager is not None
         manager.close()
+
+
+# ---------------------------------------------------------------------------
+# 7. Proposal Lifecycle (Phase 7)
+# ---------------------------------------------------------------------------
+
+
+class TestProposalLifecycleComplete:
+    """Validate full proposal lifecycle states, transitions, expiry, supersession, and immutability."""
+
+    def test_user_actions_executed_skipped_wait(self, memory_journal: ForexTradeJournal):
+        mgr = TradeLifecycleManager(journal=memory_journal)
+
+        # 1. Create and approve a proposal
+        prop = make_proposal("EURUSD", entry=1.0850, sl=1.0810, tp1=1.0930)
+        prop_id = mgr.submit_proposal(prop)
+        decision = ForexRiskDecision(
+            pair="EURUSD",
+            decision=ForexRiskDecisionAction.APPROVE,
+            original_action=ForexAction.LONG,
+            approved_action=ForexAction.LONG,
+            max_risk_percent=1.0,
+            approved_lot_size=0.50,
+            executive_rationale="Approved within risk boundaries.",
+        )
+        mgr.evaluate_risk(prop_id, decision)
+
+        # 2. Action: WAIT -> transitions to WAITING_USER
+        status = mgr.record_user_action(prop_id, action="WAIT", reason="Awaiting London open")
+        assert status == ProposalStatus.WAITING_USER
+        assert memory_journal.get_proposal(prop_id).status == ProposalStatus.WAITING_USER
+
+        # 3. Action: EXECUTED -> records workflow intent/state
+        status_exec = mgr.record_user_action(prop_id, action="EXECUTED", reason="Manual fill confirmed by trader")
+        assert status_exec == ProposalStatus.EXECUTED
+        assert memory_journal.get_proposal(prop_id).status == ProposalStatus.EXECUTED
+
+        # Test SKIPPED action on another proposal
+        prop2 = make_proposal("GBPUSD", entry=1.2650, sl=1.2610, tp1=1.2730)
+        prop2_id = mgr.submit_proposal(prop2)
+        mgr.evaluate_risk(prop2_id, decision)
+
+        status_skip = mgr.record_user_action(prop2_id, action="SKIPPED", reason="News event coming up")
+        assert status_skip == ProposalStatus.SKIPPED
+        assert memory_journal.get_proposal(prop2_id).status == ProposalStatus.SKIPPED
+
+    def test_invalid_lifecycle_transitions_raise(self, memory_journal: ForexTradeJournal):
+        from tradingagents.journal.lifecycle import LifecycleTransitionError
+
+        mgr = TradeLifecycleManager(journal=memory_journal)
+
+        prop = make_proposal("EURUSD", entry=1.0850, sl=1.0810, tp1=1.0930)
+        prop_id = mgr.submit_proposal(prop)
+
+        # PROPOSED cannot jump directly to SETTLED
+        curr_state = LifecycleState(memory_journal.get_proposal(prop_id).status.value)
+        with pytest.raises(LifecycleTransitionError):
+            mgr.validate_transition(curr_state, LifecycleState.SETTLED)
+
+        # Reject proposal
+        decision = ForexRiskDecision(
+            pair="EURUSD",
+            decision=ForexRiskDecisionAction.REJECT,
+            original_action=ForexAction.LONG,
+            approved_action=ForexAction.NO_TRADE,
+            max_risk_percent=0.0,
+            approved_lot_size=0.0,
+            executive_rationale="Spread too wide",
+        )
+        mgr.evaluate_risk(prop_id, decision)
+        rejected_state = LifecycleState(memory_journal.get_proposal(prop_id).status.value)
+
+        # Terminal REJECTED cannot transition to APPROVED or EXECUTED
+        with pytest.raises(LifecycleTransitionError):
+            mgr.validate_transition(rejected_state, LifecycleState.APPROVED)
+        with pytest.raises(LifecycleTransitionError):
+            mgr.validate_transition(rejected_state, LifecycleState.EXECUTED)
+
+    def test_proposal_expiry_from_valid_until(self, memory_journal: ForexTradeJournal):
+        from datetime import datetime, timedelta, timezone
+
+        mgr = TradeLifecycleManager(journal=memory_journal)
+
+        now = datetime.now(timezone.utc)
+        expired_time = (now - timedelta(hours=2)).isoformat()
+        future_time = (now + timedelta(hours=2)).isoformat()
+
+        # Proposal 1: expired validity
+        prop1 = make_proposal("EURUSD", entry=1.0850, sl=1.0810, tp1=1.0930)
+        prop1.valid_until = expired_time
+        p1_id = mgr.submit_proposal(prop1)
+
+        # Proposal 2: still valid
+        prop2 = make_proposal("USDJPY", entry=155.20, sl=154.80, tp1=156.00)
+        prop2.valid_until = future_time
+        p2_id = mgr.submit_proposal(prop2)
+
+        # Check and expire
+        expired_ids = mgr.check_and_expire_proposals(current_time=now)
+
+        assert p1_id in expired_ids
+        assert p2_id not in expired_ids
+        assert memory_journal.get_proposal(p1_id).status == ProposalStatus.EXPIRED
+        assert memory_journal.get_proposal(p2_id).status == ProposalStatus.PROPOSED
+
+    def test_proposal_supersession_for_same_pair(self, memory_journal: ForexTradeJournal):
+        mgr = TradeLifecycleManager(journal=memory_journal)
+
+        decision = ForexRiskDecision(
+            pair="EURUSD",
+            decision=ForexRiskDecisionAction.APPROVE,
+            original_action=ForexAction.LONG,
+            approved_action=ForexAction.LONG,
+            max_risk_percent=1.0,
+            approved_lot_size=0.50,
+            executive_rationale="Approved within risk boundaries.",
+        )
+
+        # Submit first proposal for EURUSD
+        p1 = make_proposal("EURUSD", entry=1.0850, sl=1.0810, tp1=1.0930)
+        p1_id = mgr.submit_proposal(p1)
+        mgr.evaluate_risk(p1_id, decision)
+
+        # Submit proposal for GBPUSD (different pair)
+        p_other = make_proposal("GBPUSD", entry=1.2650, sl=1.2610, tp1=1.2730)
+        p_other_id = mgr.submit_proposal(p_other)
+        mgr.evaluate_risk(p_other_id, decision)
+
+        # Submit second proposal for EURUSD
+        p2 = make_proposal("EURUSD", entry=1.0880, sl=1.0840, tp1=1.0960)
+        p2_id = mgr.submit_proposal(p2)
+        mgr.evaluate_risk(p2_id, decision)
+
+        # Supersede older proposals for EURUSD
+        superseded = memory_journal.supersede_proposals(pair="EURUSD", exclude_proposal_id=p2_id)
+
+        assert p1_id in superseded
+        assert p2_id not in superseded
+        assert p_other_id not in superseded
+
+        assert memory_journal.get_proposal(p1_id).status == ProposalStatus.SUPERSEDED
+        assert memory_journal.get_proposal(p2_id).status == ProposalStatus.APPROVED
+        assert memory_journal.get_proposal(p_other_id).status == ProposalStatus.APPROVED
+
+    def test_proposal_immutability(self, memory_journal: ForexTradeJournal):
+        mgr = TradeLifecycleManager(journal=memory_journal)
+
+        original_prop = make_proposal(
+            "EURUSD",
+            entry=1.0850,
+            sl=1.0810,
+            tp1=1.0930,
+            lots=0.45,
+            reasoning="Original deep reasoning thesis that must never be altered.",
+        )
+        prop_id = mgr.submit_proposal(original_prop)
+
+        # Read original stored record
+        record_before = memory_journal.get_proposal(prop_id)
+        assert record_before.entry_price == 1.0850
+        assert record_before.stop_loss == 1.0810
+        assert record_before.take_profit_1 == 1.0930
+        assert record_before.suggested_lot_size == 0.45
+        assert record_before.reasoning == "Original deep reasoning thesis that must never be altered."
+
+        # Transition status to SUPERSEDED
+        memory_journal.supersede_proposals(pair="EURUSD")
+
+        # Verify status updated, but all quantitative and thesis data remain identical
+        record_after = memory_journal.get_proposal(prop_id)
+        assert record_after.status == ProposalStatus.SUPERSEDED
+        assert record_after.entry_price == 1.0850
+        assert record_after.stop_loss == 1.0810
+        assert record_after.take_profit_1 == 1.0930
+        assert record_after.suggested_lot_size == 0.45
+        assert record_after.reasoning == "Original deep reasoning thesis that must never be altered."
+

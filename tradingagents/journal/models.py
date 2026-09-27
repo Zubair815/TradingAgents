@@ -32,6 +32,11 @@ class EventType(str, Enum):
     PROPOSAL_REJECTED = "PROPOSAL_REJECTED"
     PROPOSAL_MODIFIED = "PROPOSAL_MODIFIED"
     PROPOSAL_EXPIRED = "PROPOSAL_EXPIRED"
+    PROPOSAL_EXECUTED = "PROPOSAL_EXECUTED"
+    PROPOSAL_SKIPPED = "PROPOSAL_SKIPPED"
+    PROPOSAL_WAITING_USER = "PROPOSAL_WAITING_USER"
+    PROPOSAL_INVALIDATED = "PROPOSAL_INVALIDATED"
+    PROPOSAL_SUPERSEDED = "PROPOSAL_SUPERSEDED"
     ORDER_SUBMITTED = "ORDER_SUBMITTED"
     ORDER_FILLED = "ORDER_FILLED"
     POSITION_OPENED = "POSITION_OPENED"
@@ -58,24 +63,35 @@ class EventType(str, Enum):
 class LifecycleState(str, Enum):
     """Valid states in the deterministic trade lifecycle state machine."""
 
+    CREATED = "CREATED"
     PROPOSED = "PROPOSED"
     APPROVED = "APPROVED"
-    REJECTED = "REJECTED"
     MODIFIED = "MODIFIED"
+    REJECTED = "REJECTED"
+    RISK_REJECTED = "RISK_REJECTED"
+    WAITING_USER = "WAITING_USER"
+    EXECUTED = "EXECUTED"
+    SKIPPED = "SKIPPED"
+    EXPIRED = "EXPIRED"
+    INVALIDATED = "INVALIDATED"
+    SUPERSEDED = "SUPERSEDED"
     PENDING_FILL = "PENDING_FILL"
     ACTIVE_POSITION = "ACTIVE_POSITION"
     PARTIALLY_CLOSED = "PARTIALLY_CLOSED"
     SETTLED = "SETTLED"
     CANCELLED = "CANCELLED"
-    EXPIRED = "EXPIRED"
 
     @property
     def is_terminal(self) -> bool:
         return self in (
             LifecycleState.SETTLED,
             LifecycleState.REJECTED,
+            LifecycleState.RISK_REJECTED,
             LifecycleState.CANCELLED,
             LifecycleState.EXPIRED,
+            LifecycleState.SKIPPED,
+            LifecycleState.INVALIDATED,
+            LifecycleState.SUPERSEDED,
         )
 
 

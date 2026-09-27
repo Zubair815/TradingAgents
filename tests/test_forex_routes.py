@@ -315,6 +315,37 @@ class TestProposalRoutes:
         assert status_res.status_code == 200
         assert status_res.json()["status"] == "APPROVED"
 
+    def test_update_proposal_status_user_actions_and_transitions(self, client):
+        prop_res = client.post(
+            "/api/forex/proposals",
+            json={
+                "pair": "EURUSD",
+                "action": "LONG",
+                "entry_price": 1.0850,
+                "stop_loss": 1.0810,
+                "take_profit": 1.0930,
+            },
+        )
+        prop_id = prop_res.json()["proposal_id"]
+
+        # Approve proposal
+        res_app = client.post(f"/api/forex/proposals/{prop_id}/status", json={"status": "APPROVED"})
+        assert res_app.status_code == 200
+
+        # User action: WAIT
+        res_wait = client.post(f"/api/forex/proposals/{prop_id}/status", json={"status": "WAIT", "reason": "Holding for NY"})
+        assert res_wait.status_code == 200
+        assert res_wait.json()["status"] == "WAITING_USER"
+
+        # User action: EXECUTED
+        res_exec = client.post(f"/api/forex/proposals/{prop_id}/status", json={"status": "EXECUTED", "reason": "Executed in MT5 manually"})
+        assert res_exec.status_code == 200
+        assert res_exec.json()["status"] == "EXECUTED"
+
+        # Illegal transition from terminal state EXECUTED to APPROVED returns 400
+        res_illegal = client.post(f"/api/forex/proposals/{prop_id}/status", json={"status": "APPROVED"})
+        assert res_illegal.status_code == 400
+
     def test_evaluate_risk_endpoint(self, client):
         eval_payload = {
             "proposal": {

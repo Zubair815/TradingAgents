@@ -25,6 +25,7 @@ from tradingagents.journal.analytics import PostTradeAnalytics
 from tradingagents.journal.lifecycle import TradeLifecycleManager
 from tradingagents.journal.matching import ProposalMatcher
 from tradingagents.journal.models import (
+    EventType,
     MatchResult,
     PerformanceReport,
     TradeEvent,
@@ -81,6 +82,55 @@ class ForexJournalManager:
         return self.lifecycle.evaluate_risk(
             proposal_id=proposal_id, risk_decision=risk_decision, actor=actor
         )
+
+    def record_user_action(
+        self,
+        proposal_id: str,
+        action: str,
+        actor: str = "User",
+        reason: str = "",
+    ) -> ProposalStatus:
+        """Record human user decision on a proposal (EXECUTED, SKIPPED, WAIT)."""
+        return self.lifecycle.record_user_action(
+            proposal_id=proposal_id, action=action, actor=actor, reason=reason
+        )
+
+    def expire_proposal(
+        self,
+        proposal_id: str,
+        reason: str = "Validity window expired",
+        actor: str = "System",
+    ) -> None:
+        """Expire a proposal that was not executed within its window."""
+        self.lifecycle.expire_proposal(proposal_id=proposal_id, reason=reason, actor=actor)
+
+    def check_and_expire_proposals(
+        self,
+        current_time: datetime | None = None,
+    ) -> list[str]:
+        """Check all active proposals and expire those past their valid_until timestamp."""
+        return self.lifecycle.check_and_expire_proposals(current_time=current_time)
+
+    def supersede_proposals(
+        self,
+        pair: str,
+        new_proposal_id: str | None = None,
+        reason: str = "Superseded by newer analysis",
+        actor: str = "System",
+    ) -> list[str]:
+        """Supersede active proposals for a pair when a new proposal is created."""
+        older_ids = self.journal.supersede_proposals(
+            pair=pair, exclude_proposal_id=new_proposal_id
+        )
+        for pid in older_ids:
+            self.timeline.record_event(
+                event_type=EventType.PROPOSAL_SUPERSEDED,
+                proposal_id=pid,
+                actor=actor,
+                description=f"Proposal superseded: {reason}",
+                payload={"superseded_by": new_proposal_id, "reason": reason},
+            )
+        return older_ids
 
     def open_trade(
         self,

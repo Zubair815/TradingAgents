@@ -269,6 +269,56 @@ class ForexTradeJournal:
                 if should_close:
                     conn.close()
 
+    def supersede_proposals(
+        self,
+        pair: str,
+        exclude_proposal_id: str | None = None,
+    ) -> list[str]:
+        """Mark unfulfilled active proposals for a pair as SUPERSEDED.
+
+        Original proposal evidence and records remain strictly immutable.
+        """
+        norm_pair = pair.replace("/", "").strip().upper()
+        active_statuses = (
+            ProposalStatus.PROPOSED.value,
+            ProposalStatus.APPROVED.value,
+            ProposalStatus.MODIFIED.value,
+            ProposalStatus.WAITING_USER.value,
+        )
+        with self._lock:
+            conn = self._get_connection()
+            should_close = conn != self._mem_conn
+            try:
+                with conn:
+                    query = f"""
+                        SELECT proposal_id FROM proposals
+                        WHERE pair = ? AND status IN ({','.join('?' for _ in active_statuses)})
+                    """
+                    params: list[Any] = [norm_pair, *active_statuses]
+                    if exclude_proposal_id:
+                        query += " AND proposal_id != ?"
+                        params.append(exclude_proposal_id)
+
+                    cursor = conn.execute(query, tuple(params))
+                    rows = cursor.fetchall()
+                    superseded_ids = [
+                        r[0] if isinstance(r, (tuple, list)) else r["proposal_id"]
+                        for r in rows
+                    ]
+                    if superseded_ids:
+                        update_query = f"""
+                            UPDATE proposals SET status = ?
+                            WHERE proposal_id IN ({','.join('?' for _ in superseded_ids)})
+                        """
+                        conn.execute(
+                            update_query,
+                            (ProposalStatus.SUPERSEDED.value, *superseded_ids),
+                        )
+                return superseded_ids
+            finally:
+                if should_close:
+                    conn.close()
+
     def list_proposals(
         self,
         pair: str | None = None,
