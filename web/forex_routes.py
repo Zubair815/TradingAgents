@@ -1035,7 +1035,15 @@ def _run_forex_analysis(run_id: str, req: ForexAnalysisRequest) -> None:
 
         seen_stages: set[str] = set()
 
-        for chunk in graph.stream(req.pair, trade_date=req.date):
+        exec_tf = req.execution_timeframe or req.timeframe or "H1"
+        ctx_tfs = req.context_timeframes or req.higher_timeframes or ("H4", "D1")
+
+        for chunk in graph.stream(
+            req.pair,
+            trade_date=req.date,
+            execution_timeframe=exec_tf,
+            context_timeframes=ctx_tfs,
+        ):
             if not isinstance(chunk, dict):
                 continue
 
@@ -1150,7 +1158,9 @@ def _run_forex_analysis(run_id: str, req: ForexAnalysisRequest) -> None:
         report_payload = {
             "run_id": run_id,
             "pair": req.pair,
-            "timeframe": req.timeframe,
+            "timeframe": exec_tf,
+            "execution_timeframe": exec_tf,
+            "context_timeframes": list(ctx_tfs),
             "analysts": list(req.analysts),
             "date": req.date,
             "signal": signal,
@@ -1236,6 +1246,10 @@ async def start_forex_analysis(
     if invalid:
         raise HTTPException(status_code=422, detail=f"Unsupported analyst(s): {sorted(invalid)}")
 
+    exec_tf = req.execution_timeframe or req.timeframe or "H1"
+    ctx_tfs = req.context_timeframes or req.higher_timeframes or ("H4", "D1")
+    ctx_tfs_list = list(ctx_tfs)
+
     run_id = f"fx_{uuid.uuid4().hex[:10]}"
     now_iso = datetime.now(timezone.utc).isoformat()
     run_entry = {
@@ -1243,7 +1257,9 @@ async def start_forex_analysis(
         "run_type": "forex",
         "asset_type": "forex",
         "pair": req.pair,
-        "timeframe": req.timeframe,
+        "timeframe": exec_tf,
+        "execution_timeframe": exec_tf,
+        "context_timeframes": ctx_tfs_list,
         "date": req.date,
         "analysts": list(req.analysts),
         "status": "queued",
@@ -1276,7 +1292,9 @@ async def start_forex_analysis(
         "run_id": run_id,
         "status": "queued",
         "pair": req.pair,
-        "timeframe": req.timeframe,
+        "timeframe": exec_tf,
+        "execution_timeframe": exec_tf,
+        "context_timeframes": ctx_tfs_list,
         "analysts": list(req.analysts),
         "run_type": "forex",
         "asset_type": "forex",

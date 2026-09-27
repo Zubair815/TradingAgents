@@ -1148,6 +1148,120 @@ class TestForexAnalystSelection:
         assert res.status_code == 200
         # Allow worker thread to invoke Graph
         import time
+
         time.sleep(0.15)
         assert captured_kwargs.get("selected_analysts") == ("forex_technical", "forex_news")
+
+
+# ---------------------------------------------------------------------------
+# 9. Forex Timeframe First-Class Tests (Phase 2)
+# ---------------------------------------------------------------------------
+
+class TestForexTimeframeFirstClass:
+    @pytest.mark.parametrize("tf", ["M5", "M15", "H1", "H4"])
+    def test_api_accepts_execution_timeframe_and_applies_defaults(self, client, tf):
+        from tradingagents.forex.domain import get_default_context_timeframes
+
+        expected_ctx = [c.value for c in get_default_context_timeframes(tf)]
+        res = client.post(
+            "/api/forex/analyze",
+            json={"pair": "EURUSD", "execution_timeframe": tf},
+        )
+        assert res.status_code == 200
+        data = res.json()
+        assert data["execution_timeframe"] == tf
+        assert data["timeframe"] == tf
+        assert data["context_timeframes"] == expected_ctx
+
+    def test_api_accepts_custom_context_timeframes(self, client):
+        res = client.post(
+            "/api/forex/analyze",
+            json={
+                "pair": "EURUSD",
+                "execution_timeframe": "M15",
+                "context_timeframes": ["H1", "D1"],
+            },
+        )
+        assert res.status_code == 200
+        data = res.json()
+        assert data["execution_timeframe"] == "M15"
+        assert data["context_timeframes"] == ["H1", "D1"]
+
+    def test_backward_compatibility_timeframe_key(self, client):
+        res = client.post(
+            "/api/forex/analyze",
+            json={"pair": "GBPUSD", "timeframe": "M5"},
+        )
+        assert res.status_code == 200
+        data = res.json()
+        assert data["execution_timeframe"] == "M5"
+        assert data["timeframe"] == "M5"
+        assert "M15" in data["context_timeframes"]
+
+    def test_invalid_timeframe_rejected(self, client):
+        res = client.post(
+            "/api/forex/analyze",
+            json={"pair": "EURUSD", "execution_timeframe": "INVALID_TF"},
+        )
+        assert res.status_code == 422
+
+    @pytest.mark.parametrize("tf", ["M5", "M15", "H1", "H4"])
+    def test_graph_state_and_proposal_preserves_execution_timeframe(self, tf):
+        from unittest.mock import MagicMock
+
+        from tradingagents.database.journal import ForexTradeJournal
+        from tradingagents.forex.domain import get_default_context_timeframes
+        from tradingagents.graph.forex_graph import (
+            ForexTradingAgentsGraph,
+            create_forex_portfolio_manager,
+            create_forex_risk_evaluator,
+        )
+
+        mock_llm = MagicMock()
+        with ForexTradeJournal(":memory:") as journal:
+            graph = ForexTradingAgentsGraph(
+                selected_analysts=("forex_technical",),
+                quick_thinking_llm=mock_llm,
+                deep_thinking_llm=mock_llm,
+                journal=journal,
+            )
+            state = graph.create_run_state("EURUSD", execution_timeframe=tf)
+            assert state["forex_execution_timeframe"] == tf
+            assert state["timeframe"] == tf
+            expected_ctx = [c.value for c in get_default_context_timeframes(tf)]
+            assert state["forex_context_timeframes"] == expected_ctx
+            assert f"({tf})" in state["instrument_context"]
+
+            # Verify evaluator and portfolio manager preserve timeframe into proposal and journal
+            evaluator = create_forex_risk_evaluator(
+                risk_engine=graph.risk_engine,
+                sizing_engine=graph.sizing_engine,
+                risk_limits=graph.risk_limits,
+                sizing_account=graph.sizing_account,
+                sizing_constraints=graph.sizing_constraints,
+                sizing_method=graph.sizing_method,
+            )
+            raw_proposal = {
+                "pair": "EURUSD",
+                "action": "LONG",
+                "order_type": "MARKET",
+                "setup_type": "TREND_CONTINUATION",
+                "timeframe": "H1",  # simulate misaligned model proposal
+                "entry_price": 1.0850,
+                "stop_loss": 1.0800,
+                "take_profit_1": 1.0950,
+                "suggested_risk_percent": 1.0,
+            }
+            state["forex_proposal"] = raw_proposal
+            eval_res = evaluator(state)
+            assert eval_res["forex_proposal"]["timeframe"] == tf
+
+            state.update(eval_res)
+            manager = create_forex_portfolio_manager(journal=journal)
+            mgr_res = manager(state)
+            proposal_id = mgr_res["forex_proposal_id"]
+            assert proposal_id is not None
+            saved = journal.get_proposal(proposal_id)
+            assert saved.timeframe == tf
+
 

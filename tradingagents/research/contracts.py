@@ -8,10 +8,10 @@ their calculations or introducing competing persistence stores.
 import json
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Literal
+from typing import Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 def new_id(prefix: str) -> str:
@@ -41,6 +41,8 @@ class Record(BaseModel):
 class AnalysisRequest(Record):
     pair: str = "EURUSD"
     timeframe: str = "H1"
+    execution_timeframe: str | None = None
+    context_timeframes: tuple[str, ...] | None = None
     date: str | None = None
     analysts: list[str] = Field(default_factory=lambda: ["forex_technical", "forex_macro", "forex_news"])
     provider: str | None = None
@@ -53,6 +55,30 @@ class AnalysisRequest(Record):
     session: str | None = None
     requirements: tuple[str, ...] = ()
 
+    @model_validator(mode="before")
+    @classmethod
+    def sync_timeframes(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            from tradingagents.forex.domain import Timeframe, get_default_context_timeframes
+
+            exec_tf = data.get("execution_timeframe") or data.get("timeframe") or "H1"
+            norm_exec_tf = Timeframe.from_string(exec_tf).value
+            data["execution_timeframe"] = norm_exec_tf
+            data["timeframe"] = norm_exec_tf
+
+            ctx_tfs = data.get("context_timeframes")
+            if ctx_tfs is None:
+                ctx_tfs = data.get("higher_timeframes")
+            if ctx_tfs is None:
+                ctx_tfs = tuple(tf.value for tf in get_default_context_timeframes(norm_exec_tf))
+            else:
+                ctx_tfs = tuple(Timeframe.from_string(t).value for t in ctx_tfs)
+                if len(set(ctx_tfs)) != len(ctx_tfs):
+                    raise ValueError("Higher timeframes must be distinct")
+            data["context_timeframes"] = ctx_tfs
+            data["higher_timeframes"] = ctx_tfs
+        return data
+
     @field_validator("pair")
     @classmethod
     def valid_pair(cls, value):
@@ -62,16 +88,21 @@ class AnalysisRequest(Record):
             raise ValueError("Unknown Forex pair")
         return pair.symbol
 
-    @field_validator("timeframe")
+    @field_validator("timeframe", "execution_timeframe")
     @classmethod
     def valid_timeframe(cls, value):
+        if value is None:
+            return None
         from tradingagents.forex.domain import Timeframe
         return Timeframe.from_string(value).value
 
-    @field_validator("higher_timeframes")
+    @field_validator("higher_timeframes", "context_timeframes")
     @classmethod
     def valid_higher_timeframes(cls, values):
-        normalized = tuple(cls.valid_timeframe(v) for v in values)
+        if values is None:
+            return None
+        from tradingagents.forex.domain import Timeframe
+        normalized = tuple(Timeframe.from_string(v).value for v in values)
         if len(set(normalized)) != len(normalized):
             raise ValueError("Higher timeframes must be distinct")
         return normalized

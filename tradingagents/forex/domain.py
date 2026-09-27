@@ -148,6 +148,22 @@ class Timeframe(str, Enum):
         )
 
 
+DEFAULT_CONTEXT_TIMEFRAMES: dict[Timeframe, tuple[Timeframe, ...]] = {
+    Timeframe.M1:  (Timeframe.M5, Timeframe.M15, Timeframe.H1),
+    Timeframe.M5:  (Timeframe.M15, Timeframe.H1, Timeframe.H4),
+    Timeframe.M15: (Timeframe.H1, Timeframe.H4, Timeframe.D1),
+    Timeframe.M30: (Timeframe.H1, Timeframe.H4, Timeframe.D1),
+    Timeframe.H1:  (Timeframe.H4, Timeframe.D1),
+    Timeframe.H4:  (Timeframe.D1, Timeframe.W1),
+    Timeframe.D1:  (Timeframe.W1,),
+    Timeframe.W1:  (Timeframe.D1,),
+}
+
+
+def get_default_context_timeframes(execution_tf: Timeframe | str) -> tuple[Timeframe, ...]:
+    """Retrieve canonical default context timeframes for a given execution timeframe."""
+    tf = Timeframe.from_string(execution_tf) if isinstance(execution_tf, str) else execution_tf
+    return DEFAULT_CONTEXT_TIMEFRAMES.get(tf, (Timeframe.H1, Timeframe.H4, Timeframe.D1))
 
 
 # ---------------------------------------------------------------------------

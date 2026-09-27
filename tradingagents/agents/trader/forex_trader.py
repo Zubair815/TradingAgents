@@ -35,7 +35,11 @@ from tradingagents.forex.domain import normalize_forex_pair
 logger = logging.getLogger(__name__)
 
 
-def parse_forex_proposal_from_text(text: str, pair: str) -> ForexTraderProposal:
+def parse_forex_proposal_from_text(
+    text: str,
+    pair: str,
+    default_timeframe: str = "H1",
+) -> ForexTraderProposal:
     """Parse or heuristically extract a ForexTraderProposal from unstructured or JSON text.
 
     Ensures risk safety by defaulting to ``NO_TRADE`` if text cannot be safely
@@ -46,6 +50,7 @@ def parse_forex_proposal_from_text(text: str, pair: str) -> ForexTraderProposal:
         return ForexTraderProposal(
             pair=canon_pair,
             action=ForexAction.NO_TRADE,
+            timeframe=default_timeframe,
             reasoning="Empty proposal text returned by model.",
             trade_rationale_summary="NO_TRADE: Empty model response.",
         )
@@ -74,7 +79,11 @@ def parse_forex_proposal_from_text(text: str, pair: str) -> ForexTraderProposal:
             data = json.loads(json_candidate)
             if isinstance(data, dict):
                 data.setdefault("pair", canon_pair)
-                return ForexTraderProposal.model_validate(data)
+                data.setdefault("timeframe", default_timeframe)
+                p = ForexTraderProposal.model_validate(data)
+                if default_timeframe and p.timeframe != default_timeframe:
+                    p = p.model_copy(update={"timeframe": default_timeframe})
+                return p
         except Exception as exc:
             logger.debug("JSON extraction failed for proposal: %s", exc)
 
@@ -154,7 +163,7 @@ def parse_forex_proposal_from_text(text: str, pair: str) -> ForexTraderProposal:
             action=action,
             order_type=OrderType.MARKET,
             setup_type=SetupType.TREND_CONTINUATION,
-            timeframe="H1",
+            timeframe=default_timeframe,
             entry_price=entry_price,
             stop_loss=stop_loss,
             take_profit_1=take_profit_1,
@@ -254,11 +263,18 @@ def create_forex_trader(llm: Any):
                     exc,
                 )
 
+        selected_tf = state.get("forex_execution_timeframe") or state.get("timeframe") or "H1"
+        if hasattr(selected_tf, "value"):
+            selected_tf = selected_tf.value
+
         if proposal is None:
             # Fallback to plain LLM invocation and robust text parser
             raw_resp = llm.invoke(messages)
             content = getattr(raw_resp, "content", str(raw_resp))
-            proposal = parse_forex_proposal_from_text(content, pair)
+            proposal = parse_forex_proposal_from_text(content, pair, default_timeframe=selected_tf)
+
+        if proposal is not None and selected_tf and proposal.timeframe != selected_tf:
+            proposal = proposal.model_copy(update={"timeframe": selected_tf})
 
         # Render institutional markdown proposal
         rendered_plan = render_forex_trader_proposal(proposal)

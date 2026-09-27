@@ -63,7 +63,11 @@ from tradingagents.dataflows.config import build_config, config_scope
 from tradingagents.dataflows.forex_context import prepare_live_forex_context
 from tradingagents.dataflows.utils import safe_ticker_component
 from tradingagents.forex.calendar import _calendar_cutoff
-from tradingagents.forex.domain import normalize_forex_pair
+from tradingagents.forex.domain import (
+    Timeframe,
+    get_default_context_timeframes,
+    normalize_forex_pair,
+)
 from tradingagents.graph.analyst_execution import build_analyst_execution_plan
 from tradingagents.graph.conditional_logic import ConditionalLogic
 from tradingagents.graph.propagation import Propagator
@@ -115,6 +119,10 @@ def create_forex_risk_evaluator(
         curr_date = state.get("trade_date")
 
         # 1. Retrieve or reconstruct proposal
+        selected_tf = state.get("forex_execution_timeframe") or state.get("timeframe") or "H1"
+        if hasattr(selected_tf, "value"):
+            selected_tf = selected_tf.value
+
         proposal: ForexTraderProposal | None = None
         raw_proposal = state.get("forex_proposal")
         if raw_proposal and isinstance(raw_proposal, dict):
@@ -125,7 +133,10 @@ def create_forex_risk_evaluator(
 
         if proposal is None:
             raw_text = state.get("trader_investment_plan", "")
-            proposal = parse_forex_proposal_from_text(raw_text, pair)
+            proposal = parse_forex_proposal_from_text(raw_text, pair, default_timeframe=selected_tf)
+
+        if proposal is not None and selected_tf and proposal.timeframe != selected_tf:
+            proposal = proposal.model_copy(update={"timeframe": selected_tf})
 
         # 2. Deterministic Risk Limits Validation
         risk_decision: ForexRiskDecision = engine.validate_proposal(
@@ -174,6 +185,7 @@ def create_forex_risk_evaluator(
 
         return {
             "messages": [AIMessage(content=rendered_decision)],
+            "forex_proposal": proposal.model_dump() if proposal else None,
             "forex_risk_decision": risk_decision.model_dump(),
             "final_trade_decision": rendered_decision,
             "sender": name,
@@ -213,6 +225,9 @@ def create_forex_portfolio_manager(
 
         raw_decision = state.get("forex_risk_decision")
         raw_proposal = state.get("forex_proposal")
+        selected_tf = state.get("forex_execution_timeframe") or state.get("timeframe") or "H1"
+        if hasattr(selected_tf, "value"):
+            selected_tf = selected_tf.value
 
         proposal: ForexTraderProposal | None = None
         decision: ForexRiskDecision | None = None
@@ -221,7 +236,10 @@ def create_forex_portfolio_manager(
             with contextlib.suppress(Exception):
                 proposal = ForexTraderProposal.model_validate(raw_proposal)
         if proposal is None:
-            proposal = parse_forex_proposal_from_text(state.get("trader_investment_plan", ""), pair)
+            proposal = parse_forex_proposal_from_text(state.get("trader_investment_plan", ""), pair, default_timeframe=selected_tf)
+
+        if proposal is not None and selected_tf and proposal.timeframe != selected_tf:
+            proposal = proposal.model_copy(update={"timeframe": selected_tf})
 
         if raw_decision and isinstance(raw_decision, dict):
             with contextlib.suppress(Exception):
@@ -597,7 +615,14 @@ class ForexTradingAgentsGraph:
 
 
     def create_run_state(
-        self, pair: str, trade_date: str | None = None, asset_type: str | Any = "forex", portfolio=None
+        self,
+        pair: str,
+        trade_date: str | None = None,
+        asset_type: str | Any = "forex",
+        portfolio=None,
+        execution_timeframe: str | Timeframe | None = None,
+        context_timeframes: Sequence[str | Timeframe] | None = None,
+        timeframe: str | Timeframe | None = None,
     ) -> dict[str, Any]:
         """Build the initial StateGraph input dictionary."""
         if portfolio is None and not isinstance(asset_type, str):
@@ -607,15 +632,31 @@ class ForexTradingAgentsGraph:
         cutoff = _calendar_cutoff(trade_date) if trade_date else datetime.now(timezone.utc)
         t_date = cutoff.date().isoformat()
 
+        raw_exec_tf = execution_timeframe or timeframe or "H1"
+        exec_tf = Timeframe.from_string(raw_exec_tf) if isinstance(raw_exec_tf, str) else raw_exec_tf
+        exec_tf_str = exec_tf.value
+
+        if context_timeframes is not None:
+            ctx_tfs = tuple(
+                Timeframe.from_string(t) if isinstance(t, str) else t for t in context_timeframes
+            )
+        else:
+            ctx_tfs = get_default_context_timeframes(exec_tf)
+        ctx_tf_strs = [t.value for t in ctx_tfs]
+
         init_state = self.propagator.create_initial_state(
             company_name=canon_pair,
             trade_date=t_date,
             asset_type="forex",
             past_context="",
-            instrument_context=f"Instrument: {canon_pair} (Forex Major/Cross) | Date: {t_date}",
+            instrument_context=f"Instrument: {canon_pair} ({exec_tf_str}) | Context: {', '.join(ctx_tf_strs)} | Date: {t_date}",
             portfolio_context=portfolio.render(canon_pair) if portfolio is not None else "",
         )
         init_state["forex_as_of_utc"] = cutoff.isoformat()
+        init_state["forex_execution_timeframe"] = exec_tf_str
+        init_state["forex_context_timeframes"] = ctx_tf_strs
+        init_state["timeframe"] = exec_tf_str
+        init_state["higher_timeframes"] = ctx_tf_strs
         init_state["forex_proposal_id"] = None
         init_state["forex_proposal"] = None
         init_state["forex_risk_decision"] = None
@@ -627,6 +668,9 @@ class ForexTradingAgentsGraph:
         trade_date: str | None = None,
         portfolio=None,
         thread_id: str | None = None,
+        execution_timeframe: str | Timeframe | None = None,
+        context_timeframes: Sequence[str | Timeframe] | None = None,
+        timeframe: str | Timeframe | None = None,
     ) -> tuple[dict[str, Any], str]:
         """Synchronously execute the Forex trading agents graph.
 
@@ -634,7 +678,15 @@ class ForexTradingAgentsGraph:
             tuple[dict[str, Any], str]: (final_state, signal) where signal is
             one of 'LONG', 'SHORT', 'NO_TRADE', 'REJECT', 'MODIFY'.
         """
-        return self.propagate(pair=pair, trade_date=trade_date, portfolio=portfolio, thread_id=thread_id)
+        return self.propagate(
+            pair=pair,
+            trade_date=trade_date,
+            portfolio=portfolio,
+            thread_id=thread_id,
+            execution_timeframe=execution_timeframe,
+            context_timeframes=context_timeframes,
+            timeframe=timeframe,
+        )
 
     def propagate(
         self,
@@ -642,6 +694,9 @@ class ForexTradingAgentsGraph:
         trade_date: str | None = None,
         portfolio=None,
         thread_id: str | None = None,
+        execution_timeframe: str | Timeframe | None = None,
+        context_timeframes: Sequence[str | Timeframe] | None = None,
+        timeframe: str | Timeframe | None = None,
     ) -> tuple[dict[str, Any], str]:
         """Execute the graph and return the final state and signal verdict."""
         canon_pair = normalize_forex_pair(pair)
@@ -649,7 +704,14 @@ class ForexTradingAgentsGraph:
         with config_scope(self.config):
             resolved_date = str(trade_date) if trade_date else prepare_live_forex_context(canon_pair)
 
-        init_state = self.create_run_state(canon_pair, resolved_date, portfolio=portfolio)
+        init_state = self.create_run_state(
+            canon_pair,
+            resolved_date,
+            portfolio=portfolio,
+            execution_timeframe=execution_timeframe,
+            context_timeframes=context_timeframes,
+            timeframe=timeframe,
+        )
         args = self.propagator.get_graph_args()
 
         if thread_id is not None:
@@ -672,6 +734,9 @@ class ForexTradingAgentsGraph:
         trade_date: str | None = None,
         portfolio=None,
         thread_id: str | None = None,
+        execution_timeframe: str | Timeframe | None = None,
+        context_timeframes: Sequence[str | Timeframe] | None = None,
+        timeframe: str | Timeframe | None = None,
     ) -> Iterator[dict[str, Any]]:
         """Stream per-node state chunks from the graph."""
         canon_pair = normalize_forex_pair(pair)
@@ -679,7 +744,14 @@ class ForexTradingAgentsGraph:
         with config_scope(self.config):
             resolved_date = str(trade_date) if trade_date else prepare_live_forex_context(canon_pair)
 
-        init_state = self.create_run_state(canon_pair, resolved_date, portfolio=portfolio)
+        init_state = self.create_run_state(
+            canon_pair,
+            resolved_date,
+            portfolio=portfolio,
+            execution_timeframe=execution_timeframe,
+            context_timeframes=context_timeframes,
+            timeframe=timeframe,
+        )
         args = self.propagator.get_graph_args()
 
         if thread_id is not None:
@@ -729,15 +801,28 @@ class ForexTradingAgentsGraph:
         """Return the parsed ForexTraderProposal from the most recent run."""
         if not self.curr_state:
             return None
+        selected_tf = (
+            self.curr_state.get("forex_execution_timeframe")
+            or self.curr_state.get("timeframe")
+        )
+        if hasattr(selected_tf, "value"):
+            selected_tf = selected_tf.value
+
         raw = self.curr_state.get("forex_proposal")
         if raw and isinstance(raw, dict):
             try:
-                return ForexTraderProposal.model_validate(raw)
+                p = ForexTraderProposal.model_validate(raw)
+                if selected_tf and p.timeframe != selected_tf:
+                    p = p.model_copy(update={"timeframe": selected_tf})
+                return p
             except Exception:
                 pass
         raw_text = self.curr_state.get("trader_investment_plan", "")
         if raw_text and self.pair:
-            return parse_forex_proposal_from_text(raw_text, self.pair)
+            p = parse_forex_proposal_from_text(raw_text, self.pair, default_timeframe=selected_tf or "H1")
+            if selected_tf and p.timeframe != selected_tf:
+                p = p.model_copy(update={"timeframe": selected_tf})
+            return p
         return None
 
     def get_last_risk_decision(self) -> ForexRiskDecision | None:

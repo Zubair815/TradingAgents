@@ -523,6 +523,7 @@
 
     const payload = {
       pair: pair,
+      execution_timeframe: timeframe,
       timeframe: timeframe,
       account_balance: balance,
       risk_percent: riskPct,
