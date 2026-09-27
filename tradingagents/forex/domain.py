@@ -21,8 +21,6 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional
-
 
 # ---------------------------------------------------------------------------
 # AssetType — replaces ad-hoc "stock" / "crypto" string literals
@@ -39,7 +37,7 @@ class AssetType(str, Enum):
     FOREX = "forex"
 
     @classmethod
-    def from_string(cls, value: str) -> "AssetType":
+    def from_string(cls, value: str) -> AssetType:
         """Parse case-insensitive string → AssetType.  Raises ValueError if unknown."""
         normalised = (value or "").strip().lower()
         for member in cls:
@@ -138,7 +136,7 @@ class Timeframe(str, Enum):
         return self.seconds < 86400
 
     @classmethod
-    def from_string(cls, value: str) -> "Timeframe":
+    def from_string(cls, value: str) -> Timeframe:
         """Parse case-insensitive string → Timeframe."""
         normalised = (value or "").strip().upper()
         for member in cls:
@@ -387,7 +385,7 @@ def strip_broker_suffix_simple(symbol: str) -> str:
     return m.group(1) if m else s
 
 
-def get_forex_pair(symbol: str) -> Optional[ForexPair]:
+def get_forex_pair(symbol: str) -> ForexPair | None:
     """Look up a :class:`ForexPair` from the built-in catalogue.
 
     Accepts canonical (``EURUSD``), broker (``EURUSDm``), or Yahoo

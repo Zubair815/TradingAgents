@@ -9,7 +9,6 @@ Phase 1 acceptance criteria verified:
 ✓ ForexSymbolMap.register() and resolve() work correctly
 """
 
-import pytest
 
 from tradingagents.forex.symbols import (
     DEFAULT_SYMBOL_MAP,
@@ -19,7 +18,6 @@ from tradingagents.forex.symbols import (
     canonical_to_yahoo,
     strip_broker_suffix,
 )
-
 
 # ---------------------------------------------------------------------------
 # DEFAULT_SYMBOL_MAP lookups

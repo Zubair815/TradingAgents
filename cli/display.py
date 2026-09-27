@@ -33,6 +33,9 @@ class MessageBuffer:
         "social": "Sentiment Analyst",
         "news": "News Analyst",
         "fundamentals": "Fundamentals Analyst",
+        "forex_technical": "Forex Technical Analyst",
+        "forex_macro": "Currency Macro Analyst",
+        "forex_news": "Forex News Analyst",
     }
 
     # Report section mapping: section -> (analyst_key for filtering, finalizing_agent)
@@ -41,6 +44,9 @@ class MessageBuffer:
         "sentiment_report": ("social", "Sentiment Analyst"),
         "news_report": ("news", "News Analyst"),
         "fundamentals_report": ("fundamentals", "Fundamentals Analyst"),
+        "forex_technical_report": ("forex_technical", "Forex Technical Analyst"),
+        "forex_macro_report": ("forex_macro", "Currency Macro Analyst"),
+        "forex_news_report": ("forex_news", "Forex News Analyst"),
         "investment_plan": (None, "Research Manager"),
         "trader_investment_plan": (None, "Trader"),
         "final_trade_decision": (None, "Portfolio Manager"),
@@ -142,10 +148,21 @@ class MessageBuffer:
     def _update_final_report(self):
         report_parts = []
 
-        analyst_sections = ["market_report", "sentiment_report", "news_report", "fundamentals_report"]
+        analyst_sections = [
+            "market_report",
+            "sentiment_report",
+            "news_report",
+            "fundamentals_report",
+            "forex_technical_report",
+            "forex_macro_report",
+        ]
         if any(self.report_sections.get(section) for section in analyst_sections):
             report_parts.append("## Analyst Team Reports")
-            if self.report_sections.get("market_report"):
+            if self.report_sections.get("forex_technical_report"):
+                report_parts.append(
+                    f"### Forex Technical Analysis\n{self.report_sections['forex_technical_report']}"
+                )
+            elif self.report_sections.get("market_report"):
                 report_parts.append(
                     f"### Market Analysis\n{self.report_sections['market_report']}"
                 )
@@ -157,7 +174,11 @@ class MessageBuffer:
                 report_parts.append(
                     f"### News Analysis\n{self.report_sections['news_report']}"
                 )
-            if self.report_sections.get("fundamentals_report"):
+            if self.report_sections.get("forex_macro_report"):
+                report_parts.append(
+                    f"### Currency Macro Analysis\n{self.report_sections['forex_macro_report']}"
+                )
+            elif self.report_sections.get("fundamentals_report"):
                 report_parts.append(
                     f"### Fundamentals Analysis\n{self.report_sections['fundamentals_report']}"
                 )
@@ -267,8 +288,7 @@ def update_display(layout, spinner_text=None, stats_handler=None, start_time=Non
     """Refresh the Rich Live terminal display with current run state."""
     layout["header"].update(
         Panel(
-            "[bold green]Welcome to TradingAgents CLI[/bold green]\n"
-            "[dim]© [Tauric Research](https://github.com/TauricResearch)[/dim]",
+            "[bold green]Welcome to TradingAgents CLI[/bold green]",
             title="Welcome to TradingAgents",
             border_style="green",
             padding=(1, 2),

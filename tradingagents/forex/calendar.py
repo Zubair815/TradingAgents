@@ -16,12 +16,11 @@ This module provides:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+import logging
+from collections.abc import Sequence
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-import logging
-import math
-from typing import Sequence
 
 from tradingagents.forex.domain import get_forex_pair
 from tradingagents.forex.symbols import ForexSymbolMap

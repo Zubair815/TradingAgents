@@ -175,6 +175,16 @@ DEFAULT_CONFIG = _apply_env_overrides({
         "ECB Bank of England BOJ central bank policy",
         "oil commodities supply chain energy",
     ],
+    # Forex execution-market data. Yahoo fallback requires explicit opt-in.
+    "forex_market_source": "mt5",
+    "forex_allow_yahoo_fallback": False,
+    "forex_broker_symbols": {},
+    "forex_quote_max_age_seconds": 30,
+    "forex_max_spread_pips": 5.0,
+    "forex_calendar_provider": "trading_economics",
+    "forex_calendar_max_age_seconds": 900,
+    "forex_calendar_archive_dir": None,
+    "forex_news_archive_dir": None,
     # Data vendor configuration
     # Category-level configuration (default for all tools in category).
     # The configured value is the exact vendor chain — requests are NOT silently

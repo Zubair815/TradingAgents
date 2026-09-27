@@ -84,19 +84,25 @@ def detect_asset_type(ticker: str) -> AssetType:
     canonical = normalize_ticker_symbol(ticker)
     if canonical.endswith(CRYPTO_SUFFIXES):
         return AssetType.CRYPTO
+    try:
+        from tradingagents.forex.domain import is_forex_pair
+        if is_forex_pair(canonical) or canonical.endswith("=X"):
+            return AssetType.FOREX
+    except Exception:
+        pass
     return AssetType.STOCK
 
 
 def filter_analysts_for_asset_type(
     analysts: list[AnalystType], asset_type: AssetType
 ) -> list[AnalystType]:
-    if asset_type != AssetType.CRYPTO:
-        return analysts
-    return [
-        analyst
-        for analyst in analysts
-        if analyst != AnalystType.FUNDAMENTALS
-    ]
+    if asset_type == AssetType.CRYPTO or asset_type == AssetType.FOREX:
+        return [
+            analyst
+            for analyst in analysts
+            if analyst != AnalystType.FUNDAMENTALS
+        ]
+    return analysts
 
 
 def get_analysis_date() -> str:

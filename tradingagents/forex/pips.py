@@ -24,7 +24,6 @@ from __future__ import annotations
 
 from tradingagents.forex.domain import ForexPair, get_forex_pair
 
-
 # ---------------------------------------------------------------------------
 # Pip size derivation
 # ---------------------------------------------------------------------------

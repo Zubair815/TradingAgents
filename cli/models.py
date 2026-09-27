@@ -9,8 +9,12 @@ class AnalystType(str, Enum):
     SENTIMENT = "social"
     NEWS = "news"
     FUNDAMENTALS = "fundamentals"
+    FOREX_TECHNICAL = "forex_technical"
+    FOREX_MACRO = "forex_macro"
+    FOREX_NEWS = "forex_news"
 
 
 class AssetType(str, Enum):
     STOCK = "stock"
     CRYPTO = "crypto"
+    FOREX = "forex"

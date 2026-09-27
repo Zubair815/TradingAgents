@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 
-def write_report_tree(final_state: dict, ticker: str, save_path) -> Path:
+def write_report_tree(final_state: dict, ticker: str, save_path, trade_date: str | None = None) -> Path:
     """Save a completed run's reports to ``save_path``; return the complete-report path."""
     save_path = Path(save_path)
     save_path.mkdir(parents=True, exist_ok=True)
@@ -19,22 +19,34 @@ def write_report_tree(final_state: dict, ticker: str, save_path) -> Path:
     # 1. Analysts
     analysts_dir = save_path / "1_analysts"
     analyst_parts = []
+    if final_state.get("forex_technical_report"):
+        analysts_dir.mkdir(exist_ok=True)
+        (analysts_dir / "forex_technical.md").write_text(final_state["forex_technical_report"], encoding="utf-8")
     if final_state.get("market_report"):
         analysts_dir.mkdir(exist_ok=True)
         (analysts_dir / "market.md").write_text(final_state["market_report"], encoding="utf-8")
-        analyst_parts.append(("Market Analyst", final_state["market_report"]))
+        label = "Forex Technical Analyst" if final_state.get("forex_technical_report") else "Market Analyst"
+        analyst_parts.append((label, final_state["market_report"]))
     if final_state.get("sentiment_report"):
         analysts_dir.mkdir(exist_ok=True)
         (analysts_dir / "sentiment.md").write_text(final_state["sentiment_report"], encoding="utf-8")
         analyst_parts.append(("Sentiment Analyst", final_state["sentiment_report"]))
+    if final_state.get("forex_news_report"):
+        analysts_dir.mkdir(exist_ok=True)
+        (analysts_dir / "forex_news.md").write_text(final_state["forex_news_report"], encoding="utf-8")
     if final_state.get("news_report"):
         analysts_dir.mkdir(exist_ok=True)
         (analysts_dir / "news.md").write_text(final_state["news_report"], encoding="utf-8")
-        analyst_parts.append(("News Analyst", final_state["news_report"]))
+        label = "Forex News Analyst" if final_state.get("forex_news_report") else "News Analyst"
+        analyst_parts.append((label, final_state["news_report"]))
+    if final_state.get("forex_macro_report"):
+        analysts_dir.mkdir(exist_ok=True)
+        (analysts_dir / "forex_macro.md").write_text(final_state["forex_macro_report"], encoding="utf-8")
     if final_state.get("fundamentals_report"):
         analysts_dir.mkdir(exist_ok=True)
         (analysts_dir / "fundamentals.md").write_text(final_state["fundamentals_report"], encoding="utf-8")
-        analyst_parts.append(("Fundamentals Analyst", final_state["fundamentals_report"]))
+        label = "Currency Macro Analyst" if final_state.get("forex_macro_report") else "Fundamentals Analyst"
+        analyst_parts.append((label, final_state["fundamentals_report"]))
     if analyst_parts:
         content = "\n\n".join(f"### {name}\n{text}" for name, text in analyst_parts)
         sections.append(f"## I. Analyst Team Reports\n\n{content}")
@@ -96,6 +108,8 @@ def write_report_tree(final_state: dict, ticker: str, save_path) -> Path:
             sections.append(f"## V. Portfolio Manager Decision\n\n### Portfolio Manager\n{risk['judge_decision']}")
 
     # Write consolidated report
-    header = f"# Trading Analysis Report: {ticker}\n\nGenerated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+    resolved_date = trade_date or (final_state.get("trade_date") if isinstance(final_state, dict) else None)
+    date_line = f"Analysis Date: {resolved_date}\n" if resolved_date else ""
+    header = f"# Trading Analysis Report: {ticker}\n\n{date_line}Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
     (save_path / "complete_report.md").write_text(header + "\n\n".join(sections), encoding="utf-8")
     return save_path / "complete_report.md"

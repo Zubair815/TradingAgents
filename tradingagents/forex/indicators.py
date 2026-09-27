@@ -28,7 +28,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Optional, Union
+from typing import TYPE_CHECKING
 
 from tradingagents.dataflows.forex_quality import DataInsufficientError
 
@@ -39,7 +39,7 @@ import numpy as np
 import pandas as pd
 
 from tradingagents.forex.domain import ForexPair, Timeframe, get_forex_pair
-from tradingagents.forex.pips import pip_size_for, price_to_pips
+from tradingagents.forex.pips import pip_size_for
 
 logger = logging.getLogger(__name__)
 
@@ -127,7 +127,7 @@ def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
 
 def calculate_atr_pips(
     df: pd.DataFrame,
-    pair: Union[ForexPair, str],
+    pair: ForexPair | str,
     period: int = 14,
 ) -> pd.Series:
     """Average True Range (ATR) expressed in pips."""
@@ -318,7 +318,7 @@ def classify_ema_trend(
     ema8: float,
     ema21: float,
     ema50: float,
-    ema200: Optional[float] = None,
+    ema200: float | None = None,
 ) -> TrendRegime:
     """Classify the EMA alignment into TrendRegime."""
     if ema200 is not None:
@@ -364,7 +364,7 @@ def classify_adx_strength(adx: float) -> TrendStrength:
 
 def compute_forex_indicators(
     df: pd.DataFrame,
-    pair: Optional[Union[ForexPair, str]] = None,
+    pair: ForexPair | str | None = None,
 ) -> pd.DataFrame:
     """Compute all standard Forex technical indicators on an OHLCV DataFrame.
 
@@ -454,8 +454,8 @@ class ForexIndicatorSnapshot:
 
     timestamp: datetime
     symbol: str
-    pair: Optional[ForexPair]
-    timeframe: Optional[Timeframe]
+    pair: ForexPair | None
+    timeframe: Timeframe | None
     close: float
     spread_pips: float
     atr_14_pips: float
@@ -465,7 +465,7 @@ class ForexIndicatorSnapshot:
     rsi_14: float
     rsi_regime: RSIRegime
     ema_trend: TrendRegime
-    distance_to_ema200_pips: Optional[float]
+    distance_to_ema200_pips: float | None
     bb_upper: float
     bb_middle: float
     bb_lower: float
@@ -478,21 +478,21 @@ class ForexIndicatorSnapshot:
 
 def build_forex_indicator_snapshot(
     df: pd.DataFrame,
-    pair: Optional[Union[ForexPair, str]] = None,
-    timeframe: Optional[Union[Timeframe, str]] = None,
-    spread_pips: Optional[float] = None,
+    pair: ForexPair | str | None = None,
+    timeframe: Timeframe | str | None = None,
+    spread_pips: float | None = None,
 ) -> ForexIndicatorSnapshot:
     """Build a point-in-time quantitative indicator snapshot from the latest bar."""
     if df is None or df.empty:
         raise ValueError("Cannot build indicator snapshot from empty DataFrame.")
 
-    resolved_pair: Optional[ForexPair] = None
+    resolved_pair: ForexPair | None = None
     if isinstance(pair, ForexPair):
         resolved_pair = pair
     elif isinstance(pair, str):
         resolved_pair = get_forex_pair(pair)
 
-    resolved_tf: Optional[Timeframe] = None
+    resolved_tf: Timeframe | None = None
     if isinstance(timeframe, Timeframe):
         resolved_tf = timeframe
     elif isinstance(timeframe, str):
@@ -569,7 +569,7 @@ def build_forex_indicator_snapshot(
 
 def compute_multi_timeframe_indicators(
     bundle: MultiTimeframeData,
-    spread_pips: Optional[float] = None,
+    spread_pips: float | None = None,
 ) -> dict[Timeframe, ForexIndicatorSnapshot]:
     """Compute indicator snapshots across all timeframes in a MultiTimeframeData bundle."""
     snapshots: dict[Timeframe, ForexIndicatorSnapshot] = {}

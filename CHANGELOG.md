@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Breaking changes within the 0.x line are called out explicitly.
 
+## [Unreleased]
+
+### Forex Phase 2 data integrity
+
+- Default Forex candles to MT5 with broker metadata and explicitly enabled Yahoo fallback.
+- Filter by candle close time; reject malformed, missing, stale and incorrectly ordered data.
+- Replace production synthetic calendars with Trading Economics and immutable observed-time archives.
+- Preserve calendar publication/revision timing; add validated archive imports and bounded retries.
+- Structure and deduplicate sourced Forex news while withholding unobserved historical content.
+- Apply regional DST rules and a shared intraday UTC cutoff across graph data tools and risk checks.
+- Reject directional proposals when required calendar coverage is unavailable.
+- Add provider failure, temporal boundary and data-integrity regression coverage.
+
+### Forex Phase 0
+
+- Removed fabricated Forex web analysis and progress events. `/api/forex/analyze` now returns HTTP 503 (`FOREX_ANALYSIS_UNAVAILABLE`) pending real pipeline integration.
+- Forex graph analysis persists proposals without creating actual trades. `auto_record_trades` defaults to false; the legacy true setting raises `ValueError` and requires callers to record actual execution evidence separately.
+- Forex web backtests require explicit `demo_mode: true`. Synthetic and supplied-candle runs carry demo labels in responses, listings, and reports, and never write simulated trades to the actual trade journal.
+
 ## [0.5.0] — 2026-09-18
 
 Point-in-time integrity across every dated path, decisions that are recorded as
@@ -508,7 +527,7 @@ production-ready surfaces.
 - **Post-analysis report saving** — the framework writes per-section markdown
   files (analyst reports, debate transcripts, final decision) when a run
   completes.
-- **Announcements panel** — fetches updates from `api.tauric.ai/v1/announcements`
+- **Announcements panel** — displays framework updates
   for the CLI welcome screen.
 - **Tool fallbacks** so a single vendor outage does not stop the pipeline.
 
@@ -556,10 +575,10 @@ PRs from late 2025 also landed here.
   portfolio manager. LangGraph orchestration, yfinance data, per-agent
   BM25 memory, single-provider OpenAI integration, interactive CLI.
 
-[0.2.4]: https://github.com/TauricResearch/TradingAgents/compare/v0.2.3...v0.2.4
-[0.2.3]: https://github.com/TauricResearch/TradingAgents/compare/v0.2.2...v0.2.3
-[0.2.2]: https://github.com/TauricResearch/TradingAgents/compare/v0.2.1...v0.2.2
-[0.2.1]: https://github.com/TauricResearch/TradingAgents/compare/v0.2.0...v0.2.1
-[0.2.0]: https://github.com/TauricResearch/TradingAgents/compare/v0.1.1...v0.2.0
-[0.1.1]: https://github.com/TauricResearch/TradingAgents/compare/v0.1.0...v0.1.1
-[0.1.0]: https://github.com/TauricResearch/TradingAgents/releases/tag/v0.1.0
+[0.2.4]: https://github.com/Zubair815/TradingAgents/compare/v0.2.3...v0.2.4
+[0.2.3]: https://github.com/Zubair815/TradingAgents/compare/v0.2.2...v0.2.3
+[0.2.2]: https://github.com/Zubair815/TradingAgents/compare/v0.2.1...v0.2.2
+[0.2.1]: https://github.com/Zubair815/TradingAgents/compare/v0.2.0...v0.2.1
+[0.2.0]: https://github.com/Zubair815/TradingAgents/compare/v0.1.1...v0.2.0
+[0.1.1]: https://github.com/Zubair815/TradingAgents/compare/v0.1.0...v0.1.1
+[0.1.0]: https://github.com/Zubair815/TradingAgents/releases/tag/v0.1.0

@@ -21,11 +21,9 @@ aliases and allows reverse lookups.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
-from typing import Optional
 
-from tradingagents.forex.domain import ForexPair, _ALL_PAIRS, strip_broker_suffix_simple
+from tradingagents.forex.domain import _ALL_PAIRS, ForexPair, strip_broker_suffix_simple
 
 # ---------------------------------------------------------------------------
 # Symbol map entry
@@ -38,7 +36,7 @@ class SymbolEntry:
     canonical: str        # EURUSD
     broker:    str        # EURUSDm  (may equal canonical when no suffix)
     yahoo:     str        # EURUSD=X
-    pair:      Optional[ForexPair] = field(default=None, repr=False)
+    pair:      ForexPair | None = field(default=None, repr=False)
 
 
 # ---------------------------------------------------------------------------
@@ -76,7 +74,7 @@ class ForexSymbolMap:
         broker: str | None = None,
         yahoo: str | None = None,
         pair: ForexPair | None = None,
-    ) -> "ForexSymbolMap":
+    ) -> ForexSymbolMap:
         """Add or update an entry.  Returns self for chaining.
 
         All lookups for this symbol (in any of the three namespaces) will
@@ -95,7 +93,7 @@ class ForexSymbolMap:
         self._by_yahoo[y.upper()] = entry
         return self
 
-    def register_xm(self, canonical: str, pair: ForexPair | None = None) -> "ForexSymbolMap":
+    def register_xm(self, canonical: str, pair: ForexPair | None = None) -> ForexSymbolMap:
         """Convenience: register with XM's standard ``m`` suffix convention."""
         return self.register(
             canonical=canonical,
@@ -107,11 +105,11 @@ class ForexSymbolMap:
     # Lookup methods
     # -----------------------------------------------------------------
 
-    def get_by_canonical(self, symbol: str) -> Optional[SymbolEntry]:
+    def get_by_canonical(self, symbol: str) -> SymbolEntry | None:
         """Look up by canonical symbol (e.g. ``EURUSD``)."""
         return self._by_canonical.get(symbol.strip().upper())
 
-    def get_by_broker(self, symbol: str) -> Optional[SymbolEntry]:
+    def get_by_broker(self, symbol: str) -> SymbolEntry | None:
         """Look up by broker symbol (e.g. ``EURUSDm``).
 
         Also tries stripping the broker suffix and looking up the result as
@@ -126,11 +124,11 @@ class ForexSymbolMap:
         c = strip_broker_suffix_simple(s)
         return self._by_canonical.get(c)
 
-    def get_by_yahoo(self, symbol: str) -> Optional[SymbolEntry]:
+    def get_by_yahoo(self, symbol: str) -> SymbolEntry | None:
         """Look up by Yahoo symbol (e.g. ``EURUSD=X``)."""
         return self._by_yahoo.get(symbol.strip().upper())
 
-    def resolve(self, symbol: str) -> Optional[SymbolEntry]:
+    def resolve(self, symbol: str) -> SymbolEntry | None:
         """Resolve *symbol* from any namespace.
 
         Tries canonical, then broker, then Yahoo in order.

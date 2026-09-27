@@ -63,6 +63,10 @@
         tab.classList.add('active');
         tab.setAttribute('aria-selected', 'true');
         $(`#view-${tab.dataset.view}`).classList.add('active');
+        if (tab.dataset.view === 'history') {
+          loadRuns();
+          loadHistory();
+        }
       });
     });
 
@@ -181,9 +185,6 @@
     `;
 
     const headers = { 'Content-Type': 'application/json' };
-    if (configData && configData.session_token) {
-      headers['X-Session-Token'] = configData.session_token;
-    }
     const savedApiKey = (DOM.apiKey ? DOM.apiKey.value.trim() : '') || localStorage.getItem('tradingagents_api_key');
     if (savedApiKey) {
       headers['X-API-Key'] = savedApiKey;
@@ -321,6 +322,7 @@
         showToast(`Analysis complete: ${data.signal || 'Done'}`, 'success');
         loadReport(runId);
         loadRuns();
+        loadHistory();
       } catch (err) {
         resetRunButton();
       }
@@ -603,13 +605,22 @@
     // Add active / in-memory runs first
     inMemoryRuns.forEach(r => {
       seenIds.add(r.run_id);
+      if (r.report_id) {
+        seenIds.add(r.report_id);
+      }
+      if (r.report_path) {
+        const parts = r.report_path.replace(/\\/g, '/').split('/');
+        const folder = parts.length > 1 ? parts[parts.length - 2] : '';
+        if (folder) seenIds.add(folder);
+      }
       combined.push(r);
     });
 
     // Add saved reports from disk
     diskHistory.forEach(h => {
       const id = h.run_id || h.id;
-      if (!seenIds.has(id)) {
+      const isKnownLive = (h.live_run_id && seenIds.has(h.live_run_id));
+      if (!seenIds.has(id) && !isKnownLive) {
         seenIds.add(id);
         combined.push({
           run_id: id,

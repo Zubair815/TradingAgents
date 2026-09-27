@@ -14,21 +14,20 @@ Deterministic quantitative price action analysis:
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Optional, Union
+from typing import TYPE_CHECKING, Any
 
 from tradingagents.dataflows.forex_quality import DataInsufficientError
 
 if TYPE_CHECKING:
     from tradingagents.dataflows.forex_data import MultiTimeframeData
 
-import numpy as np
 import pandas as pd
 
 from tradingagents.forex.domain import ForexPair, Timeframe, get_forex_pair
-from tradingagents.forex.pips import pip_size_for, price_to_pips
+from tradingagents.forex.pips import pip_size_for
 
 logger = logging.getLogger(__name__)
 
@@ -117,7 +116,7 @@ class SwingPoint:
     timestamp: datetime
     price: float
     swing_type: SwingType
-    tag: Optional[SwingTag] = None
+    tag: SwingTag | None = None
 
 
 @dataclass(frozen=True)
@@ -146,7 +145,7 @@ class FairValueGap:
     midpoint: float
     size_pips: float
     is_mitigated: bool = False
-    mitigated_at: Optional[datetime] = None
+    mitigated_at: datetime | None = None
 
 
 @dataclass
@@ -161,7 +160,7 @@ class OrderBlock:
     midpoint: float
     size_pips: float
     is_mitigated: bool = False
-    mitigated_at: Optional[datetime] = None
+    mitigated_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -169,21 +168,21 @@ class MarketStructureSnapshot:
     """Point-in-time quantitative market structure summary for a single timeframe."""
 
     symbol: str
-    pair: Optional[ForexPair]
-    timeframe: Optional[Timeframe]
+    pair: ForexPair | None
+    timeframe: Timeframe | None
     timestamp: datetime
     current_price: float
     trend: StructureTrend
     recent_swings: list[SwingPoint]
-    latest_swing_high: Optional[SwingPoint]
-    latest_swing_low: Optional[SwingPoint]
-    last_break: Optional[StructuralBreak]
+    latest_swing_high: SwingPoint | None
+    latest_swing_low: SwingPoint | None
+    last_break: StructuralBreak | None
     active_fvgs: list[FairValueGap]
     active_order_blocks: list[OrderBlock]
-    nearest_support_price: Optional[float]
-    nearest_support_pips: Optional[float]
-    nearest_resistance_price: Optional[float]
-    nearest_resistance_pips: Optional[float]
+    nearest_support_price: float | None
+    nearest_support_pips: float | None
+    nearest_resistance_price: float | None
+    nearest_resistance_pips: float | None
 
 
 @dataclass(frozen=True)
@@ -191,7 +190,7 @@ class MultiTimeframeStructureAlignment:
     """Multi-horizon structural confluence summary across timeframes."""
 
     symbol: str
-    pair: Optional[ForexPair]
+    pair: ForexPair | None
     timestamp: datetime
     structures: dict[Timeframe, MarketStructureSnapshot]
     macro_trend: StructureTrend
@@ -224,7 +223,7 @@ def find_swing_points(
     df: pd.DataFrame,
     lookback: int = 3,
     lookforward: int = 3,
-    pair: Optional[Union[ForexPair, str]] = None,
+    pair: ForexPair | str | None = None,
 ) -> list[SwingPoint]:
     """Identify swing high and swing low pivots in an OHLCV DataFrame.
 
@@ -314,11 +313,11 @@ def find_swing_points(
 
     # Tag swings relative to previous swing of the SAME type
     tagged_swings: list[SwingPoint] = []
-    prev_high: Optional[SwingPoint] = None
-    prev_low: Optional[SwingPoint] = None
+    prev_high: SwingPoint | None = None
+    prev_low: SwingPoint | None = None
 
     for sp in raw_swings:
-        tag: Optional[SwingTag] = None
+        tag: SwingTag | None = None
         if sp.swing_type == SwingType.HIGH:
             if prev_high is not None:
                 diff = sp.price - prev_high.price
@@ -454,7 +453,7 @@ def detect_structural_breaks(
 
 def classify_structure_trend(
     swings: list[SwingPoint],
-    recent_breaks: Optional[list[StructuralBreak]] = None,
+    recent_breaks: list[StructuralBreak] | None = None,
 ) -> StructureTrend:
     """Classify the current market structure trend based on swing sequence and latest breaks."""
     if not swings:
@@ -501,7 +500,7 @@ def classify_structure_trend(
 
 def find_fair_value_gaps(
     df: pd.DataFrame,
-    pair: Optional[Union[ForexPair, str]] = None,
+    pair: ForexPair | str | None = None,
     min_gap_pips: float = 1.0,
 ) -> list[FairValueGap]:
     """Identify 3-candle Fair Value Gaps (imbalances) and determine mitigation status."""
@@ -599,8 +598,8 @@ def find_fair_value_gaps(
 
 def find_order_blocks(
     df: pd.DataFrame,
-    breaks: Optional[list[StructuralBreak]] = None,
-    pair: Optional[Union[ForexPair, str]] = None,
+    breaks: list[StructuralBreak] | None = None,
+    pair: ForexPair | str | None = None,
     max_blocks: int = 5,
 ) -> list[OrderBlock]:
     """Identify Institutional Order Blocks.
@@ -634,7 +633,7 @@ def find_order_blocks(
 
         if brk.direction == BreakDirection.BULLISH:
             # Find the last bearish candle (Close < Open) between prior swing and break
-            cand_idx: Optional[int] = None
+            cand_idx: int | None = None
             for j in range(break_idx - 1, search_start - 1, -1):
                 if closes[j] < opens[j]:
                     cand_idx = j
@@ -671,7 +670,7 @@ def find_order_blocks(
 
         elif brk.direction == BreakDirection.BEARISH:
             # Find the last bullish candle (Close > Open) between prior swing and break
-            cand_idx: Optional[int] = None
+            cand_idx: int | None = None
             for j in range(break_idx - 1, search_start - 1, -1):
                 if closes[j] > opens[j]:
                     cand_idx = j
@@ -718,8 +717,8 @@ def find_order_blocks(
 def find_support_resistance_levels(
     current_price: float,
     swings: list[SwingPoint],
-    pair: Optional[Union[ForexPair, str]] = None,
-) -> tuple[Optional[float], Optional[float], Optional[float], Optional[float]]:
+    pair: ForexPair | str | None = None,
+) -> tuple[float | None, float | None, float | None, float | None]:
     """Determine nearest support and resistance levels from recent swings.
 
     Returns:
@@ -746,8 +745,8 @@ def find_support_resistance_levels(
 
 def build_market_structure_snapshot(
     df: pd.DataFrame,
-    pair: Optional[Union[ForexPair, str]] = None,
-    timeframe: Optional[Union[Timeframe, str]] = None,
+    pair: ForexPair | str | None = None,
+    timeframe: Timeframe | str | None = None,
     lookback: int = 3,
     lookforward: int = 3,
 ) -> MarketStructureSnapshot:
@@ -765,7 +764,7 @@ def build_market_structure_snapshot(
     resolved_pair = get_forex_pair(pair) if isinstance(pair, str) else pair
     sym = resolved_pair.symbol if resolved_pair else (str(pair) if pair else "EURUSD")
 
-    resolved_tf: Optional[Timeframe] = None
+    resolved_tf: Timeframe | None = None
     if isinstance(timeframe, Timeframe):
         resolved_tf = timeframe
     elif isinstance(timeframe, str):

@@ -13,18 +13,17 @@ Phase 1 acceptance criteria:
 import pytest
 
 from tradingagents.forex.domain import (
+    EXOTIC_PAIRS,
+    MAJOR_PAIRS,
+    MINOR_PAIRS,
     AssetType,
     ForexPair,
     Timeframe,
-    MAJOR_PAIRS,
-    MINOR_PAIRS,
-    EXOTIC_PAIRS,
-    is_forex_pair,
     get_forex_pair,
+    is_forex_pair,
     register_custom_pair,
     strip_broker_suffix_simple,
 )
-
 
 # ---------------------------------------------------------------------------
 # AssetType

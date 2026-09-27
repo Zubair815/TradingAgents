@@ -23,6 +23,14 @@ from pathlib import Path
 
 from tradingagents.agents.utils.memory import TradingMemoryLog
 from tradingagents.agents.utils.rating import RATING_REVIEW
+from tradingagents.backtest.forex_engine import (
+    BacktestTrade,
+    EquityPoint,
+    ForexBacktestConfig,
+    ForexBacktestEngine,
+    ForexBacktestResult,
+    run_forex_backtest,
+)
 from tradingagents.dataflows.utils import get_current_date, safe_ticker_component
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 
@@ -202,3 +210,21 @@ def summarize(memory_log: TradingMemoryLog) -> BacktestSummary:
                            pending=len(entries) - len(resolved) - unscored,
                            by_rating=by_rating, unscored=unscored,
                            holding=", ".join(sorted(windows)) or "the configured window")
+
+
+__all__ = [
+    # Stock backtest
+    "BacktestResult",
+    "RatingScore",
+    "BacktestSummary",
+    "run_backtest",
+    "summarize",
+    "iter_grid",
+    # Forex institutional backtest (Phase 18)
+    "ForexBacktestConfig",
+    "BacktestTrade",
+    "EquityPoint",
+    "ForexBacktestResult",
+    "ForexBacktestEngine",
+    "run_forex_backtest",
+]

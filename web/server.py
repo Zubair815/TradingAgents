@@ -431,6 +431,7 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 # Mount Forex REST and SSE router (Phase 20)
 from web.forex_routes import router as forex_router  # noqa: E402
+
 app.include_router(forex_router)
 
 

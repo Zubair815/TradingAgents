@@ -1,28 +1,18 @@
-<p align="center">
-  <img src="assets/TauricResearch.png" style="width: 60%; height: auto;">
-</p>
+<div align="center">
 
-<div align="center" style="line-height: 1;">
-  <a href="https://arxiv.org/abs/2412.20138" target="_blank"><img alt="arXiv" src="https://img.shields.io/badge/arXiv-2412.20138-B31B1B?logo=arxiv"/></a>
-  <a href="https://discord.com/invite/hk9PGKShPK" target="_blank"><img alt="Discord" src="https://img.shields.io/badge/Discord-TradingResearch-7289da?logo=discord&logoColor=white&color=7289da"/></a>
-  <a href="https://x.com/TauricResearch" target="_blank"><img alt="X Follow" src="https://img.shields.io/badge/X-TauricResearch-white?logo=x&logoColor=white"/></a>
-  <a href="https://github.com/TauricResearch/" target="_blank"><img alt="Community" src="https://img.shields.io/badge/GitHub_Community-TauricResearch-14C290?logo=discourse"/></a>
-</div>
+# 📈 TradingAgents
+
+### Multi-Agent LLM Financial Trading & Market Analysis Framework
+
+[![Python](https://img.shields.io/badge/Python-3.10%20%7C%203.11%20%7C%203.12-blue?logo=python)](https://python.org)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688?logo=fastapi)](https://fastapi.tiangolo.com)
+[![LangGraph](https://img.shields.io/badge/LangGraph-0.4+-FF4B4B)](https://github.com/langchain-ai/langgraph)
+[![License](https://img.shields.io/badge/License-Apache_2.0-green.svg)](LICENSE)
+
 <br>
-<div align="center">
-  <a href="https://github.com/TauricResearch" target="_blank"><img alt="TradingAgents #1 Repository of the Day" src="https://trendshift.io/api/badge/repositories/16192" width="250" height="55"/></a>
-</div>
-<br>
-<div align="center">
-  <!-- Keep these links. Translations will automatically update with the README. -->
-  <a href="https://www.readme-i18n.com/TauricResearch/TradingAgents?lang=de">Deutsch</a> | 
-  <a href="https://www.readme-i18n.com/TauricResearch/TradingAgents?lang=es">Español</a> | 
-  <a href="https://www.readme-i18n.com/TauricResearch/TradingAgents?lang=fr">français</a> | 
-  <a href="https://www.readme-i18n.com/TauricResearch/TradingAgents?lang=ja">日本語</a> | 
-  <a href="https://www.readme-i18n.com/TauricResearch/TradingAgents?lang=ko">한국어</a> | 
-  <a href="https://www.readme-i18n.com/TauricResearch/TradingAgents?lang=pt">Português</a> | 
-  <a href="https://www.readme-i18n.com/TauricResearch/TradingAgents?lang=ru">Русский</a> | 
-  <a href="https://www.readme-i18n.com/TauricResearch/TradingAgents?lang=zh">中文</a>
+
+🚀 [Framework Architecture](#tradingagents-framework) | 🖥️ [Web Dashboard](#web-dashboard) | ⚡ [Installation & CLI](#installation-and-cli) | 📦 [Python Usage](#tradingagents-package) | 🔄 [Persistence](#persistence-and-recovery)
+
 </div>
 
 ---
@@ -30,6 +20,7 @@
 # TradingAgents: Multi-Agents LLM Financial Trading Framework
 
 ## News
+- [2026-09] **Interactive Web Dashboard**: Added a modern browser-based UI and FastAPI backend with real-time SSE progress streaming across all 13 pipeline nodes, interactive multi-section reports, secure browser session auth with optional API key protection, and unified history deduplication.
 - [2026-09] **TradingAgents v0.5.0** released with point-in-time integrity across every dated path, SEC EDGAR fundamentals served as filed, backtesting over a ticker and date grid, portfolio-aware runs, and current model lineups across every provider. See [CHANGELOG.md](CHANGELOG.md) for the full list.
 - [2026-08] **TradingAgents v0.4.0** released with look-ahead / point-in-time fixes across FRED macro, social sentiment, and the decision-log memory; clearer decision signals; working CLI checkpoint resume; Trader price grounding; and the GPT-5.6 and GLM-5.3 models.
 - [2026-07] **TradingAgents v0.3.1** released with correctness and stability fixes: Alpha Vantage look-ahead filtering, graph-router crash-safety, graph-shape-aware checkpoint resume, working crypto sentiment sources, a configurable LLM retry budget, Bedrock API-key auth, and Claude Sonnet 5 / Fable 5 support.
@@ -43,19 +34,8 @@
 - [2026-03] **TradingAgents v0.2.3** released with multi-language support, GPT-5.4 family models, unified model catalog, backtesting date fidelity, and proxy support.
 - [2026-03] **TradingAgents v0.2.2** released with GPT-5.4/Gemini 3.1/Claude 4.6 model coverage, five-tier rating scale, OpenAI Responses API, Anthropic effort control, and cross-platform stability.
 - [2026-02] **TradingAgents v0.2.0** released with multi-provider LLM support (GPT-5.x, Gemini 3.x, Claude 4.x, Grok 4.x) and improved system architecture.
-- [2026-01] **Trading-R1** [Technical Report](https://arxiv.org/abs/2509.11420) released, with [Terminal](https://github.com/TauricResearch/Trading-R1) expected to land soon.
 
 </details>
-
-<div align="center">
-
-🚀 [TradingAgents](#tradingagents-framework) | ⚡ [Installation & CLI](#installation-and-cli) | 🎬 [Demo](https://www.youtube.com/watch?v=90gr5lwjIho) | 📦 [Package Usage](#tradingagents-package) | 🤝 [Contributing](#contributing) | 📄 [Citation](#citation)
-
-</div>
-
-> 🎉 **TradingAgents** officially released! We have received numerous inquiries about the work, and we would like to express our thanks for the enthusiasm in our community.
->
-> So we decided to fully open-source the framework. Looking forward to building impactful projects with you!
 
 ## TradingAgents Framework
 
@@ -65,7 +45,7 @@ TradingAgents is a multi-agent trading framework that mirrors the dynamics of re
   <img src="assets/schema.png" style="width: 100%; height: auto;">
 </p>
 
-> TradingAgents framework is designed for research purposes. Trading performance may vary based on many factors, including the chosen backbone language models, model temperature, trading periods, the quality of data, and other non-deterministic factors. [It is not intended as financial, investment, or trading advice.](https://tauric.ai/disclaimer/)
+> **Disclaimer**: TradingAgents framework is designed for research purposes. Trading performance may vary based on many factors, including the chosen backbone language models, model temperature, trading periods, the quality of data, and other non-deterministic factors. It is not intended as financial, investment, or trading advice.
 
 Our framework decomposes complex trading tasks into specialized roles.
 
@@ -101,13 +81,47 @@ Our framework decomposes complex trading tasks into specialized roles.
   <img src="assets/risk.png" width="70%" style="display: inline-block; margin: 0 2%;">
 </p>
 
+## Web Dashboard
+
+TradingAgents features an interactive web dashboard providing a user-friendly interface to configure parameters, trigger agent analyses, observe live multi-agent execution steps in real-time, and inspect rich reports.
+
+### Key Capabilities
+- **Real-Time Pipeline Tracking**: Live progress indicators and node status updates streamed via Server-Sent Events (SSE) across all 13 pipeline nodes (Market, Sentiment, News, Fundamentals Analysts, Bull & Bear Researchers, Research Manager, Trader, Risk Debaters, and Portfolio Manager).
+- **Interactive Multi-Section Reports**: Collapsible markdown viewers for Analyst Team Reports, Investment Debate, Trader Plan, Risk Management Debate, and Final Decision.
+- **Run History & Deduplication**: View past analyses and persisted reports from disk with automatic deduplication between active and saved runs.
+- **Accurate Analysis Date Persistence**: Historical trade dates are persisted directly in report headers and accurately displayed across server restarts.
+- **Access Control**: Built-in session authentication via secure cookies for local browser usage, with optional API key enforcement (`TRADINGAGENTS_DASHBOARD_API_KEY`).
+
+### Launching the Dashboard
+
+Start the web server:
+```bash
+python -m web.server
+```
+*Or using Uvicorn directly with hot-reload:*
+```bash
+uvicorn web.server:app --reload --host 127.0.0.1 --port 8050
+```
+
+Open your browser to:
+**[http://localhost:8050](http://localhost:8050)** (or `http://127.0.0.1:8050`)
+
+### Dashboard Configuration
+
+| Environment Variable | Default | Description |
+|----------------------|---------|-------------|
+| `TRADINGAGENTS_DASHBOARD_HOST` | `127.0.0.1` | Dashboard host IP |
+| `TRADINGAGENTS_DASHBOARD_PORT` | `8050` | Dashboard server port |
+| `TRADINGAGENTS_DASHBOARD_API_KEY` | *(None)* | Optional API key to restrict run execution |
+| `TRADINGAGENTS_CORS_ORIGINS` | `http://localhost:8050,http://127.0.0.1:8050` | Allowed CORS origins (comma-separated) |
+
 ## Installation and CLI
 
 ### Installation
 
 Clone TradingAgents:
 ```bash
-git clone https://github.com/TauricResearch/TradingAgents.git
+git clone https://github.com/Zubair815/TradingAgents.git
 cd TradingAgents
 ```
 
@@ -362,22 +376,43 @@ What does not vary anymore: the analyzed company identity is resolved determinis
 
 Backtest results are not guaranteed to match any published figure. Returns depend on the model, the temperature, the date range, data quality, and the sampling above. Treat the framework as a research scaffold for studying multi-agent analysis, not as a strategy with a fixed, replicable return.
 
+## Forex Phase 0 behavior
+
+`POST /api/forex/analyze` currently returns HTTP 503 with code
+`FOREX_ANALYSIS_UNAVAILABLE`. The former placeholder analysis has been removed.
+Real Forex web analysis will become available when the data and agent pipeline
+is connected.
+
+The Python Forex graph saves proposals and risk decisions. It defaults to
+`auto_record_trades=False`; passing `True` now raises `ValueError`. Record actual
+executions through the journal or MT5 reconciliation.
+
+`POST /api/forex/backtest/run` requires `"demo_mode": true`, including when supplying
+custom candles. It runs a demonstration strategy whose execution timing and
+point-in-time correctness are not yet validated. Responses, run listings, and
+Markdown reports label these results as demo data and identify whether candles
+are synthetic or supplied by the caller. Demo runs do not write simulated trades
+to the actual trade journal. Without demo mode, the endpoint returns HTTP 503
+with code `FOREX_BACKTEST_DEMO_ONLY`.
+
+## Forex Phase 2 data integrity
+
+Forex market data now defaults to MT5. Yahoo requires explicit selection or
+fallback permission and retains its source label. Only completed candles are
+used; corrupt, stale or incomplete required data raises `DATA_INSUFFICIENT`.
+
+The economic calendar uses **Trading Economics**. Configure
+`TRADING_ECONOMICS_API_KEY` with calendar access. Historical calendar/news queries
+require timestamped observations archived by their cutoff. Missing calendar
+coverage rejects directional proposals. Sessions use regional daylight-saving
+rules, and intraday graph runs share one UTC observation cutoff.
+
+See [Phase 2 configuration, archive imports and verification](docs/FOREX_PHASE2.md).
+
 ## Contributing
 
 Contributions are welcome: bug fixes, documentation, and feature ideas; past contributions are credited per release in [`CHANGELOG.md`](CHANGELOG.md).
 
-## Citation
+## License
 
-Please reference our work if you find *TradingAgents* provides you with some help :)
-
-```
-@misc{xiao2025tradingagentsmultiagentsllmfinancial,
-      title={TradingAgents: Multi-Agents LLM Financial Trading Framework}, 
-      author={Yijia Xiao and Edward Sun and Di Luo and Wei Wang},
-      year={2025},
-      eprint={2412.20138},
-      archivePrefix={arXiv},
-      primaryClass={q-fin.TR},
-      url={https://arxiv.org/abs/2412.20138}, 
-}
-```
+This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.

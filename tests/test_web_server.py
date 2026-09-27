@@ -116,6 +116,19 @@ class TestDashboardAuth:
                 )
                 assert res.status_code == 200
 
+    def test_config_endpoint_does_not_leak_session_token_or_set_cookie(self):
+        fresh_client = TestClient(app)
+        res = fresh_client.get("/api/config")
+        assert res.status_code == 200
+        data = res.json()
+        assert "session_token" not in data or data["session_token"] is None
+        assert "tradingagents_session" not in fresh_client.cookies
+
+        # Verify a fresh client cannot POST to /api/analyze using anything from /api/config
+        with patch("web.server._run_analysis"):
+            post_res = fresh_client.post("/api/analyze", json={"ticker": "AAPL"})
+            assert post_res.status_code == 401
+
 
 # ---------------------------------------------------------------------------
 # CORS Configuration Tests
@@ -187,6 +200,92 @@ class TestHistoryAndReportsPersistence:
             assert report_data["market_report"] == "Bullish market trend"
             assert report_data["investment_debate"]["bull_history"] == "Strong growth catalysts"
             assert "BUY" in report_data["final_decision"]
+
+    def test_saved_report_with_historical_analysis_date_parsed_correctly(self, client, tmp_path):
+        # Folder timestamp is 2026-09-26, but the analysis was for historical date 2024-01-15
+        reports_dir = tmp_path / "reports"
+        run_folder = reports_dir / "NVDA_20260926_120000"
+        run_folder.mkdir(parents=True)
+
+        complete_md = run_folder / "complete_report.md"
+        complete_md.write_text(
+            "# Trading Analysis Report: NVDA\n\nAnalysis Date: 2024-01-15\nGenerated: 2026-09-26 12:00:00\n\nFinal Trade Decision: BUY",
+            encoding="utf-8",
+        )
+
+        with patch.dict(DEFAULT_CONFIG, {"results_dir": str(tmp_path)}):
+            res = client.get("/api/history")
+            assert res.status_code == 200
+            history = res.json().get("history", [])
+            item = next((h for h in history if h["ticker"] == "NVDA"), None)
+            assert item is not None
+            # Must be the requested analysis date 2024-01-15, NOT the folder's 2026-09-26
+            assert item["date"] == "2024-01-15"
+
+            report_res = client.get(f"/api/runs/{item['id']}/report")
+            assert report_res.status_code == 200
+            report_data = report_res.json()
+            assert report_data["date"] == "2024-01-15"
+
+    def test_completed_run_records_report_id_and_links_history(self, client, tmp_path):
+        from unittest.mock import MagicMock
+
+        from web.server import _completed_reports, _run_analysis, _runs
+
+        run_id = "liverun1"
+        _runs[run_id] = {
+            "run_id": run_id,
+            "ticker": "AAPL",
+            "date": "2024-06-01",
+            "status": "queued",
+            "provider": "openai",
+            "quick_model": "gpt-4o",
+            "deep_model": "gpt-4o",
+            "started_at": "2026-09-26T12:00:00",
+            "finished_at": None,
+            "error": None,
+            "signal": None,
+        }
+
+        folder_name = "AAPL_20260926_120000"
+        fake_report_path = tmp_path / "reports" / folder_name / "complete_report.md"
+        fake_report_path.parent.mkdir(parents=True)
+        fake_report_path.write_text(
+            "# Trading Analysis Report: AAPL\n\nAnalysis Date: 2024-06-01\nGenerated: 2026-09-26 12:00:00\n\nFinal Trade Decision: HOLD",
+            encoding="utf-8",
+        )
+
+        mock_graph = MagicMock()
+        mock_graph.checkpoint_scope.return_value.__enter__.return_value = "thread-1"
+        mock_graph.create_run_state.return_value = {}
+        mock_graph.checkpoint_input.return_value = {}
+        mock_graph.propagator.get_graph_args.return_value = {}
+        mock_graph.graph.stream.return_value = iter([{"final_trade_decision": "Rating: Hold"}])
+        mock_graph.process_signal.return_value = "Hold"
+        mock_graph.save_reports.return_value = fake_report_path
+
+        req = AnalysisRequest(ticker="AAPL", date="2024-06-01", analysts=["market"])
+
+        with patch("web.server.TradingAgentsGraph", return_value=mock_graph):
+            _run_analysis(run_id, req)
+
+        # 1. Run metadata records report_id and report_path
+        assert _runs[run_id]["status"] == "completed"
+        assert _runs[run_id]["report_id"] == folder_name
+        assert _runs[run_id]["report_path"] == str(fake_report_path)
+
+        # 2. _completed_reports indexed by both run_id and report_id
+        assert run_id in _completed_reports
+        assert folder_name in _completed_reports
+
+        # 3. /api/history links live_run_id
+        with patch.dict(DEFAULT_CONFIG, {"results_dir": str(tmp_path)}):
+            res = client.get("/api/history")
+            assert res.status_code == 200
+            history = res.json().get("history", [])
+            aapl_item = next((h for h in history if h["ticker"] == "AAPL"), None)
+            assert aapl_item is not None
+            assert aapl_item["live_run_id"] == run_id
 
 
 # ---------------------------------------------------------------------------

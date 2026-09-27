@@ -48,3 +48,34 @@ def test_save_reports_defaults_under_results_dir(tmp_path):
     assert out.exists()
     assert out.parent.parent.name == "reports"  # results_dir/reports/AAPL_<stamp>/...
     assert out.parent.name.startswith("AAPL_")
+
+
+@pytest.mark.unit
+def test_write_report_tree_persists_trade_date(tmp_path):
+    state = _state()
+    state["trade_date"] = "2024-03-15"
+    out = write_report_tree(state, "AAPL", tmp_path)
+    content = out.read_text(encoding="utf-8")
+    assert "Analysis Date: 2024-03-15" in content
+    assert "Trading Analysis Report: AAPL" in content
+
+
+@pytest.mark.unit
+def test_write_report_tree_forex_reports(tmp_path):
+    state = {
+        "market_report": "MKT",
+        "forex_technical_report": "FX TECH",
+        "fundamentals_report": "FUND",
+        "forex_macro_report": "FX MACRO",
+        "news_report": "NEWS",
+        "forex_news_report": "FX NEWS",
+    }
+    out = write_report_tree(state, "EURUSD", tmp_path)
+    assert (tmp_path / "1_analysts" / "forex_technical.md").read_text() == "FX TECH"
+    assert (tmp_path / "1_analysts" / "forex_macro.md").read_text() == "FX MACRO"
+    assert (tmp_path / "1_analysts" / "forex_news.md").read_text() == "FX NEWS"
+    complete = out.read_text()
+    assert "Forex Technical Analyst" in complete
+    assert "Currency Macro Analyst" in complete
+    assert "Forex News Analyst" in complete
+

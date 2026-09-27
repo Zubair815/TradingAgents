@@ -98,10 +98,7 @@ def _prompt_selections(prefs):
     welcome_content = f"{welcome_ascii}\n"
     welcome_content += "[bold green]TradingAgents: Multi-Agents LLM Financial Trading Framework - CLI[/bold green]\n\n"
     welcome_content += "[bold]Workflow Steps:[/bold]\n"
-    welcome_content += "I. Analyst Team → II. Research Team → III. Trader → IV. Risk Management → V. Portfolio Management\n\n"
-    welcome_content += (
-        "[dim]Built by [Tauric Research](https://github.com/TauricResearch)[/dim]"
-    )
+    welcome_content += "I. Analyst Team → II. Research Team → III. Trader → IV. Risk Management → V. Portfolio Management\n"
 
     # Create and center the welcome box
     welcome_box = Panel(
@@ -364,9 +361,10 @@ def get_analysis_date():
             )
 
 
-def save_report_to_disk(final_state, ticker: str, save_path: Path):
+def save_report_to_disk(final_state, ticker: str, save_path: Path, trade_date: str | None = None):
     """Save the complete analysis report to disk (shared CLI/API writer)."""
-    return write_report_tree(final_state, ticker, save_path)
+    resolved_date = trade_date or (final_state.get("trade_date") if isinstance(final_state, dict) else None)
+    return write_report_tree(final_state, ticker, save_path, trade_date=resolved_date)
 
 
 def display_complete_report(final_state):
@@ -376,13 +374,19 @@ def display_complete_report(final_state):
 
     # I. Analyst Team Reports
     analysts = []
-    if final_state.get("market_report"):
+    if final_state.get("forex_technical_report"):
+        analysts.append(("Forex Technical Analyst", final_state["forex_technical_report"]))
+    elif final_state.get("market_report"):
         analysts.append(("Market Analyst", final_state["market_report"]))
     if final_state.get("sentiment_report"):
         analysts.append(("Sentiment Analyst", final_state["sentiment_report"]))
-    if final_state.get("news_report"):
+    if final_state.get("forex_news_report"):
+        analysts.append(("Forex News Analyst", final_state["forex_news_report"]))
+    elif final_state.get("news_report"):
         analysts.append(("News Analyst", final_state["news_report"]))
-    if final_state.get("fundamentals_report"):
+    if final_state.get("forex_macro_report"):
+        analysts.append(("Currency Macro Analyst", final_state["forex_macro_report"]))
+    elif final_state.get("fundamentals_report"):
         analysts.append(("Fundamentals Analyst", final_state["fundamentals_report"]))
     if analysts:
         console.print(Panel("[bold]I. Analyst Team Reports[/bold]", border_style="cyan"))
@@ -444,12 +448,18 @@ ANALYST_AGENT_NAMES = {
     "social": "Sentiment Analyst",
     "news": "News Analyst",
     "fundamentals": "Fundamentals Analyst",
+    "forex_technical": "Forex Technical Analyst",
+    "forex_macro": "Currency Macro Analyst",
+    "forex_news": "Forex News Analyst",
 }
 ANALYST_REPORT_MAP = {
     "market": "market_report",
     "social": "sentiment_report",
     "news": "news_report",
     "fundamentals": "fundamentals_report",
+    "forex_technical": "forex_technical_report",
+    "forex_macro": "forex_macro_report",
+    "forex_news": "forex_news_report",
 }
 
 
