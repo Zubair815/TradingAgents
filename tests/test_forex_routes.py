@@ -485,6 +485,120 @@ class TestMT5Routes:
         assert deal_res.status_code == 200
         assert deal_res.json()["count"] == 0
 
+    def test_mt5_status_contract_canonical_and_dual_keys(self, client, isolated_forex_env):
+        """Verify canonical MT5 status and backward compatible dual keys."""
+        # 1. Disconnected
+        res_disc = client.get("/api/forex/mt5/status")
+        assert res_disc.status_code == 200
+        data_disc = res_disc.json()
+        assert data_disc["status"] == "DISCONNECTED"
+        assert data_disc["is_connected"] is False
+        assert data_disc["connected"] is False
+
+        # 2. Connected
+        _, _, mock_observer = isolated_forex_env
+        mock_observer.connection.is_connected.return_value = True
+        mock_observer.connection.get_status.return_value = MT5ConnectionStatus.CONNECTED
+        mock_observer.connection.login = 654321
+        mock_observer.connection.server = "Demo-Server"
+        mock_observer.connection.terminal_path = "C:/Program Files/MetaTrader 5/terminal64.exe"
+
+        res_conn = client.get("/api/forex/mt5/status")
+        assert res_conn.status_code == 200
+        data_conn = res_conn.json()
+        assert data_conn["status"] == "CONNECTED"
+        assert data_conn["is_connected"] is True
+        assert data_conn["connected"] is True
+        assert data_conn["login"] == 654321
+        assert data_conn["account_login"] == 654321
+        assert data_conn["server"] == "Demo-Server"
+
+    def test_mt5_account_contract_canonical_and_flat(self, client, isolated_forex_env):
+        """Verify canonical nested account response and flat compatibility."""
+        _, _, mock_observer = isolated_forex_env
+        mock_account = MT5AccountInfo(
+            login=112233,
+            name="FX Test",
+            server="DemoServer",
+            currency="USD",
+            leverage=200,
+            balance=50000.0,
+            equity=51200.0,
+            profit=1200.0,
+            margin=1000.0,
+            margin_free=50200.0,
+            margin_level=5120.0,
+        )
+        mock_observer.get_account_info.return_value = mock_account
+
+        res = client.get("/api/forex/mt5/account")
+        assert res.status_code == 200
+        body = res.json()
+
+        # Canonical nested account object
+        assert "account" in body
+        assert body["account"]["balance"] == 50000.0
+        assert body["account"]["equity"] == 51200.0
+        assert body["account"]["profit"] == 1200.0
+        assert body["account"]["margin"] == 1000.0
+        assert body["account"]["margin_free"] == 50200.0
+        assert body["account"]["margin_level"] == 5120.0
+
+        # Flat root compatibility
+        assert body["balance"] == 50000.0
+        assert body["equity"] == 51200.0
+        assert body["profit"] == 1200.0
+        assert body["margin_free"] == 50200.0
+
+    def test_mt5_positions_directions_and_symbols(self, client, isolated_forex_env):
+        """Verify positions response format for LONG (EURUSD) and SHORT (USDJPY)."""
+        _, _, mock_observer = isolated_forex_env
+        pos_eur = MT5Position(
+            ticket=20001,
+            time=datetime.now(timezone.utc),
+            type=ForexAction.LONG,
+            symbol="EURUSD",
+            volume=0.5,
+            price_open=1.08500,
+            sl=1.08200,
+            tp=1.09100,
+            price_current=1.08750,
+            profit=125.0,
+        )
+        pos_jpy = MT5Position(
+            ticket=20002,
+            time=datetime.now(timezone.utc),
+            type=ForexAction.SHORT,
+            symbol="USDJPY",
+            volume=1.0,
+            price_open=152.500,
+            sl=153.200,
+            tp=151.000,
+            price_current=152.100,
+            profit=262.98,
+        )
+        mock_observer.get_open_positions.return_value = [pos_eur, pos_jpy]
+
+        res = client.get("/api/forex/mt5/positions")
+        assert res.status_code == 200
+        positions = res.json()["positions"]
+        assert len(positions) == 2
+
+        # EURUSD LONG position
+        p1 = positions[0]
+        assert p1["ticket"] == 20001
+        assert p1["symbol"] == "EURUSD"
+        assert p1["type"] == "LONG"
+        assert p1["price_open"] == 1.08500
+
+        # USDJPY SHORT position
+        p2 = positions[1]
+        assert p2["ticket"] == 20002
+        assert p2["symbol"] == "USDJPY"
+        assert p2["type"] == "SHORT"
+        assert p2["price_open"] == 152.500
+
+
 
 # ---------------------------------------------------------------------------
 # 4. Forex Analysis Run & SSE Streaming Tests

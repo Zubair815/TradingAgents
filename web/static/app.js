@@ -258,21 +258,48 @@
     }
   }
 
+  // ---- Price & Precision Helpers ----
+  function formatForexPrice(price, symbol, digits) {
+    if (price == null || price === '' || isNaN(Number(price))) return '-';
+    const num = Number(price);
+    const d = digits != null ? digits : (symbol && String(symbol).toUpperCase().includes('JPY') ? 3 : 5);
+    return num.toFixed(d);
+  }
+
+  function showMT5Unavailable() {
+    if (DOM.mt5Balance) DOM.mt5Balance.textContent = 'Unavailable';
+    if (DOM.mt5Equity) DOM.mt5Equity.textContent = 'Unavailable';
+    if (DOM.mt5Floating) {
+      DOM.mt5Floating.textContent = 'Unavailable';
+      DOM.mt5Floating.style.color = 'var(--text-muted)';
+    }
+    if (DOM.mt5FreeMargin) DOM.mt5FreeMargin.textContent = 'Unavailable';
+  }
+
   // ---- MetaTrader 5 Passive Observer ----
   async function loadMT5Status() {
     try {
       const res = await fetch('/api/forex/mt5/status');
       if (res.ok) {
         const data = await res.json();
-        const connected = data.connected === true;
+        const connected = data.is_connected === true || data.connected === true || data.status === 'CONNECTED';
+        const login = data.login || data.account_login;
         DOM.mt5Dot.style.background = connected ? 'var(--green)' : 'var(--amber)';
         DOM.mt5Status.textContent = connected
-          ? `MT5: Observed (${data.account_login || 'Live'})`
+          ? `MT5: Observed (${login ? '#' + login : 'Live'})`
           : 'MT5: Read-Only Observer';
+        if (!connected) {
+          showMT5Unavailable();
+        }
+      } else {
+        DOM.mt5Dot.style.background = 'var(--amber)';
+        DOM.mt5Status.textContent = 'MT5: Read-Only Observer';
+        showMT5Unavailable();
       }
     } catch (_) {
       DOM.mt5Dot.style.background = 'var(--amber)';
       DOM.mt5Status.textContent = 'MT5: Read-Only Observer';
+      showMT5Unavailable();
     }
   }
 
@@ -280,23 +307,37 @@
     try {
       const res = await fetch('/api/forex/mt5/account');
       if (res.ok) {
-        const acc = await res.json();
-        if (acc.balance != null) {
-          DOM.mt5Balance.textContent = `$${Number(acc.balance).toLocaleString(undefined, { minimumFractionDigits: 2 })}`;
+        const data = await res.json();
+        const acc = data.account || data;
+        if (acc && acc.balance != null) {
+          DOM.mt5Balance.textContent = `$${Number(acc.balance).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+        } else {
+          DOM.mt5Balance.textContent = 'Unavailable';
         }
-        if (acc.equity != null) {
-          DOM.mt5Equity.textContent = `$${Number(acc.equity).toLocaleString(undefined, { minimumFractionDigits: 2 })}`;
+        if (acc && acc.equity != null) {
+          DOM.mt5Equity.textContent = `$${Number(acc.equity).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+        } else {
+          DOM.mt5Equity.textContent = 'Unavailable';
         }
-        if (acc.profit != null) {
+        if (acc && acc.profit != null) {
           const p = Number(acc.profit);
           DOM.mt5Floating.textContent = `${p >= 0 ? '+' : ''}$${p.toFixed(2)}`;
           DOM.mt5Floating.style.color = p >= 0 ? 'var(--green)' : 'var(--red)';
+        } else {
+          DOM.mt5Floating.textContent = 'Unavailable';
+          DOM.mt5Floating.style.color = 'var(--text-muted)';
         }
-        if (acc.margin_free != null) {
-          DOM.mt5FreeMargin.textContent = `$${Number(acc.margin_free).toLocaleString(undefined, { minimumFractionDigits: 2 })}`;
+        if (acc && acc.margin_free != null) {
+          DOM.mt5FreeMargin.textContent = `$${Number(acc.margin_free).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+        } else {
+          DOM.mt5FreeMargin.textContent = 'Unavailable';
         }
+      } else {
+        showMT5Unavailable();
       }
-    } catch (_) {}
+    } catch (_) {
+      showMT5Unavailable();
+    }
   }
 
   async function loadMT5Positions() {
@@ -336,16 +377,20 @@
             ${positions.map(p => {
               const pnl = Number(p.profit || 0);
               const pnlColor = pnl >= 0 ? 'var(--green)' : 'var(--red)';
+              const typeStr = String(p.type || '').toUpperCase();
+              const isBuy = typeStr === 'LONG' || typeStr === 'BUY' || p.type === 0;
+              const dirLabel = isBuy ? 'BUY' : 'SELL';
+              const badgeClass = isBuy ? 'bullish' : 'bearish';
               return `
                 <tr>
                   <td style="font-family:var(--font-mono); font-size:0.8rem;">#${escapeText(p.ticket)}</td>
                   <td style="font-weight:700; color:var(--cyan);">${escapeText(p.symbol)}</td>
-                  <td><span class="signal-badge ${p.type === 0 ? 'bullish' : 'bearish'}" style="font-size:0.7rem; padding:2px 8px;">${p.type === 0 ? 'BUY' : 'SELL'}</span></td>
+                  <td><span class="signal-badge ${badgeClass}" style="font-size:0.7rem; padding:2px 8px;">${dirLabel}</span></td>
                   <td style="font-family:var(--font-mono);">${Number(p.volume).toFixed(2)}</td>
-                  <td style="font-family:var(--font-mono);">${Number(p.price_open).toFixed(5)}</td>
-                  <td style="font-family:var(--font-mono);">${p.sl ? Number(p.sl).toFixed(5) : '-'}</td>
-                  <td style="font-family:var(--font-mono);">${p.tp ? Number(p.tp).toFixed(5) : '-'}</td>
-                  <td style="font-family:var(--font-mono);">${Number(p.price_current).toFixed(5)}</td>
+                  <td style="font-family:var(--font-mono);">${formatForexPrice(p.price_open, p.symbol, p.digits)}</td>
+                  <td style="font-family:var(--font-mono);">${formatForexPrice(p.sl, p.symbol, p.digits)}</td>
+                  <td style="font-family:var(--font-mono);">${formatForexPrice(p.tp, p.symbol, p.digits)}</td>
+                  <td style="font-family:var(--font-mono);">${formatForexPrice(p.price_current, p.symbol, p.digits)}</td>
                   <td style="font-family:var(--font-mono); font-weight:700; color:${pnlColor};">${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}</td>
                 </tr>
               `;

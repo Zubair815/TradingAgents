@@ -833,9 +833,11 @@ async def get_mt5_status(
     return {
         "status": status_str,
         "is_connected": is_conn,
+        "connected": is_conn,
         "terminal_path": str(conn.terminal_path or ""),
         "server": str(conn.server or ""),
         "login": conn.login,
+        "account_login": conn.login,
     }
 
 
@@ -883,7 +885,10 @@ async def get_mt5_account(
     """Fetch live MT5 account balance, equity, leverage, and margins."""
     try:
         info = mt5.get_account_info()
-        return {"account": _safe_model_dump(info)}
+        acc = _safe_model_dump(info)
+        res = {"account": acc}
+        res.update(acc)
+        return res
     except MT5Error as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
