@@ -399,9 +399,12 @@ class TestFetchForexCandles:
     def test_empty_response_raises_no_market_data(self, mock_download, tmp_path):
         mock_download.return_value = pd.DataFrame()
 
-        with patch("tradingagents.dataflows.forex_data.get_config", return_value={"data_cache_dir": str(tmp_path), "forex_market_source": "yahoo", "forex_candle_max_age_seconds": 10**9}):
-            with pytest.raises(NoMarketDataError, match="no candles"):
-                fetch_forex_candles("UNKNOWNPAIR", timeframe=Timeframe.H1, use_cache=False)
+        with (
+            patch("tradingagents.dataflows.forex_data.get_config", return_value={"data_cache_dir": str(tmp_path), "forex_market_source": "yahoo", "forex_candle_max_age_seconds": 10**9}),
+            pytest.raises(NoMarketDataError, match="no candles"),
+        ):
+            fetch_forex_candles("UNKNOWNPAIR", timeframe=Timeframe.H1, use_cache=False)
+
 
     @patch("yfinance.download")
     def test_caching_avoids_repeated_download(self, mock_download, tmp_path):

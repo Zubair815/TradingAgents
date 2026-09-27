@@ -233,12 +233,10 @@ def calculate_stochastic(
     raw_k = raw_k.fillna(50.0)
 
     # Slowing / smoothing for %K
-    if slowing > 1:
-        percent_k = raw_k.rolling(window=slowing, min_periods=1).mean()
-    else:
-        percent_k = raw_k
+    percent_k = raw_k.rolling(window=slowing, min_periods=1).mean() if slowing > 1 else raw_k
 
     percent_d = percent_k.rolling(window=d_period, min_periods=1).mean()
+
     return percent_k, percent_d
 
 

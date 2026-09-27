@@ -56,8 +56,9 @@ def make_wave_df(prices: list[float], start_price: float = 1.0800) -> pd.DataFra
         for i in range(n)
     ]
     opens = [start_price] + prices[:-1]
-    highs = [max(o, c) + 0.0003 for o, c in zip(opens, prices)]
-    lows = [min(o, c) - 0.0003 for o, c in zip(opens, prices)]
+    highs = [max(o, c) + 0.0003 for o, c in zip(opens, prices, strict=True)]
+    lows = [min(o, c) - 0.0003 for o, c in zip(opens, prices, strict=True)]
+
     volumes = [1000 + i * 10 for i in range(n)]
 
     return pd.DataFrame({
@@ -116,8 +117,9 @@ class TestSwingPoints:
         # Check that high prices and low prices make sense
         for h in highs:
             assert h.price > 1.0840
-        for l in lows:
-            assert l.price < 1.0870
+        for sw_low in lows:
+            assert sw_low.price < 1.0870
+
 
     def test_equal_highs_tagging(self):
         # Create identical peaks within 1 pip tolerance

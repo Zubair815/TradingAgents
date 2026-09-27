@@ -13,13 +13,18 @@ Validates:
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 
 from tradingagents.agents.schemas_forex import (
     ForexAction,
+    ForexRiskDecision,
+    ForexRiskDecisionAction,
+    ForexTraderProposal,
+    OrderType,
+    SetupType,
 )
 from tradingagents.database.journal import ForexTradeJournal
 from tradingagents.journal.manager import ForexJournalManager
@@ -32,7 +37,13 @@ from tradingagents.mt5.models import (
     MT5Tick,
 )
 from tradingagents.mt5.observer import MT5Observer
+from tradingagents.risk.sizing import PositionSizingMethod, PositionSizingResult
 from web.forex_routes import (
+    ForexAnalysisRequest,
+    _forex_completed_reports,
+    _forex_run_events,
+    _forex_runs,
+    _run_forex_analysis,
     reset_forex_state,
     set_forex_dependencies,
 )
@@ -480,20 +491,228 @@ class TestMT5Routes:
 # ---------------------------------------------------------------------------
 
 class TestForexAnalysisRuns:
-    @pytest.mark.parametrize("pair", ["EURUSD", "USDJPY"])
-    def test_analysis_unavailable_without_fabricated_results(self, client, isolated_forex_env, pair):
-        journal, _, _ = isolated_forex_env
-        res = client.post("/api/forex/analyze", json={"pair": pair, "timeframe": "M15"})
-        assert res.status_code == 503
-        detail = res.json()["detail"]
-        assert detail["code"] == "FOREX_ANALYSIS_UNAVAILABLE"
-        assert detail["status"] == "unavailable"
-        assert detail["signal"] is None
-        assert "run_id" not in res.json()
-        assert client.get("/api/forex/runs").json() == {"runs": [], "count": 0}
-        assert journal.list_proposals() == []
-        assert journal.list_trades() == []
-        assert journal.get_events() == []
+    def test_start_analysis_endpoint_queues_run_and_lists_it(self, client):
+        req = {
+            "pair": "EURUSD",
+            "timeframe": "M15",
+            "account_balance": 100000.0,
+            "risk_percent": 1.0,
+        }
+        res = client.post("/api/forex/analyze", json=req)
+        assert res.status_code == 200
+        data = res.json()
+        assert "run_id" in data
+        assert data["status"] == "queued"
+        assert data["pair"] == "EURUSD"
+        assert data["timeframe"] == "M15"
+
+        run_id = data["run_id"]
+        # Verify listing
+        runs_res = client.get("/api/forex/runs")
+        assert runs_res.status_code == 200
+        run_items = runs_res.json()["runs"]
+        assert any(r["run_id"] == run_id for r in run_items)
+
+        # Verify get run detail
+        get_res = client.get(f"/api/forex/runs/{run_id}")
+        assert get_res.status_code == 200
+        run_detail = get_res.json()["run"]
+        assert run_detail["run_id"] == run_id
+        assert run_detail["pair"] == "EURUSD"
+
+    def test_run_forex_analysis_worker_and_sse_events(self, client, tmp_path):
+        run_id = "fx_test_worker_123"
+        req = ForexAnalysisRequest(
+            pair="EURUSD",
+            timeframe="M15",
+            date="2026-03-04",
+            analysts=["forex_technical", "forex_macro", "forex_news"],
+            account_balance=100000.0,
+            risk_percent=1.0,
+        )
+
+        _forex_runs[run_id] = {
+            "run_id": run_id,
+            "pair": "EURUSD",
+            "timeframe": "M15",
+            "date": "2026-03-04",
+            "status": "queued",
+            "provider": "",
+            "quick_model": "",
+            "deep_model": "",
+            "account_balance": 100000.0,
+            "risk_percent": 1.0,
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "finished_at": None,
+            "error": None,
+            "signal": None,
+            "proposal_id": None,
+            "report_id": None,
+            "report_path": None,
+        }
+        _forex_run_events[run_id] = []
+
+        mock_proposal = ForexTraderProposal(
+            pair="EURUSD",
+            action=ForexAction.LONG,
+            order_type=OrderType.MARKET,
+            setup_type=SetupType.BREAKOUT,
+            entry_price=1.0850,
+            stop_loss=1.0820,
+            take_profit_1=1.0910,
+            risk_reward_ratio=2.0,
+            confidence_score=0.85,
+            reasoning="Strong institutional trend alignment",
+        )
+        object.__setattr__(mock_proposal, "proposal_id", "prop_mock_123")
+        mock_decision = ForexRiskDecision(
+            pair="EURUSD",
+            decision=ForexRiskDecisionAction.APPROVE,
+            original_action=ForexAction.LONG,
+            approved_action=ForexAction.LONG,
+            approved_lot_size=1.5,
+            stop_loss_pips=30.0,
+            risk_amount_usd=450.0,
+            risk_percent=0.45,
+            risk_reward_ratio=2.0,
+            executive_rationale="Approved trade setup within risk boundaries",
+        )
+        mock_sizing = PositionSizingResult(
+            pair="EURUSD",
+            action=ForexAction.LONG,
+            sizing_method=PositionSizingMethod.FIXED_RISK_PERCENT,
+            recommended_lot_size=1.5,
+            raw_lot_size=1.5,
+            units=150000.0,
+            risk_amount=450.0,
+            risk_percent=0.45,
+            pip_value_per_lot=10.0,
+            total_pip_value=15.0,
+            stop_distance_pips=30.0,
+            margin_required=1500.0,
+            free_margin_remaining=98500.0,
+            margin_level_percent=6666.67,
+            leverage_used=1.5,
+            is_executable=True,
+        )
+
+        stream_chunks = [
+            {"forex_technical_report": "Bullish trend on H1 and H4."},
+            {"forex_macro_report": "Fed neutral, ECB dovish."},
+            {"forex_news_report": "No high-impact economic news in 2 hours."},
+            {
+                "investment_debate_state": {
+                    "bull_history": "Bull argues strong momentum.",
+                    "bear_history": "Bear counters near resistance.",
+                    "judge_decision": "Consensus: Buy dips.",
+                }
+            },
+            {
+                "trader_investment_plan": "Proposing LONG at 1.0850",
+                "forex_proposal": mock_proposal.model_dump(),
+            },
+            {
+                "forex_risk_decision": mock_decision.model_dump(),
+                "final_trade_decision": "Approved LONG execution",
+            },
+        ]
+
+        report_dir = tmp_path / "mock_reports" / "EURUSD_20260304"
+        report_dir.mkdir(parents=True, exist_ok=True)
+        report_file = report_dir / "complete_report.md"
+        report_file.write_text("Mock complete report", encoding="utf-8")
+
+        with patch("web.forex_routes.ForexTradingAgentsGraph") as mock_graph_cls:
+            mock_graph = MagicMock()
+            mock_graph.stream.return_value = iter(stream_chunks)
+            mock_graph.get_state.return_value = {
+                "forex_technical_report": "Bullish trend on H1 and H4.",
+                "forex_macro_report": "Fed neutral, ECB dovish.",
+                "forex_news_report": "No high-impact economic news in 2 hours.",
+                "investment_debate_state": {"judge_decision": "Consensus: Buy dips."},
+                "trader_investment_plan": "Proposing LONG at 1.0850",
+                "final_trade_decision": "Approved LONG execution",
+            }
+            mock_graph.process_signal.return_value = "LONG"
+            mock_graph.get_last_proposal.return_value = mock_proposal
+            mock_graph.get_last_risk_decision.return_value = mock_decision
+            mock_graph.get_last_sizing_result.return_value = mock_sizing
+            mock_graph.save_reports.return_value = report_file
+
+            mock_graph_cls.return_value = mock_graph
+
+            _run_forex_analysis(run_id, req)
+
+        # Check run state was updated to completed
+        run_record = _forex_runs[run_id]
+        assert run_record["status"] == "completed"
+        assert run_record["signal"] == "LONG"
+        assert run_record["proposal_id"] == mock_proposal.proposal_id
+        assert run_record["finished_at"] is not None
+
+        # Check completed report was stored
+        assert run_id in _forex_completed_reports
+        rep = _forex_completed_reports[run_id]
+        assert rep["signal"] == "LONG"
+        assert rep["proposal"]["action"] == "LONG"
+        assert rep["risk_decision"]["decision"] == "APPROVE"
+        assert rep["sizing"]["recommended_lot_size"] == 1.5
+
+        # Check SSE events emitted in order
+        event_types = [evt["type"] for evt in _forex_run_events[run_id]]
+        assert "preparing_data" in event_types
+        assert "technical_analyst" in event_types
+        assert "macro_analyst" in event_types
+        assert "news_analyst" in event_types
+        assert "bull_bear_debate" in event_types
+        assert "research_manager" in event_types
+        assert "trader" in event_types
+        assert "risk_evaluator" in event_types
+        assert "complete" in event_types
+        assert event_types[-1] == "complete"
+
+        # Check SSE streaming response terminates cleanly on complete
+        stream_res = client.get(f"/api/forex/runs/{run_id}/events")
+        assert stream_res.status_code == 200
+        assert "event: complete" in stream_res.text
+        assert "event: preparing_data" in stream_res.text
+
+    def test_run_forex_analysis_worker_failure_emits_error(self, client):
+        run_id = "fx_test_failure_456"
+        req = ForexAnalysisRequest(pair="USDJPY", timeframe="H1")
+
+        _forex_runs[run_id] = {
+            "run_id": run_id,
+            "pair": "USDJPY",
+            "timeframe": "H1",
+            "date": None,
+            "status": "queued",
+            "provider": "",
+            "quick_model": "",
+            "deep_model": "",
+            "account_balance": 100000.0,
+            "risk_percent": 1.0,
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "finished_at": None,
+            "error": None,
+            "signal": None,
+            "proposal_id": None,
+            "report_id": None,
+            "report_path": None,
+        }
+        _forex_run_events[run_id] = []
+
+        with patch("web.forex_routes.ForexTradingAgentsGraph") as mock_graph_cls:
+            mock_graph = MagicMock()
+            mock_graph.stream.side_effect = RuntimeError("Broker connection timeout")
+            mock_graph_cls.return_value = mock_graph
+
+            _run_forex_analysis(run_id, req)
+
+        assert _forex_runs[run_id]["status"] == "failed"
+        assert "Broker connection timeout" in _forex_runs[run_id]["error"]
+        event_types = [evt["type"] for evt in _forex_run_events[run_id]]
+        assert "error" in event_types
 
     def test_unknown_run_cannot_stream_fake_progress(self, client):
         assert client.get("/api/forex/runs/unknown").status_code == 404

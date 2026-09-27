@@ -19,7 +19,6 @@ from tradingagents.graph.checkpointer import (
     checkpoint_step,
     clear_checkpoint,
     get_checkpointer,
-    thread_id,
 )
 from tradingagents.graph.trading_graph import _deep_merge_chunks
 
@@ -118,13 +117,12 @@ def test_repeated_checkpoint_operations_no_sqlite_locking(tmp_path):
     sig = "analysts=market|debate=1|risk=1|asset=stock|portfolio=none"
 
     # Perform 10 consecutive checkpoint cycles
-    for i in range(10):
+    for _ in range(10):
         with get_checkpointer(data_dir, ticker) as saver:
-            tid = thread_id(ticker, trade_date, sig)
-            config = {"configurable": {"thread_id": tid}}
             # Reuse the existing saver with zero nested connection locks
             step = checkpoint_step(data_dir, ticker, trade_date, sig, saver=saver)
             assert step is None
+
 
             # Clear checkpoint
             clear_checkpoint(data_dir, ticker, trade_date, sig)
@@ -168,14 +166,15 @@ def test_canonical_debater_no_warning_and_deprecated_alias_emits_warning():
     # Canonical debater: no deprecation warning
     with warnings.catch_warnings(record=True) as records:
         warnings.simplefilter("always")
-        node = create_aggressive_debater(llm)
+        _ = create_aggressive_debater(llm)
         dep_warnings = [r for r in records if issubclass(r.category, DeprecationWarning)]
         assert len(dep_warnings) == 0
 
     # Deprecated debator: issues DeprecationWarning
     with warnings.catch_warnings(record=True) as records:
         warnings.simplefilter("always")
-        node_dep = create_aggressive_debator(llm)
+        _ = create_aggressive_debator(llm)
         dep_warnings = [r for r in records if issubclass(r.category, DeprecationWarning)]
         assert len(dep_warnings) == 1
         assert "deprecated" in str(dep_warnings[0].message)
+

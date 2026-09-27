@@ -27,6 +27,7 @@ Validates:
 from __future__ import annotations
 
 import json
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -86,11 +87,11 @@ class MockChatModel(Runnable):
                 strategic_actions="Execute buy on pullback to key support.",
             )
             return RunnableLambda(lambda x: res)
-        if "ForexTraderProposal" in schema_name:
-            if self.structured_response is not None:
-                return RunnableLambda(lambda x: self.structured_response)
+        if "ForexTraderProposal" in schema_name and self.structured_response is not None:
+            return RunnableLambda(lambda x: self.structured_response)
         if self.structured_response is not None:
             return RunnableLambda(lambda x: self.structured_response)
+
         return self
 
 
@@ -734,3 +735,98 @@ class TestForexTradingAgentsGraphE2E:
         save_path = tmp_path / "custom_forex_report"
         report_dir = graph.save_reports(dummy_state, "EURUSD", save_path=save_path)
         assert report_dir.exists()
+
+
+class TestForexGraphConfiguration:
+    """Validate ForexTradingAgentsGraph LLM creation, signature order, and configuration precedence."""
+
+    def test_llm_creation_signature_and_model_names(self):
+        mock_client = MockChatModel()
+        fake_wrapper = type("FakeWrapper", (), {"get_llm": lambda self: mock_client})()
+
+        with patch("tradingagents.graph.forex_graph.create_llm_client", return_value=fake_wrapper) as mock_create:
+            custom_cfg = {
+                "llm_provider": "anthropic",
+                "quick_think_llm": "claude-haiku-4-5",
+                "deep_think_llm": "claude-sonnet-4-5",
+                "backend_url": "https://api.custom.com",
+                "temperature": 0.3,
+                "max_tokens": 4096,
+                "llm_max_retries": 5,
+                "anthropic_effort": "low",
+            }
+            graph = ForexTradingAgentsGraph(
+                selected_analysts=("forex_technical",),
+                config=custom_cfg,
+                db_path=":memory:",
+            )
+
+            assert graph.quick_thinking_llm is mock_client
+            assert graph.deep_thinking_llm is mock_client
+
+            assert mock_create.call_count == 2
+            # Quick LLM call
+            quick_call = mock_create.call_args_list[0]
+            assert quick_call.kwargs.get("provider") == "anthropic"
+            assert quick_call.kwargs.get("model") == "claude-haiku-4-5"
+            assert quick_call.kwargs.get("base_url") == "https://api.custom.com"
+            assert quick_call.kwargs.get("temperature") == 0.3
+            assert quick_call.kwargs.get("max_tokens") == 4096
+            assert quick_call.kwargs.get("max_retries") == 5
+            assert quick_call.kwargs.get("effort") == "low"
+
+            # Deep LLM call
+            deep_call = mock_create.call_args_list[1]
+            assert deep_call.kwargs.get("provider") == "anthropic"
+            assert deep_call.kwargs.get("model") == "claude-sonnet-4-5"
+            assert deep_call.kwargs.get("base_url") == "https://api.custom.com"
+
+    def test_legacy_model_key_fallback(self):
+        mock_client = MockChatModel()
+        fake_wrapper = type("FakeWrapper", (), {"get_llm": lambda self: mock_client})()
+
+        with patch("tradingagents.graph.forex_graph.create_llm_client", return_value=fake_wrapper) as mock_create:
+            custom_cfg = {
+                "llm_provider": "openai",
+                "quick_model": "gpt-4o-mini-legacy",
+                "deep_model": "gpt-4o-legacy",
+            }
+            _ = ForexTradingAgentsGraph(
+                selected_analysts=("forex_technical",),
+                config=custom_cfg,
+                db_path=":memory:",
+            )
+
+            assert mock_create.call_count == 2
+            assert mock_create.call_args_list[0].kwargs.get("model") == "gpt-4o-mini-legacy"
+            assert mock_create.call_args_list[1].kwargs.get("model") == "gpt-4o-legacy"
+
+    def test_env_var_precedence_in_forex_graph(self, monkeypatch):
+        monkeypatch.setenv("TRADINGAGENTS_LLM_PROVIDER", "google")
+        monkeypatch.setenv("TRADINGAGENTS_QUICK_THINK_LLM", "gemini-2.5-flash")
+        monkeypatch.setenv("TRADINGAGENTS_DEEP_THINK_LLM", "gemini-2.5-pro")
+        monkeypatch.setenv("TRADINGAGENTS_LLM_BACKEND_URL", "https://generativelanguage.googleapis.com")
+        monkeypatch.setenv("TRADINGAGENTS_TEMPERATURE", "0.1")
+        monkeypatch.setenv("TRADINGAGENTS_GOOGLE_THINKING_LEVEL", "low")
+
+        mock_client = MockChatModel()
+        fake_wrapper = type("FakeWrapper", (), {"get_llm": lambda self: mock_client})()
+
+        with patch("tradingagents.graph.forex_graph.create_llm_client", return_value=fake_wrapper) as mock_create:
+            graph = ForexTradingAgentsGraph(
+                selected_analysts=("forex_technical",),
+                db_path=":memory:",
+            )
+
+            assert graph.config["llm_provider"] == "google"
+            assert graph.config["quick_think_llm"] == "gemini-2.5-flash"
+            assert graph.config["deep_think_llm"] == "gemini-2.5-pro"
+            assert graph.config["backend_url"] == "https://generativelanguage.googleapis.com"
+            assert graph.config["temperature"] == 0.1
+
+            quick_call = mock_create.call_args_list[0]
+            assert quick_call.kwargs.get("provider") == "google"
+            assert quick_call.kwargs.get("model") == "gemini-2.5-flash"
+            assert quick_call.kwargs.get("thinking_level") == "low"
+            assert quick_call.kwargs.get("temperature") == 0.1
+

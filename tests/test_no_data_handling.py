@@ -25,11 +25,15 @@ class TestLoadOhlcvNoPoison(unittest.TestCase):
         self._tmp = os.path.join(os.path.dirname(__file__), "_tmp_cache")
         os.makedirs(self._tmp, exist_ok=True)
         set_config({"data_cache_dir": self._tmp})
+        self._reach_patcher = mock.patch.object(stockstats_utils, "vendor_reachable", return_value=True)
+        self._reach_patcher.start()
 
     def tearDown(self):
+        self._reach_patcher.stop()
         for f in os.listdir(self._tmp):
             os.remove(os.path.join(self._tmp, f))
         os.rmdir(self._tmp)
+
 
     def test_empty_download_raises_and_does_not_cache(self):
         empty = pd.DataFrame()

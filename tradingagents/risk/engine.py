@@ -218,9 +218,9 @@ class ForexRiskEngine:
         if proposal.stop_loss is None or proposal.stop_loss <= 0:
             violations.append("Mandatory stop-loss level is missing. Unhedged risk is prohibited.")
 
-        if eff_limits.require_take_profit:
-            if proposal.take_profit_1 is None or proposal.take_profit_1 <= 0:
-                violations.append("Mandatory take-profit target is missing.")
+        if eff_limits.require_take_profit and (proposal.take_profit_1 is None or proposal.take_profit_1 <= 0):
+            violations.append("Mandatory take-profit target is missing.")
+
 
         if proposal.entry_price is not None and proposal.stop_loss is not None:
             if proposal.action == ForexAction.LONG:

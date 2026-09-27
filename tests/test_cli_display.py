@@ -10,11 +10,19 @@ import json
 
 import pytest
 
+from cli.display import extract_content_string as extract_content_string_display
 from cli.main import extract_content_string
 
 
 @pytest.mark.unit
+def test_extract_content_string_reexport():
+    """Verify cli.main re-exports extract_content_string from cli.display for backwards compatibility."""
+    assert extract_content_string is extract_content_string_display
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("text", ["0", "False", "None", "[]", "{}", "0.0"])
+
 def test_a_message_that_reads_like_a_python_value_is_still_text(text):
     """These were parsed as Python and judged empty, so the message vanished."""
     assert extract_content_string(text) == text

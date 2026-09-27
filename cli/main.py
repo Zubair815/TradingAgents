@@ -17,10 +17,15 @@ from cli.announcements import display_announcements, fetch_announcements
 from cli.display import (
     classify_message_type,
     create_layout,
+    extract_content_string,
     message_buffer,
     update_display,
 )
 from cli.errors import describe_run_error
+
+__all__ = ["app", "extract_content_string"]
+
+from cli.models import AssetType
 from cli.prefs import load_last_run, sanitize, save_last_run
 from cli.stats_handler import StatsCallbackHandler
 from cli.utils import (
@@ -35,10 +40,12 @@ from cli.utils import (
     detect_asset_type,
     ensure_api_key,
     get_ticker,
+    prompt_forex_risk_config,
     prompt_openai_compatible_url,
     resolve_backend_url,
     select_analysts,
     select_deep_thinking_agent,
+    select_forex_timeframe,
     select_llm_provider,
     select_research_depth,
     select_shallow_thinking_agent,
@@ -153,6 +160,30 @@ def _prompt_selections(prefs):
     if asset_type.value != "stock":
         console.print(
             f"[green]Detected asset type:[/green] {asset_type.value}"
+        )
+
+    forex_timeframe = "H1"
+    account_balance = 100000.0
+    risk_percent = 1.0
+    if asset_type == AssetType.FOREX:
+        console.print(
+            create_question_box(
+                "Step 1b: Forex Execution Timeframe",
+                "Select primary trading timeframe (M5, M15, M30, H1, H4, D1)",
+                "H1",
+            )
+        )
+        forex_timeframe = select_forex_timeframe(prefs.get("forex_timeframe", "H1"))
+        console.print(
+            create_question_box(
+                "Step 1c: Forex Account Capital & Risk",
+                "Set institutional account balance and maximum trade risk %",
+                "100000 USD / 1.0%",
+            )
+        )
+        account_balance, risk_percent = prompt_forex_risk_config(
+            prefs.get("account_balance", 100000.0),
+            prefs.get("risk_percent", 1.0),
         )
 
     # Step 2: Analysis date
@@ -339,6 +370,9 @@ def _prompt_selections(prefs):
         "openai_reasoning_effort": reasoning_effort,
         "anthropic_effort": anthropic_effort,
         "output_language": output_language,
+        "forex_timeframe": forex_timeframe,
+        "account_balance": account_balance,
+        "risk_percent": risk_percent,
     }
 
 
@@ -581,19 +615,45 @@ def run_analysis(checkpoint: bool | None = None, portfolio=None):
     # Create stats callback handler for tracking LLM/tool calls
     stats_handler = StatsCallbackHandler()
 
-    # Normalize analyst selection to predefined order (selection is a 'set', order is fixed)
-    selected_set = {analyst.value for analyst in selections["analysts"]}
-    selected_analyst_keys = [a for a in ANALYST_ORDER if a in selected_set]
-    analyst_execution_plan = build_analyst_execution_plan(selected_analyst_keys)
-    analyst_wall_time_tracker = AnalystWallTimeTracker(analyst_execution_plan)
+    if selections["asset_type"] == "forex":
+        from tradingagents.forex import ForexTradingAgentsGraph
+        from tradingagents.risk.engine import ForexRiskLimits
+        from tradingagents.risk.sizing import ForexAccountProfile
 
-    # Initialize the graph with callbacks bound to LLMs
-    graph = TradingAgentsGraph(
-        selected_analyst_keys,
-        config=config,
-        debug=True,
-        callbacks=[stats_handler],
-    )
+        selected_forex_keys = [getattr(a, "value", a) for a in selections["analysts"]]
+        selected_analyst_keys = selected_forex_keys
+        analyst_execution_plan = build_analyst_execution_plan(selected_forex_keys)
+        analyst_wall_time_tracker = AnalystWallTimeTracker(analyst_execution_plan)
+
+        account_profile = ForexAccountProfile(
+            balance=selections.get("account_balance", 100000.0),
+            equity=selections.get("account_balance", 100000.0),
+        )
+        risk_limits = ForexRiskLimits(
+            max_risk_percent=selections.get("risk_percent", 1.0),
+            default_risk_percent=selections.get("risk_percent", 1.0),
+        )
+        graph = ForexTradingAgentsGraph(
+            selected_analysts=selected_forex_keys,
+            config=config,
+            risk_limits=risk_limits,
+            sizing_account=account_profile,
+            debug=True,
+        )
+    else:
+        # Normalize analyst selection to predefined order (selection is a 'set', order is fixed)
+        selected_set = {analyst.value for analyst in selections["analysts"]}
+        selected_analyst_keys = [a for a in ANALYST_ORDER if a in selected_set]
+        analyst_execution_plan = build_analyst_execution_plan(selected_analyst_keys)
+        analyst_wall_time_tracker = AnalystWallTimeTracker(analyst_execution_plan)
+
+        # Initialize the graph with callbacks bound to LLMs
+        graph = TradingAgentsGraph(
+            selected_analyst_keys,
+            config=config,
+            debug=True,
+            callbacks=[stats_handler],
+        )
 
     # Initialize message buffer with selected analysts
     message_buffer.init_for_analysis(selected_analyst_keys)
@@ -951,7 +1011,10 @@ def run_command(
     ticker: str = typer.Argument("NVDA", help="Ticker, including its exchange suffix when needed."),
     date: str = typer.Option(None, "--date", help="Analysis date YYYY-MM-DD; defaults to today."),
     analysts: str = typer.Option(None, "--analysts", help="Comma-separated analysts; omit for all applicable analysts."),
-    asset_type: str = typer.Option(None, "--asset-type", help="stock or crypto; detected from the ticker if omitted."),
+    asset_type: str = typer.Option(None, "--asset-type", help="stock, crypto, or forex; detected from the ticker if omitted."),
+    timeframe: str = typer.Option("H1", "--timeframe", help="Forex execution timeframe (M15, H1, H4, etc.)."),
+    balance: float = typer.Option(100000.0, "--balance", help="Forex account balance."),
+    risk_pct: float = typer.Option(1.0, "--risk-pct", help="Forex max risk percentage per trade."),
     checkpoint: bool | None = typer.Option(None, "--checkpoint/--no-checkpoint", help="Override checkpoint/resume configuration."),
     portfolio: str = typer.Option(None, "--portfolio", help="JSON file containing holdings and cash."),
 ):
@@ -965,8 +1028,51 @@ def run_command(
         safe_ticker_component(ticker)
         trade_date = _validate_trade_date(date or datetime.date.today().isoformat())
         asset_type = asset_type or detect_asset_type(ticker).value
-        if asset_type not in ("stock", "crypto"):
-            raise ValueError("asset-type must be stock or crypto")
+        if asset_type not in ("stock", "crypto", "forex"):
+            raise ValueError("asset-type must be stock, crypto, or forex")
+
+        if asset_type == "forex":
+            from tradingagents.forex import ForexTradingAgentsGraph
+            from tradingagents.risk.engine import ForexRiskLimits
+            from tradingagents.risk.sizing import ForexAccountProfile
+
+            forex_analysts = ["forex_technical", "forex_macro", "forex_news"]
+            if analysts is None:
+                selected = forex_analysts
+            else:
+                requested = {a.strip().lower() for a in analysts.split(",") if a.strip()}
+                norm_map = {"technical": "forex_technical", "macro": "forex_macro", "news": "forex_news"}
+                requested = {norm_map.get(a, a) for a in requested}
+                if not requested or requested.difference(forex_analysts):
+                    raise ValueError("Forex analysts must contain one or more of: " + ", ".join(forex_analysts))
+                selected = [a for a in forex_analysts if a in requested]
+
+            account_profile = ForexAccountProfile(balance=balance, equity=balance)
+            risk_limits = ForexRiskLimits(max_risk_percent=risk_pct, default_risk_percent=risk_pct)
+
+            config = deepcopy(DEFAULT_CONFIG)
+            if checkpoint is not None:
+                config["checkpoint_enabled"] = checkpoint
+
+            provider = config.get("llm_provider", "openai")
+            quick_model = config.get("quick_think_llm", "unknown")
+            deep_model = config.get("deep_think_llm", "unknown")
+            backend = config.get("backend_url") or "default"
+            typer.echo(f"Provider: {provider} | Quick: {quick_model} | Deep: {deep_model} | Backend: {backend}")
+            typer.echo(f"Analyzing Forex pair {ticker} on {trade_date} ({timeframe}) with {', '.join(selected)}...")
+
+            graph = ForexTradingAgentsGraph(
+                selected_analysts=selected,
+                config=config,
+                risk_limits=risk_limits,
+                sizing_account=account_profile,
+                debug=True,
+            )
+            state, signal = graph.run(ticker, trade_date=trade_date)
+            report = graph.save_reports(state, ticker, trade_date=trade_date)
+            typer.echo(f"Decision: {signal}")
+            typer.echo(f"Report: {report}")
+            return
         if analysts is None:
             selected = [a for a in ANALYST_ORDER if asset_type != "crypto" or a != "fundamentals"]
         else:

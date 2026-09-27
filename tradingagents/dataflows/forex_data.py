@@ -167,8 +167,9 @@ class MultiTimeframeData:
         """
         resolved_tf = resolve_timeframe(tf)
         if resolved_tf not in self.candles:
-            available = ", ".join(t.value for t in self.candles.keys())
+            available = ", ".join(t.value for t in self.candles)
             raise KeyError(f"Timeframe {resolved_tf.value} not found in bundle. Available: [{available}]")
+
         return self.candles[resolved_tf]
 
 

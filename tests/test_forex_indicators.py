@@ -63,8 +63,9 @@ def make_trending_df(num_bars: int = 50, trend: str = "bullish", start_price: fl
     step = 0.0005 if trend == "bullish" else -0.0005
     closes = [start_price + i * step for i in range(num_bars)]
     opens = [c - (step * 0.5) for c in closes]
-    highs = [max(o, c) + 0.0006 for o, c in zip(opens, closes)]
-    lows = [min(o, c) - 0.0006 for o, c in zip(opens, closes)]
+    highs = [max(o, c) + 0.0006 for o, c in zip(opens, closes, strict=True)]
+    lows = [min(o, c) - 0.0006 for o, c in zip(opens, closes, strict=True)]
+
     volumes = [1000 + i * 10 for i in range(num_bars)]
 
     return pd.DataFrame({

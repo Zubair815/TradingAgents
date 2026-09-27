@@ -48,7 +48,7 @@ def make_candle(
     dt: datetime,
     o: float,
     h: float,
-    l: float,
+    low: float,
     c: float,
     v: float = 100.0,
     spread: float = 1.0,
@@ -58,11 +58,12 @@ def make_candle(
         timestamp=dt,
         open=round(o, 5),
         high=round(h, 5),
-        low=round(l, 5),
+        low=round(low, 5),
         close=round(c, 5),
         volume=v,
         spread_pips=spread,
     )
+
 
 
 def make_proposal(

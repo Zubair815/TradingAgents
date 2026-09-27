@@ -15,6 +15,7 @@ Tests:
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -29,6 +30,7 @@ from tradingagents.agents.schemas_forex import (
 )
 from tradingagents.database import (
     ForexTradeJournal,
+    ProposalRecord,
     ProposalStatus,
     TradeExitReason,
     TradeStatus,
@@ -179,6 +181,27 @@ class TestProposalStorage:
 
         gbp_approved = memory_journal.list_proposals(pair="GBPUSD", status=ProposalStatus.APPROVED)
         assert len(gbp_approved) == 1
+
+    def test_proposals_are_append_only_and_immutable(self, memory_journal: ForexTradeJournal):
+        proposal = make_test_proposal("EURUSD")
+        pid = memory_journal.save_proposal(proposal)
+
+        # Attempting to re-save with identical proposal_id must raise IntegrityError
+        existing = memory_journal.get_proposal(pid)
+        assert existing is not None
+        tampered_record = ProposalRecord.from_forex_trader_proposal(
+            proposal=make_test_proposal("EURUSD"),
+            status=ProposalStatus.APPROVED,
+        )
+        object.__setattr__(tampered_record, "proposal_id", pid)
+        object.__setattr__(tampered_record, "entry_price", 999.99)
+
+        with pytest.raises(sqlite3.IntegrityError):
+            memory_journal.save_proposal(tampered_record)
+
+        # Original proposal must remain untampered
+        persisted = memory_journal.get_proposal(pid)
+        assert persisted.entry_price == existing.entry_price
 
 
 # ---------------------------------------------------------------------------

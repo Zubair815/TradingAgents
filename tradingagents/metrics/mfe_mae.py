@@ -144,16 +144,16 @@ def calculate_mfe_mae(
     # Filter candles by open/close window if timestamps are available
     parsed_candles: list[tuple[float, float, datetime | None]] = []
     for c in raw_candles:
-        h, l, ts = _extract_candle_extremes(c)
-        if h <= 0.0 and l <= 0.0:
+        c_high, c_low, ts = _extract_candle_extremes(c)
+        if c_high <= 0.0 and c_low <= 0.0:
             continue
-        parsed_candles.append((h, l, ts))
+        parsed_candles.append((c_high, c_low, ts))
 
     filtered_candles: list[tuple[float, float, datetime | None]] = []
     if open_dt is not None:
-        for h, l, ts in parsed_candles:
+        for c_high, c_low, ts in parsed_candles:
             if ts is None:
-                filtered_candles.append((h, l, ts))
+                filtered_candles.append((c_high, c_low, ts))
                 continue
             # Keep if after or equal to open_dt
             if ts < open_dt:
@@ -161,7 +161,8 @@ def calculate_mfe_mae(
             # If close_dt exists, keep if before or equal to close_dt
             if close_dt is not None and ts > close_dt:
                 continue
-            filtered_candles.append((h, l, ts))
+            filtered_candles.append((c_high, c_low, ts))
+
 
     # If timestamp filtering resulted in empty set, fall back to parsed_candles
     active_candles = filtered_candles if filtered_candles else parsed_candles
@@ -235,12 +236,12 @@ def calculate_mfe_mae(
         mfe_price = -1e9
         mae_price = 1e9
 
-        for h, l, ts in active_candles:
-            if h > mfe_price:
-                mfe_price = h
+        for c_high, c_low, ts in active_candles:
+            if c_high > mfe_price:
+                mfe_price = c_high
                 mfe_time_dt = ts
-            if l < mae_price:
-                mae_price = l
+            if c_low < mae_price:
+                mae_price = c_low
                 mae_time_dt = ts
 
         # Sanity bounds: entry price should be within excursion bounds
@@ -262,13 +263,14 @@ def calculate_mfe_mae(
         mfe_price = 1e9
         mae_price = -1e9
 
-        for h, l, ts in active_candles:
-            if l < mfe_price:
-                mfe_price = l
+        for c_high, c_low, ts in active_candles:
+            if c_low < mfe_price:
+                mfe_price = c_low
                 mfe_time_dt = ts
-            if h > mae_price:
-                mae_price = h
+            if c_high > mae_price:
+                mae_price = c_high
                 mae_time_dt = ts
+
 
         mfe_price = min(mfe_price, open_price, effective_close)
         mae_price = max(mae_price, open_price, effective_close)

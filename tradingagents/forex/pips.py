@@ -29,7 +29,8 @@ from tradingagents.forex.domain import ForexPair, get_forex_pair
 # ---------------------------------------------------------------------------
 
 
-def pip_size_for(symbol: Union[ForexPair, str]) -> float:
+def pip_size_for(symbol: ForexPair | str) -> float:
+
     """Return the pip size for *symbol* (ForexPair object or string symbol).
 
     Falls back to the standard 5-digit convention (0.0001) for unknown pairs
@@ -93,7 +94,7 @@ def pips_directional(from_price: float, to_price: float, pip_size: float) -> flo
     return (to_price - from_price) / pip_size
 
 
-def pips_to_price(pips: float, pip_size: Union[float, ForexPair, str]) -> float:
+def pips_to_price(pips: float, pip_size: float | ForexPair | str) -> float:
     """Convert a pip count to an absolute price distance.
 
     Can accept either a numeric pip_size (e.g. 0.0001) or a ForexPair / symbol string.
@@ -114,7 +115,8 @@ def pips_to_price(pips: float, pip_size: Union[float, ForexPair, str]) -> float:
     return pips * effective_pip
 
 
-def price_to_pips(price_distance: float, pip_size: Union[float, ForexPair, str]) -> float:
+def price_to_pips(price_distance: float, pip_size: float | ForexPair | str) -> float:
+
     """Convert an absolute price distance to pips.
 
     Can accept either a numeric pip_size (e.g. 0.0001) or a ForexPair / symbol string.

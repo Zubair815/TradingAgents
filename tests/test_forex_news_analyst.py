@@ -410,8 +410,9 @@ class TestForexNewsAssessmentSchema:
         assert assessment.confidence == 0.75
 
     def test_invalid_confidence_raises(self):
-        with pytest.raises(Exception):
+        with pytest.raises(ValueError):
             ForexNewsAssessment(
+
                 pair="EURUSD",
                 news_bias="BULLISH_BASE",
                 confidence=1.5,  # Out of [0, 1] range

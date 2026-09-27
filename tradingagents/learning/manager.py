@@ -99,7 +99,7 @@ class ForexLearningManager:
             mfe_mae=mfe_mae,
             outcome=outcome,
             executions=executions,
-            events=[],
+            events=events,
         )
 
         # Execute reflection agent

@@ -6,6 +6,7 @@ and lifecycle teardown with robust error diagnostics and thread-safety.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import threading
 from pathlib import Path
@@ -20,6 +21,7 @@ from tradingagents.mt5.errors import (
 from tradingagents.mt5.models import MT5ConnectionStatus
 
 logger = logging.getLogger(__name__)
+
 
 
 class MT5ConnectionManager:
@@ -124,23 +126,20 @@ class MT5ConnectionManager:
                     authorized = mt5.login(**login_kwargs)
                 except Exception as exc:
                     self.status = MT5ConnectionStatus.FAILED
-                    try:
+                    with contextlib.suppress(Exception):
                         mt5.shutdown()
-                    except Exception:
-                        pass
                     raise MT5AuthorizationError(f"Exception during MT5 login: {exc}") from exc
 
                 if not authorized:
                     code, desc = self._get_last_error()
                     self.status = MT5ConnectionStatus.FAILED
-                    try:
+                    with contextlib.suppress(Exception):
                         mt5.shutdown()
-                    except Exception:
-                        pass
                     raise MT5AuthorizationError(
                         f"Failed to authorize account {eff_login} on server {eff_server}: {desc}",
                         code=code,
                     )
+
 
             self.status = MT5ConnectionStatus.CONNECTED
             logger.info("MetaTrader 5 connection established successfully.")

@@ -6,6 +6,7 @@ execution fills, strategy versioning, and post-trade performance analytics.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -100,11 +101,10 @@ class ForexTradeJournal:
     def close(self) -> None:
         """Close connection if in-memory."""
         if self._mem_conn is not None:
-            try:
+            with contextlib.suppress(Exception):
                 self._mem_conn.close()
-            except Exception:
-                pass
             self._mem_conn = None
+
 
     def __enter__(self) -> ForexTradeJournal:
         return self
@@ -145,7 +145,7 @@ class ForexTradeJournal:
                 with conn:
                     conn.execute(
                         """
-                        INSERT OR REPLACE INTO proposals (
+                        INSERT INTO proposals (
                             proposal_id, created_at_utc, pair, action, order_type,
                             setup_type, timeframe, entry_price, entry_zone_low,
                             entry_zone_high, stop_loss, take_profit_1, take_profit_2,

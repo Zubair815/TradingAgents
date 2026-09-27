@@ -59,6 +59,7 @@ from tradingagents.database.models import (
     TradeStatus,
 )
 from tradingagents.dataflows.forex_data import ForexBar
+from tradingagents.forex import ForexTradingAgentsGraph
 from tradingagents.forex.domain import (
     MAJOR_PAIRS,
     normalize_forex_pair,
@@ -68,7 +69,7 @@ from tradingagents.journal.manager import ForexJournalManager
 from tradingagents.learning.manager import ForexLearningManager
 from tradingagents.mt5.errors import MT5Error
 from tradingagents.mt5.observer import MT5Observer
-from tradingagents.risk.engine import ForexRiskEngine
+from tradingagents.risk.engine import ForexRiskEngine, ForexRiskLimits
 from tradingagents.risk.sizing import (
     BrokerExecutionConstraints,
     ForexAccountProfile,
@@ -394,8 +395,9 @@ async def list_trades(
     if status:
         try:
             trade_status = TradeStatus(status.upper())
-        except ValueError:
-            raise HTTPException(status_code=400, detail=f"Invalid trade status: {status}")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid trade status: {status}") from exc
+
 
     trades = journal.list_trades(pair=pair, status=trade_status, limit=limit + offset)
     sliced_trades = trades[offset : offset + limit]
@@ -434,7 +436,8 @@ async def manual_open_trade(
         norm_pair = normalize_forex_pair(req.pair)
         action_enum = ForexAction(req.action.upper())
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Validation failed: {exc}")
+        raise HTTPException(status_code=400, detail=f"Validation failed: {exc}") from exc
+
 
     if req.proposal_id:
         trade_id = journal_mgr.open_trade(
@@ -473,8 +476,9 @@ async def close_trade(
     """Close and settle an open trade."""
     try:
         reason_enum = TradeExitReason(req.exit_reason.upper())
-    except ValueError:
-        raise HTTPException(status_code=400, detail=f"Invalid exit_reason: {req.exit_reason}")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid exit_reason: {req.exit_reason}") from exc
+
 
     try:
         settled = journal_mgr.close_trade(
@@ -489,7 +493,8 @@ async def close_trade(
         )
         return {"trade": _safe_model_dump(settled), "status": "CLOSED"}
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
 
 
 @router.post("/journal/trades/{trade_id}/modify-sl")
@@ -508,7 +513,8 @@ async def modify_stop_loss(
         )
         return {"success": success, "trade_id": trade_id, "new_stop_loss": req.new_stop_loss}
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
 
 
 @router.post("/journal/trades/{trade_id}/modify-tp")
@@ -527,7 +533,8 @@ async def modify_take_profit(
         )
         return {"success": True, "trade_id": trade_id, "new_take_profit": req.new_take_profit}
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
 
 
 @router.post("/journal/trades/{trade_id}/partial-close")
@@ -548,7 +555,8 @@ async def partial_close_trade(
         )
         return {"result": _safe_model_dump(result), "status": "PARTIALLY_CLOSED"}
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
 
 
 @router.post("/journal/trades/{trade_id}/reflection")
@@ -572,7 +580,8 @@ async def update_trade_reflection(
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
 
 
 @router.get("/journal/summary")
@@ -631,8 +640,9 @@ async def list_proposals(
     if status:
         try:
             prop_status = ProposalStatus(status.upper())
-        except ValueError:
-            raise HTTPException(status_code=400, detail=f"Invalid proposal status: {status}")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid proposal status: {status}") from exc
+
 
     proposals = journal.list_proposals(pair=pair, status=prop_status, limit=limit + offset)
     sliced_proposals = proposals[offset : offset + limit]
@@ -682,7 +692,8 @@ async def create_proposal(
         saved = journal.get_proposal(prop_id)
         return {"proposal": _safe_model_dump(saved), "proposal_id": prop_id}
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
 
 
 @router.post("/proposals/evaluate-risk")
@@ -728,7 +739,8 @@ async def evaluate_risk(
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
 
 
 @router.post("/proposals/size")
@@ -773,7 +785,8 @@ async def size_proposal(
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
 
 
 @router.post("/proposals/{proposal_id}/status")
@@ -790,12 +803,13 @@ async def update_proposal_status(
             raise HTTPException(status_code=404, detail=f"Proposal {proposal_id} not found")
         saved = journal.get_proposal(proposal_id)
         return {"proposal": _safe_model_dump(saved), "status": new_status.value}
-    except ValueError:
-        raise HTTPException(status_code=400, detail=f"Invalid status: {req.status}")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid status: {req.status}") from exc
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
 
 
 @router.post("/proposals/reconcile")
@@ -871,7 +885,8 @@ async def disconnect_mt5(
         mt5.connection.disconnect()
         return {"status": "DISCONNECTED", "is_connected": False}
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
 
 
 @router.get("/mt5/account")
@@ -883,9 +898,10 @@ async def get_mt5_account(
         info = mt5.get_account_info()
         return {"account": _safe_model_dump(info)}
     except MT5Error as exc:
-        raise HTTPException(status_code=503, detail=str(exc))
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
 
 
 @router.get("/mt5/symbols")
@@ -917,7 +933,8 @@ async def get_mt5_symbol_info(
         info = mt5.get_symbol_info(symbol)
         return {"symbol_info": _safe_model_dump(info)}
     except MT5Error as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
 
 
 @router.get("/mt5/tick/{symbol}")
@@ -930,7 +947,8 @@ async def get_mt5_tick(
         tick = mt5.get_current_tick(symbol)
         return {"tick": _safe_model_dump(tick)}
     except MT5Error as exc:
-        raise HTTPException(status_code=503, detail=str(exc))
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
 
 
 @router.get("/mt5/positions")
@@ -942,7 +960,8 @@ async def get_mt5_positions(
         positions = mt5.get_open_positions()
         return {"positions": [_safe_model_dump(p) for p in positions], "count": len(positions)}
     except MT5Error as exc:
-        raise HTTPException(status_code=503, detail=str(exc))
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
 
 
 @router.get("/mt5/orders")
@@ -954,7 +973,8 @@ async def get_mt5_orders(
         orders = mt5.get_pending_orders()
         return {"orders": [_safe_model_dump(o) for o in orders], "count": len(orders)}
     except MT5Error as exc:
-        raise HTTPException(status_code=503, detail=str(exc))
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
 
 
 @router.get("/mt5/deals")
@@ -971,29 +991,296 @@ async def get_mt5_deals(
         deals = mt5.get_deals(date_from=d_from, date_to=d_to, position=position)
         return {"deals": [_safe_model_dump(d) for d in deals], "count": len(deals)}
     except MT5Error as exc:
-        raise HTTPException(status_code=503, detail=str(exc))
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
 
 
 # ---------------------------------------------------------------------------
 # 4. Forex Agent Analysis & SSE Streaming
 # ---------------------------------------------------------------------------
 
-@router.post("/analyze", responses={503: {"description": "Forex analysis unavailable"}})
+def _run_forex_analysis(run_id: str, req: ForexAnalysisRequest) -> None:
+    """Execute Forex agent analysis pipeline in a background worker thread."""
+    try:
+        with _lock:
+            if run_id in _forex_runs:
+                _forex_runs[run_id]["status"] = "running"
+
+        _emit_fx_event(
+            run_id,
+            "preparing_data",
+            {
+                "run_id": run_id,
+                "pair": req.pair,
+                "timeframe": req.timeframe,
+                "date": req.date,
+                "message": f"Acquiring market data and preparing live context for {req.pair} ({req.timeframe})...",
+            },
+        )
+
+        config: dict[str, Any] = {}
+        if req.provider:
+            config["llm_provider"] = req.provider
+        if req.quick_model:
+            config["quick_think_llm"] = req.quick_model
+        if req.deep_model:
+            config["deep_think_llm"] = req.deep_model
+
+        account = ForexAccountProfile(
+            balance=req.account_balance,
+            equity=req.account_balance,
+        )
+        risk_limits = ForexRiskLimits(
+            max_risk_percent=req.risk_percent,
+            default_risk_percent=req.risk_percent,
+        )
+        journal = get_journal()
+
+        analysts = tuple(req.analysts) if req.analysts else ("forex_technical", "forex_macro", "forex_news")
+        graph = ForexTradingAgentsGraph(
+            selected_analysts=analysts,
+            config=config,
+            risk_limits=risk_limits,
+            sizing_account=account,
+            journal=journal,
+            debug=True,
+        )
+
+        seen_stages: set[str] = set()
+
+        for chunk in graph.stream(req.pair, trade_date=req.date):
+            if not isinstance(chunk, dict):
+                continue
+
+            if chunk.get("forex_technical_report") and "technical_analyst" not in seen_stages:
+                seen_stages.add("technical_analyst")
+                _emit_fx_event(
+                    run_id,
+                    "technical_analyst",
+                    {
+                        "stage": "technical_analyst",
+                        "pair": req.pair,
+                        "message": "Forex Technical Analyst completed market structure analysis.",
+                    },
+                )
+
+            if chunk.get("forex_macro_report") and "macro_analyst" not in seen_stages:
+                seen_stages.add("macro_analyst")
+                _emit_fx_event(
+                    run_id,
+                    "macro_analyst",
+                    {
+                        "stage": "macro_analyst",
+                        "pair": req.pair,
+                        "message": "Currency Macro Analyst completed macroeconomic & policy analysis.",
+                    },
+                )
+
+            if chunk.get("forex_news_report") and "news_analyst" not in seen_stages:
+                seen_stages.add("news_analyst")
+                _emit_fx_event(
+                    run_id,
+                    "news_analyst",
+                    {
+                        "stage": "news_analyst",
+                        "pair": req.pair,
+                        "message": "Forex News Analyst completed economic calendar risk assessment.",
+                    },
+                )
+
+            debate = chunk.get("investment_debate_state")
+            if debate and isinstance(debate, dict):
+                if (debate.get("bull_history") or debate.get("bear_history")) and "bull_bear_debate" not in seen_stages:
+                    seen_stages.add("bull_bear_debate")
+                    _emit_fx_event(
+                        run_id,
+                        "bull_bear_debate",
+                        {
+                            "stage": "bull_bear_debate",
+                            "pair": req.pair,
+                            "message": "Bull/Bear Researchers conducting thesis debate.",
+                        },
+                    )
+
+                if debate.get("judge_decision") and "research_manager" not in seen_stages:
+                    seen_stages.add("research_manager")
+                    _emit_fx_event(
+                        run_id,
+                        "research_manager",
+                        {
+                            "stage": "research_manager",
+                            "pair": req.pair,
+                            "message": "Research Manager synthesized strategic directional consensus.",
+                        },
+                    )
+
+            if (chunk.get("trader_investment_plan") or chunk.get("forex_proposal")) and "trader" not in seen_stages:
+                seen_stages.add("trader")
+                _emit_fx_event(
+                    run_id,
+                    "trader",
+                    {
+                        "stage": "trader",
+                        "pair": req.pair,
+                        "message": "Forex Trader formulated order proposal with entry/SL/TP levels.",
+                    },
+                )
+
+            if chunk.get("forex_risk_decision") and "risk_evaluator" not in seen_stages:
+                seen_stages.add("risk_evaluator")
+                _emit_fx_event(
+                    run_id,
+                    "risk_evaluator",
+                    {
+                        "stage": "risk_evaluator",
+                        "pair": req.pair,
+                        "message": "Deterministic Risk Evaluator & Sizing Engine audited trade limits.",
+                    },
+                )
+
+        final_state = graph.get_state() or {}
+        signal = graph.process_signal(final_state)
+        proposal = graph.get_last_proposal()
+        risk_decision = graph.get_last_risk_decision()
+        sizing_result = graph.get_last_sizing_result()
+
+        report_path = None
+        try:
+            report_path = graph.save_reports(final_state, req.pair, trade_date=req.date)
+        except Exception as rep_exc:
+            logger.warning("Could not write markdown report tree for %s: %s", run_id, rep_exc)
+
+        report_id = report_path.parent.name if report_path else None
+        proposal_id = getattr(proposal, "proposal_id", None)
+        if not proposal_id and journal and proposal:
+            latest = journal.list_proposals(pair=req.pair, limit=1)
+            if latest:
+                proposal_id = latest[0].proposal_id
+        if not proposal_id and proposal:
+            proposal_id = f"prop_{uuid.uuid4().hex[:12]}"
+
+        report_payload = {
+            "run_id": run_id,
+            "pair": req.pair,
+            "timeframe": req.timeframe,
+            "date": req.date,
+            "signal": signal,
+            "proposal_id": proposal_id,
+            "proposal": proposal.model_dump() if proposal else None,
+            "risk_decision": risk_decision.model_dump() if risk_decision else None,
+            "sizing": sizing_result.model_dump() if sizing_result else None,
+            "technical_report": final_state.get("forex_technical_report", ""),
+            "macro_report": final_state.get("forex_macro_report", ""),
+            "news_report": final_state.get("forex_news_report", ""),
+            "investment_debate": final_state.get("investment_debate_state", {}),
+            "trader_plan": final_state.get("trader_investment_plan", ""),
+            "final_decision": final_state.get("final_trade_decision", ""),
+            "report_path": str(report_path) if report_path else None,
+        }
+
+        with _lock:
+            _forex_completed_reports[run_id] = report_payload
+            if report_id:
+                _forex_completed_reports[report_id] = report_payload
+
+            if run_id in _forex_runs:
+                _forex_runs[run_id].update(
+                    status="completed",
+                    finished_at=datetime.now(timezone.utc).isoformat(),
+                    signal=signal,
+                    proposal_id=proposal_id,
+                    report_id=report_id,
+                    report_path=str(report_path) if report_path else None,
+                )
+
+        _emit_fx_event(
+            run_id,
+            "complete",
+            {
+                "run_id": run_id,
+                "pair": req.pair,
+                "signal": signal,
+                "proposal_id": proposal_id,
+                "report_id": report_id,
+                "message": f"Forex analysis complete: {signal}",
+            },
+        )
+
+    except Exception as exc:
+        error_msg = str(exc)
+        if "openrouter.ai/workspaces" in error_msg:
+            error_msg = "OpenRouter credit limit exceeded."
+        elif "402" in error_msg:
+            error_msg = "Provider returned 402 — credit/billing limit reached."
+
+        with _lock:
+            if run_id in _forex_runs:
+                _forex_runs[run_id].update(
+                    status="failed",
+                    finished_at=datetime.now(timezone.utc).isoformat(),
+                    error=error_msg,
+                )
+
+        _emit_fx_event(
+            run_id,
+            "error",
+            {
+                "run_id": run_id,
+                "error": error_msg,
+                "message": f"Forex analysis failed: {error_msg}",
+            },
+        )
+        logger.error("Forex analysis failed for run %s: %s", run_id, error_msg, exc_info=True)
+
+
+@router.post("/analyze")
 async def start_forex_analysis(
     req: ForexAnalysisRequest,
     request: Request,
 ):
-    """Reject analysis requests until the real data and agent pipeline is connected."""
+    """Start asynchronous Forex multi-agent analysis with live agent execution and SSE updates."""
     verify_optional_auth(request)
-    raise HTTPException(
-        status_code=503,
-        detail={
-            "code": "FOREX_ANALYSIS_UNAVAILABLE",
-            "status": "unavailable",
-            "message": "Forex analysis is unavailable until the live data and agent pipeline is connected.",
-            "signal": None,
-        },
+
+    run_id = f"fx_{uuid.uuid4().hex[:10]}"
+    now_iso = datetime.now(timezone.utc).isoformat()
+    run_entry = {
+        "run_id": run_id,
+        "pair": req.pair,
+        "timeframe": req.timeframe,
+        "date": req.date,
+        "status": "queued",
+        "provider": req.provider or "",
+        "quick_model": req.quick_model or "",
+        "deep_model": req.deep_model or "",
+        "account_balance": req.account_balance,
+        "risk_percent": req.risk_percent,
+        "started_at": now_iso,
+        "finished_at": None,
+        "error": None,
+        "signal": None,
+        "proposal_id": None,
+        "report_id": None,
+        "report_path": None,
+    }
+
+    with _lock:
+        _forex_runs[run_id] = run_entry
+        _forex_run_events[run_id] = []
+
+    worker = threading.Thread(
+        target=_run_forex_analysis,
+        args=(run_id, req),
+        daemon=True,
     )
+    worker.start()
+
+    return {
+        "run_id": run_id,
+        "status": "queued",
+        "pair": req.pair,
+        "timeframe": req.timeframe,
+        "message": f"Forex analysis started for {req.pair}",
+    }
 
 
 @router.get("/runs")
@@ -1109,9 +1396,10 @@ async def run_backtest(
                 o = curr
                 c = curr + delta
                 h = max(o, c) + (1.5 * pip_sz)
-                l = min(o, c) - (1.5 * pip_sz)
+                low_val = min(o, c) - (1.5 * pip_sz)
                 curr = c
-                candle_objs.append(ForexBar(timestamp=ts, open=o, high=h, low=l, close=c, volume=100.0))
+                candle_objs.append(ForexBar(timestamp=ts, open=o, high=h, low=low_val, close=c, volume=100.0))
+
 
         config = ForexBacktestConfig(
             initial_balance=req.initial_balance,
@@ -1182,7 +1470,8 @@ async def run_backtest(
         }
     except Exception as exc:
         logger.error("Forex backtest failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
 
 
 @router.get("/backtest/runs")
@@ -1312,7 +1601,8 @@ async def list_lessons(
 ):
     """Query stored heuristic lessons from past trade reflections."""
     lessons = learning_mgr.store.list_lessons(pair=pair, setup_type=setup_type, tag=tag)
-    return {"lessons": [_safe_model_dump(l) for l in lessons], "count": len(lessons)}
+    return {"lessons": [_safe_model_dump(les) for les in lessons], "count": len(lessons)}
+
 
 
 @router.post("/learning/reflect/{trade_id}")
@@ -1325,7 +1615,8 @@ async def reflect_on_trade(
         reflection = learning_mgr.reflect_on_trade(trade=trade_id)
         return {"reflection": _safe_model_dump(reflection), "status": "COMPLETED"}
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
 
 
 @router.get("/learning/retrieve")

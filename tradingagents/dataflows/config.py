@@ -12,8 +12,10 @@ _active_config: ContextVar[dict | None] = ContextVar("tradingagents_config", def
 def build_config(config: dict | None = None) -> dict:
     """Build an isolated configuration from defaults, never another run's state."""
     result = deepcopy(default_config.DEFAULT_CONFIG)
+    default_config._apply_env_overrides(result)
     _merge_config(result, config or {})
     return result
+
 
 
 def _merge_config(target: dict, incoming: dict) -> None:

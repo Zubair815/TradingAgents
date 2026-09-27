@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="description" content="TradingAgents — Multi-Agent AI Trading Analysis Dashboard">
+  <meta name="description" content="TradingAgents — Multi-Agent AI Forex & Equities Decision-Support Dashboard">
   <title>TradingAgents — AI Trading Terminal</title>
   <link rel="stylesheet" href="/static/styles.css">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📊</text></svg>">
@@ -18,9 +18,15 @@
         <span class="logo-text">TradingAgents</span>
         <span class="logo-badge">AI Terminal</span>
       </a>
-      <div class="header-status">
-        <div class="status-dot" id="serverDot"></div>
-        <span class="status-label" id="serverStatus">Connected</span>
+      <div style="display: flex; align-items: center; gap: 1rem;">
+        <div class="mt5-badge" id="mt5Badge" title="MetaTrader 5 strictly observed in read-only mode. Live orders are never executed.">
+          <div class="status-dot" id="mt5Dot" style="background: var(--amber);"></div>
+          <span id="mt5Status">MT5: Read-Only Observer</span>
+        </div>
+        <div class="header-status">
+          <div class="status-dot" id="serverDot"></div>
+          <span class="status-label" id="serverStatus">Connected</span>
+        </div>
       </div>
     </div>
   </header>
@@ -34,10 +40,16 @@
         ⚡ Analyze
       </button>
       <button class="tab" data-view="report" role="tab">
-        📋 Report
+        📋 Decision Report
+      </button>
+      <button class="tab" data-view="journal" role="tab">
+        📈 Forex Journal & MT5
+      </button>
+      <button class="tab" data-view="lessons" role="tab">
+        🧠 Institutional Lessons
       </button>
       <button class="tab" data-view="history" role="tab">
-        📊 History
+        📊 History & Analytics
       </button>
     </div>
 
@@ -54,10 +66,104 @@
             </h2>
           </div>
 
+          <!-- Asset Class Toggle -->
+          <div class="asset-mode-toggle">
+            <button type="button" class="mode-btn active" id="modeForex" data-mode="forex">
+              💱 Forex (Multi-Agent)
+            </button>
+            <button type="button" class="mode-btn" id="modeEquities" data-mode="equities">
+              📈 Equities & Crypto
+            </button>
+          </div>
+
           <form id="analysisForm" autocomplete="off">
-            <div class="form-group" style="margin-bottom: 1rem;">
-              <label class="form-label" for="ticker">Ticker Symbol</label>
-              <input type="text" class="form-input" id="ticker" value="NVDA" placeholder="e.g. NVDA, AAPL, TSLA" spellcheck="false">
+            <!-- Forex Controls -->
+            <div id="forexControls">
+              <div class="form-group" style="margin-bottom: 1rem;">
+                <label class="form-label" for="forexPair">Currency Pair</label>
+                <select class="form-select" id="forexPair">
+                  <option value="EURUSD" selected>EURUSD (Euro / US Dollar)</option>
+                  <option value="GBPUSD">GBPUSD (British Pound / US Dollar)</option>
+                  <option value="USDJPY">USDJPY (US Dollar / Japanese Yen)</option>
+                  <option value="USDCHF">USDCHF (US Dollar / Swiss Franc)</option>
+                  <option value="AUDUSD">AUDUSD (Australian Dollar / US Dollar)</option>
+                  <option value="USDCAD">USDCAD (US Dollar / Canadian Dollar)</option>
+                  <option value="NZDUSD">NZDUSD (New Zealand Dollar / US Dollar)</option>
+                  <option value="EURGBP">EURGBP (Euro / British Pound)</option>
+                  <option value="EURJPY">EURJPY (Euro / Japanese Yen)</option>
+                  <option value="GBPJPY">GBPJPY (British Pound / Japanese Yen)</option>
+                </select>
+              </div>
+
+              <div class="form-group" style="margin-bottom: 1rem;">
+                <label class="form-label" for="forexTimeframe">Execution Timeframe</label>
+                <select class="form-select" id="forexTimeframe">
+                  <option value="M1">M1 (1-Minute Scalp)</option>
+                  <option value="M5">M5 (5-Minute Intraday)</option>
+                  <option value="M15">M15 (15-Minute Session)</option>
+                  <option value="H1" selected>H1 (1-Hour Swing Retest)</option>
+                  <option value="H4">H4 (4-Hour Structural Trend)</option>
+                  <option value="D1">D1 (Daily Macro Bias)</option>
+                </select>
+              </div>
+
+              <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; margin-bottom: 1rem;">
+                <div class="form-group">
+                  <label class="form-label" for="accountBalance">Balance ($)</label>
+                  <input type="number" class="form-input" id="accountBalance" value="100000" min="100" step="1000">
+                </div>
+                <div class="form-group">
+                  <label class="form-label" for="riskPercent">Risk Limit (%)</label>
+                  <input type="number" class="form-input" id="riskPercent" value="1.0" min="0.1" max="5.0" step="0.1">
+                </div>
+              </div>
+
+              <div class="form-group" style="margin-bottom: 1rem;">
+                <label class="form-label">Forex Analyst Pipeline</label>
+                <div class="analyst-toggles" id="forexAnalystToggles">
+                  <button type="button" class="analyst-toggle active" data-fxanalyst="technical">
+                    <span class="dot"></span> Technical
+                  </button>
+                  <button type="button" class="analyst-toggle active" data-fxanalyst="macro">
+                    <span class="dot"></span> Macro
+                  </button>
+                  <button type="button" class="analyst-toggle active" data-fxanalyst="news">
+                    <span class="dot"></span> News
+                  </button>
+                  <button type="button" class="analyst-toggle active" data-fxanalyst="debate">
+                    <span class="dot"></span> Debate
+                  </button>
+                  <button type="button" class="analyst-toggle active" data-fxanalyst="risk">
+                    <span class="dot"></span> Risk Engine
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <!-- Equities Controls -->
+            <div id="equitiesControls" style="display: none;">
+              <div class="form-group" style="margin-bottom: 1rem;">
+                <label class="form-label" for="ticker">Ticker Symbol</label>
+                <input type="text" class="form-input" id="ticker" value="NVDA" placeholder="e.g. NVDA, AAPL, TSLA" spellcheck="false">
+              </div>
+
+              <div class="form-group" style="margin-bottom: 1rem;">
+                <label class="form-label">Active Stock Analysts</label>
+                <div class="analyst-toggles" id="analystToggles">
+                  <button type="button" class="analyst-toggle active" data-analyst="market">
+                    <span class="dot"></span> Market
+                  </button>
+                  <button type="button" class="analyst-toggle active" data-analyst="social">
+                    <span class="dot"></span> Sentiment
+                  </button>
+                  <button type="button" class="analyst-toggle active" data-analyst="news">
+                    <span class="dot"></span> News
+                  </button>
+                  <button type="button" class="analyst-toggle active" data-analyst="fundamentals">
+                    <span class="dot"></span> Fundamentals
+                  </button>
+                </div>
+              </div>
             </div>
 
             <div class="form-group" style="margin-bottom: 1rem;">
@@ -89,24 +195,6 @@
               <select class="form-select" id="deepModel">
                 <option value="">Select provider first</option>
               </select>
-            </div>
-
-            <div class="form-group" style="margin-bottom: 1rem;">
-              <label class="form-label">Active Analysts</label>
-              <div class="analyst-toggles" id="analystToggles">
-                <button type="button" class="analyst-toggle active" data-analyst="market">
-                  <span class="dot"></span> Market
-                </button>
-                <button type="button" class="analyst-toggle active" data-analyst="social">
-                  <span class="dot"></span> Sentiment
-                </button>
-                <button type="button" class="analyst-toggle active" data-analyst="news">
-                  <span class="dot"></span> News
-                </button>
-                <button type="button" class="analyst-toggle active" data-analyst="fundamentals">
-                  <span class="dot"></span> Fundamentals
-                </button>
-              </div>
             </div>
 
             <button type="submit" class="btn-run" id="btnRun">
@@ -145,19 +233,155 @@
           <div class="empty-state-icon">📋</div>
           <div class="empty-state-title">No Report Yet</div>
           <div class="empty-state-desc">
-            Run an analysis first. The complete report will appear here with all agent sections.
+            Run an analysis first. The complete decision report with risk engine metrics and trade proposal will appear here.
           </div>
         </div>
       </div>
     </div>
 
-    <!-- ===== HISTORY VIEW ===== -->
+    <!-- ===== FOREX JOURNAL & MT5 VIEW ===== -->
+    <div class="view" id="view-journal">
+      <!-- Live MT5 Snapshot -->
+      <div class="card" style="margin-bottom: 1.5rem;">
+        <div class="card-header" style="justify-content: space-between;">
+          <h2 class="card-title">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+            MetaTrader 5 Account (Read-Only Observer)
+          </h2>
+          <span style="font-size:0.75rem; color:var(--text-muted); background:var(--bg-primary); padding:4px 8px; border-radius:4px; border:1px solid var(--border);">
+            Strictly Passive Observation — Never Sends Live Orders
+          </span>
+        </div>
+        <div class="stat-cards" id="mt5AccountCards">
+          <div class="stat-card">
+            <span class="stat-label">Balance</span>
+            <span class="stat-value" id="mt5Balance">$0.00</span>
+            <span class="stat-sub" id="mt5Currency">USD Account</span>
+          </div>
+          <div class="stat-card">
+            <span class="stat-label">Equity</span>
+            <span class="stat-value" id="mt5Equity" style="color:var(--cyan);">$0.00</span>
+            <span class="stat-sub">Real-time valuation</span>
+          </div>
+          <div class="stat-card">
+            <span class="stat-label">Floating P&L</span>
+            <span class="stat-value" id="mt5Floating">$0.00</span>
+            <span class="stat-sub">Unrealized position profit</span>
+          </div>
+          <div class="stat-card">
+            <span class="stat-label">Free Margin</span>
+            <span class="stat-value" id="mt5FreeMargin">$0.00</span>
+            <span class="stat-sub" id="mt5Leverage">Leverage 1:100</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Open MT5 Positions -->
+      <div class="card" style="margin-bottom: 1.5rem;">
+        <div class="card-header">
+          <h2 class="card-title">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 14 14"/></svg>
+            Active MT5 Observed Positions
+          </h2>
+        </div>
+        <div class="data-table-container" id="mt5PositionsContainer">
+          <div class="empty-state" style="padding: 2rem;">
+            <div class="empty-state-icon">📡</div>
+            <div class="empty-state-title">No Active MT5 Positions</div>
+            <div class="empty-state-desc">Manual trades opened on your MT5 terminal appear here automatically.</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Immutable Trade Journal Table -->
+      <div class="card">
+        <div class="card-header" style="justify-content: space-between;">
+          <h2 class="card-title">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+            Forex Trade Journal (Audit Records)
+          </h2>
+          <button class="btn-run" id="btnRefreshJournal" style="padding: 6px 12px; font-size: 0.8rem; width: auto;">
+            🔄 Refresh Journal
+          </button>
+        </div>
+        <div class="data-table-container" id="journalTableContainer">
+          <div class="empty-state" style="padding: 2rem;">
+            <div class="empty-state-icon">📖</div>
+            <div class="empty-state-title">Journal Empty</div>
+            <div class="empty-state-desc">Proposals and executed trades will be recorded here with audit timeline trails.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== INSTITUTIONAL LESSONS VIEW ===== -->
+    <div class="view" id="view-lessons">
+      <div class="card">
+        <div class="card-header" style="justify-content: space-between;">
+          <h2 class="card-title">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
+            Institutional Heuristics & Reflection Lessons Store
+          </h2>
+          <div style="display: flex; gap: 0.5rem; align-items: center;">
+            <select class="form-select" id="lessonsPairFilter" style="width: 140px; padding: 6px 10px; font-size: 0.8rem;">
+              <option value="">All Pairs</option>
+              <option value="EURUSD">EURUSD</option>
+              <option value="GBPUSD">GBPUSD</option>
+              <option value="USDJPY">USDJPY</option>
+              <option value="AUDUSD">AUDUSD</option>
+            </select>
+          </div>
+        </div>
+        <div id="lessonsContainer" style="padding: 1rem 0;">
+          <div class="empty-state">
+            <div class="empty-state-icon">🧠</div>
+            <div class="empty-state-title">No Stored Lessons</div>
+            <div class="empty-state-desc">Post-trade reflections automatically extract prescriptive rules and store them here for future prompt injection.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== HISTORY & ANALYTICS VIEW ===== -->
     <div class="view" id="view-history">
+      <!-- Quantitative Analytics Overview -->
+      <div class="card" style="margin-bottom: 1.5rem;">
+        <div class="card-header">
+          <h2 class="card-title">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+            Quantitative Performance Metrics
+          </h2>
+        </div>
+        <div class="stat-cards" id="analyticsStatCards">
+          <div class="stat-card">
+            <span class="stat-label">Win Rate</span>
+            <span class="stat-value" id="statWinRate" style="color:var(--green);">0.0%</span>
+            <span class="stat-sub" id="statTotalTrades">0 closed trades</span>
+          </div>
+          <div class="stat-card">
+            <span class="stat-label">Profit Factor</span>
+            <span class="stat-value" id="statProfitFactor">0.00</span>
+            <span class="stat-sub">Gross Win / Gross Loss</span>
+          </div>
+          <div class="stat-card">
+            <span class="stat-label">Total R-Multiple</span>
+            <span class="stat-value" id="statTotalR" style="color:var(--cyan);">0.0R</span>
+            <span class="stat-sub">Cumulative risk multiple</span>
+          </div>
+          <div class="stat-card">
+            <span class="stat-label">Max Drawdown</span>
+            <span class="stat-value" id="statMaxDD" style="color:var(--red);">0.0%</span>
+            <span class="stat-sub">Peak-to-trough decline</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Analysis Run History Table -->
       <div class="card">
         <div class="card-header">
           <h2 class="card-title">
             <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-            Analysis History
+            Analysis Run History
           </h2>
         </div>
         <div id="historyContent">
@@ -177,7 +401,7 @@
   <div class="report-overlay" id="reportOverlay">
     <div class="report-modal">
       <div class="report-modal-header">
-        <div class="report-modal-title" id="reportModalTitle">Report</div>
+        <div class="report-modal-title" id="reportModalTitle">Decision Report</div>
         <button class="report-modal-close" id="reportModalClose">&times;</button>
       </div>
       <div class="report-modal-body" id="reportModalBody"></div>

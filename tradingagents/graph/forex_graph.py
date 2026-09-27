@@ -22,6 +22,7 @@ Orchestrates the complete institutional Forex decision-support pipeline:
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from collections.abc import Iterator, Sequence
 from datetime import datetime, timezone
@@ -217,18 +218,15 @@ def create_forex_portfolio_manager(
         decision: ForexRiskDecision | None = None
 
         if raw_proposal and isinstance(raw_proposal, dict):
-            try:
+            with contextlib.suppress(Exception):
                 proposal = ForexTraderProposal.model_validate(raw_proposal)
-            except Exception:
-                pass
         if proposal is None:
             proposal = parse_forex_proposal_from_text(state.get("trader_investment_plan", ""), pair)
 
         if raw_decision and isinstance(raw_decision, dict):
-            try:
+            with contextlib.suppress(Exception):
                 decision = ForexRiskDecision.model_validate(raw_decision)
-            except Exception:
-                pass
+
 
         rendered_decision = state.get("final_trade_decision", "")
 
@@ -481,23 +479,48 @@ class ForexTradingAgentsGraph:
         self.auto_record_trades = auto_record_trades
 
         # LLMs
+        llm_kwargs = self._get_provider_kwargs()
+        provider = self.config.get("llm_provider", "openai")
+        backend_url = self.config.get("backend_url") or self.config.get("llm_backend_url")
+        user_cfg = config or {}
+
+        quick_model = (
+            user_cfg.get("quick_think_llm")
+            or user_cfg.get("quick_model")
+            or self.config.get("quick_think_llm")
+            or self.config.get("quick_model")
+            or "gpt-4.1-mini"
+        )
+        deep_model = (
+            user_cfg.get("deep_think_llm")
+            or user_cfg.get("deep_model")
+            or self.config.get("deep_think_llm")
+            or self.config.get("deep_model")
+            or "gpt-4.1"
+        )
+
+
         if quick_thinking_llm is not None:
             self.quick_thinking_llm = quick_thinking_llm
         else:
-            self.quick_thinking_llm = create_llm_client(
-                self.config["quick_model"],
-                self.config["llm_provider"],
-                **self._get_provider_kwargs(),
+            quick_client = create_llm_client(
+                provider=provider,
+                model=quick_model,
+                base_url=backend_url,
+                **llm_kwargs,
             )
+            self.quick_thinking_llm = quick_client.get_llm()
 
         if deep_thinking_llm is not None:
             self.deep_thinking_llm = deep_thinking_llm
         else:
-            self.deep_thinking_llm = create_llm_client(
-                self.config["deep_model"],
-                self.config["llm_provider"],
-                **self._get_provider_kwargs(),
+            deep_client = create_llm_client(
+                provider=provider,
+                model=deep_model,
+                base_url=backend_url,
+                **llm_kwargs,
             )
+            self.deep_thinking_llm = deep_client.get_llm()
 
         # Tools & Logic
         self.tool_nodes = {
@@ -541,17 +564,42 @@ class ForexTradingAgentsGraph:
 
     def _get_provider_kwargs(self) -> dict[str, Any]:
         """Get provider-specific kwargs for LLM creation."""
-        kwargs = {}
+        kwargs: dict[str, Any] = {}
         provider = self.config.get("llm_provider", "").lower()
+
+        if provider == "google":
+            thinking_level = self.config.get("google_thinking_level")
+            if thinking_level:
+                kwargs["thinking_level"] = thinking_level
+        elif provider == "openai":
+            reasoning_effort = self.config.get("openai_reasoning_effort")
+            if reasoning_effort:
+                kwargs["reasoning_effort"] = reasoning_effort
+        elif provider == "anthropic":
+            effort = self.config.get("anthropic_effort")
+            if effort:
+                kwargs["effort"] = effort
+
         temperature = self.config.get("temperature")
         if temperature is not None and temperature != "":
             kwargs["temperature"] = float(temperature)
+
+        if self.config.get("max_tokens") is not None:
+            kwargs["max_tokens"] = int(self.config["max_tokens"])
+
+        if self.config.get("llm_max_retries") is not None:
+            kwargs["max_retries"] = int(self.config["llm_max_retries"])
+
         return kwargs
 
+
     def create_run_state(
-        self, pair: str, trade_date: str | None = None, portfolio=None
+        self, pair: str, trade_date: str | None = None, asset_type: str | Any = "forex", portfolio=None
     ) -> dict[str, Any]:
         """Build the initial StateGraph input dictionary."""
+        if portfolio is None and not isinstance(asset_type, str):
+            portfolio = asset_type
+            asset_type = "forex"
         canon_pair = normalize_forex_pair(pair)
         cutoff = _calendar_cutoff(trade_date) if trade_date else datetime.now(timezone.utc)
         t_date = cutoff.date().isoformat()
@@ -725,3 +773,15 @@ class ForexTradingAgentsGraph:
                 / f"{safe_ticker_component(pair)}_{stamp}"
             )
         return write_report_tree(final_state, pair, save_path, trade_date=resolved_date)
+
+    def checkpoint_input(self, initial_state: dict[str, Any]) -> dict[str, Any]:
+        """Return input for graph execution matching TradingAgentsGraph interface."""
+        return initial_state
+
+    def begin_checkpoint(self, *args: Any, **kwargs: Any) -> str | None:
+        """Checkpointing hook matching TradingAgentsGraph interface."""
+        return None
+
+    def clear_checkpoint_on_success(self, *args: Any, **kwargs: Any) -> None:
+        """Checkpoint cleanup hook matching TradingAgentsGraph interface."""
+        pass

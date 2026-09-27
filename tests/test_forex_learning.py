@@ -333,9 +333,10 @@ def test_reflection_agent_execution_slippage_friction():
     assert "execution_slippage_drag" in reflection.tags
     assert any("adverse slippage" in w for w in reflection.what_went_wrong)
 
-    slip_lessons = [l for l in reflection.lessons if l.outcome_category == "EXECUTION_SLIPPAGE"]
+    slip_lessons = [les for les in reflection.lessons if les.outcome_category == "EXECUTION_SLIPPAGE"]
     assert len(slip_lessons) == 1
     assert "favor limit orders" in slip_lessons[0].actionable_rule
+
 
 
 # ===========================================================================
@@ -544,7 +545,8 @@ def test_reflection_agent_premature_exit_coverage():
 
     assert reflection.rating == ReflectionRating.POOR
     assert "premature_exit" in reflection.tags
-    assert any("Runner Execution Discipline" in (l.rule_violated or "") for l in reflection.lessons)
+    assert any("Runner Execution Discipline" in (les.rule_violated or "") for les in reflection.lessons)
+
 
 
 def test_reflection_agent_standard_win_and_loss_coverage():
@@ -600,7 +602,8 @@ def test_reflection_agent_standard_win_and_loss_coverage():
     loss_ref = agent.reflect(loss_context)
     assert loss_ref.rating == ReflectionRating.GOOD
     assert "standard_loss" in loss_ref.tags
-    assert any("acceptable variance" in l.actionable_rule for l in loss_ref.lessons)
+    assert any("acceptable variance" in les.actionable_rule for les in loss_ref.lessons)
+
 
 
 def test_retriever_empty_and_threshold(tmp_path: Path):

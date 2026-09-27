@@ -20,6 +20,12 @@ ANALYST_ORDER = [
     ("Fundamentals Analyst", AnalystType.FUNDAMENTALS),
 ]
 
+FOREX_ANALYST_ORDER = [
+    ("Forex Technical Analyst", AnalystType.FOREX_TECHNICAL),
+    ("Currency Macro Analyst", AnalystType.FOREX_MACRO),
+    ("Forex News Analyst", AnalystType.FOREX_NEWS),
+]
+
 CRYPTO_SUFFIXES = ("-USD", "-USDT", "-USDC", "-BTC", "-ETH")
 
 
@@ -148,15 +154,21 @@ def select_analysts(asset_type: AssetType = AssetType.STOCK, default=None) -> li
 
     ``default`` pre-checks the previous run's analysts; the prompt still shows.
     """
-    available_analysts = filter_analysts_for_asset_type(
-        [value for _, value in ANALYST_ORDER],
-        asset_type,
-    )
+    if asset_type == AssetType.FOREX:
+        order = FOREX_ANALYST_ORDER
+        available_analysts = [val for _, val in FOREX_ANALYST_ORDER]
+    else:
+        order = ANALYST_ORDER
+        available_analysts = filter_analysts_for_asset_type(
+            [value for _, value in ANALYST_ORDER],
+            asset_type,
+        )
+    default_vals = default or [v.value for v in available_analysts]
     choices = questionary.checkbox(
         "Select Your [Analysts Team]:",
         choices=[
-            questionary.Choice(display, value=value, checked=value.value in (default or []))
-            for display, value in ANALYST_ORDER
+            questionary.Choice(display, value=value, checked=value.value in default_vals)
+            for display, value in order
             if value in available_analysts
         ],
         instruction="\n- Press Space to select/unselect analysts\n- Press 'a' to select/unselect all\n- Press Enter when done",
@@ -176,6 +188,51 @@ def select_analysts(asset_type: AssetType = AssetType.STOCK, default=None) -> li
         exit(1)
 
     return choices
+
+
+def select_forex_timeframe(default: str = "H1") -> str:
+    """Prompt the user for the primary Forex execution timeframe."""
+    timeframes = ["M5", "M15", "M30", "H1", "H4", "D1"]
+    choice = questionary.select(
+        "Select primary Forex timeframe:",
+        choices=timeframes,
+        default=default if default in timeframes else "H1",
+        style=questionary.Style(
+            [
+                ("selected", "fg:green noinherit"),
+                ("highlighted", "noinherit"),
+                ("pointer", "noinherit"),
+            ]
+        ),
+    ).ask()
+    return choice or "H1"
+
+
+def prompt_forex_risk_config(
+    default_balance: float = 100000.0, default_risk_pct: float = 1.0
+) -> tuple[float, float]:
+    """Prompt for Forex account balance and max risk percent per trade."""
+    bal_str = questionary.text(
+        "Enter account balance USD:",
+        default=str(int(default_balance)),
+        style=questionary.Style([("text", "fg:green"), ("highlighted", "noinherit")]),
+    ).ask()
+    try:
+        balance = float(bal_str) if bal_str and float(bal_str) > 0 else default_balance
+    except ValueError:
+        balance = default_balance
+
+    risk_str = questionary.text(
+        "Enter risk percent per trade (e.g. 1.0 for 1%):",
+        default=str(default_risk_pct),
+        style=questionary.Style([("text", "fg:green"), ("highlighted", "noinherit")]),
+    ).ask()
+    try:
+        risk_pct = float(risk_str) if risk_str and 0.1 <= float(risk_str) <= 10.0 else default_risk_pct
+    except ValueError:
+        risk_pct = default_risk_pct
+
+    return balance, risk_pct
 
 
 def select_research_depth(default=None) -> int:

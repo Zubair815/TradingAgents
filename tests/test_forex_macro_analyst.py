@@ -79,7 +79,7 @@ class TestForexMacroAssessmentSchema:
         assert len(data["bearish_factors"]) == 1
 
     def test_invalid_confidence_raises(self):
-        with pytest.raises(Exception):
+        with pytest.raises(ValueError):
             ForexMacroAssessment(
                 pair="EURUSD",
                 macro_bias="NEUTRAL",
@@ -90,7 +90,7 @@ class TestForexMacroAssessmentSchema:
             )
 
     def test_negative_confidence_raises(self):
-        with pytest.raises(Exception):
+        with pytest.raises(ValueError):
             ForexMacroAssessment(
                 pair="EURUSD",
                 macro_bias="NEUTRAL",
@@ -99,6 +99,7 @@ class TestForexMacroAssessmentSchema:
                 quote_currency="USD",
                 summary_narrative="Test",
             )
+
 
 
 # ---------------------------------------------------------------------------
@@ -172,13 +173,13 @@ class TestForexMacroTools:
     @patch("tradingagents.agents.utils.forex_macro_tools._fetch_macro_safe")
     def test_get_treasury_yield_curve_inverted(self, mock_fetch):
         def fake_fetch(series, date, look_back_days=180):
-            if series == "yield_curve":
-                return "**Latest:** -0.35 (2026-03-10)"
-            elif series == "2y_treasury":
-                return "**Latest:** 4.60 (2026-03-10)"
-            elif series == "10y_treasury":
-                return "**Latest:** 4.25 (2026-03-10)"
-            return "**Latest:** 4.50 (2026-03-10)"
+            mapping = {
+                "yield_curve": "**Latest:** -0.35 (2026-03-10)",
+                "2y_treasury": "**Latest:** 4.60 (2026-03-10)",
+                "10y_treasury": "**Latest:** 4.25 (2026-03-10)",
+            }
+            return mapping.get(series, "**Latest:** 4.50 (2026-03-10)")
+
 
         mock_fetch.side_effect = fake_fetch
         result = get_treasury_yield_curve.invoke({"curr_date": "2026-03-10"})
@@ -196,19 +197,16 @@ class TestDeterministicReportGenerator:
     @patch("tradingagents.agents.analysts.forex_macro._fetch_macro_safe")
     def test_generate_report_eurusd_with_data(self, mock_fetch):
         def fake_fetch(indicator, curr_date, look_back_days=365):
-            if indicator == "ECBDFR":
-                return "**Latest:** 3.75 (2026-03-01)"
-            elif indicator == "FEDFUNDS":
-                return "**Latest:** 5.00 (2026-03-01)"
-            elif indicator == "vix":
-                return "**Latest:** 14.0 (2026-03-01)"
-            elif indicator == "dollar_index":
-                return "**Latest:** 104.50 (2026-03-01)"
-            elif indicator == "yield_curve":
-                return "**Latest:** 0.20 (2026-03-01)"
-            elif indicator == "10y_treasury":
-                return "**Latest:** 4.30 (2026-03-01)"
-            return "N/A"
+            mapping = {
+                "ECBDFR": "**Latest:** 3.75 (2026-03-01)",
+                "FEDFUNDS": "**Latest:** 5.00 (2026-03-01)",
+                "vix": "**Latest:** 14.0 (2026-03-01)",
+                "dollar_index": "**Latest:** 104.50 (2026-03-01)",
+                "yield_curve": "**Latest:** 0.20 (2026-03-01)",
+                "10y_treasury": "**Latest:** 4.30 (2026-03-01)",
+            }
+            return mapping.get(indicator, "N/A")
+
 
         mock_fetch.side_effect = fake_fetch
         report = generate_deterministic_forex_macro_report("EURUSD", "2026-03-10")
