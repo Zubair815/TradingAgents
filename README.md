@@ -378,10 +378,11 @@ Backtest results are not guaranteed to match any published figure. Returns depen
 
 ## Forex Phase 0 behavior
 
-`POST /api/forex/analyze` currently returns HTTP 503 with code
-`FOREX_ANALYSIS_UNAVAILABLE`. The former placeholder analysis has been removed.
-Real Forex web analysis will become available when the data and agent pipeline
-is connected.
+`POST /api/forex/analyze` queues the real Forex graph and exposes progress through
+the run's SSE endpoint. The former placeholder analysis has been removed.
+Provider failures and incomplete graph results produce a failed run with an error
+event, never a fabricated successful trade recommendation. An unavailable
+persisted proposal identifier remains unset instead of being guessed or invented.
 
 The Python Forex graph saves proposals and risk decisions. It defaults to
 `auto_record_trades=False`; passing `True` now raises `ValueError`. Record actual

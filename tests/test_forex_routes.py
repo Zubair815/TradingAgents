@@ -491,6 +491,57 @@ class TestMT5Routes:
 # ---------------------------------------------------------------------------
 
 class TestForexAnalysisRuns:
+    @pytest.mark.parametrize("missing", ["state", "proposal", "risk"])
+    def test_incomplete_worker_result_never_completes(self, client, missing):
+        run_id = f"fx_incomplete_{missing}"
+        _forex_runs[run_id] = {"status": "queued", "signal": None}
+        _forex_run_events[run_id] = []
+        proposal = ForexTraderProposal(pair="EURUSD", action=ForexAction.NO_TRADE, reasoning="No setup")
+        decision = ForexRiskDecision(
+            pair="EURUSD", decision=ForexRiskDecisionAction.APPROVE,
+            original_action=ForexAction.NO_TRADE, approved_action=ForexAction.NO_TRADE,
+            executive_rationale="Preserve capital",
+        )
+        with patch("web.forex_routes.ForexTradingAgentsGraph") as factory:
+            graph = factory.return_value
+            graph.stream.return_value = iter([])
+            graph.get_state.return_value = {} if missing == "state" else {"final_trade_decision": "NO_TRADE"}
+            graph.get_last_proposal.return_value = None if missing == "proposal" else proposal
+            graph.get_last_risk_decision.return_value = None if missing == "risk" else decision
+            graph.get_last_sizing_result.return_value = None
+            graph.process_signal.return_value = "NO_TRADE"
+            _run_forex_analysis(run_id, ForexAnalysisRequest(pair="EURUSD"))
+            graph.save_reports.assert_not_called()
+        assert _forex_runs[run_id]["status"] == "failed"
+        assert _forex_runs[run_id]["signal"] is None
+        assert run_id not in _forex_completed_reports
+        assert [event["type"] for event in _forex_run_events[run_id]] == ["preparing_data", "error"]
+
+    def test_worker_does_not_invent_or_borrow_proposal_identifier(self, client, isolated_forex_env):
+        journal, _, _ = isolated_forex_env
+        unrelated = journal.save_proposal(ForexTraderProposal(pair="EURUSD", action=ForexAction.LONG, reasoning="Unrelated proposal"))
+        run_id = "fx_no_persisted_identifier"
+        _forex_runs[run_id] = {"status": "queued", "signal": None}
+        _forex_run_events[run_id] = []
+        with patch("web.forex_routes.ForexTradingAgentsGraph") as factory:
+            graph = factory.return_value
+            graph.stream.return_value = iter([])
+            graph.get_state.return_value = {"final_trade_decision": "NO_TRADE"}
+            graph.get_last_proposal.return_value = ForexTraderProposal(pair="EURUSD", action=ForexAction.NO_TRADE, reasoning="No setup")
+            graph.get_last_risk_decision.return_value = ForexRiskDecision(
+                pair="EURUSD", decision=ForexRiskDecisionAction.APPROVE,
+                original_action=ForexAction.NO_TRADE, approved_action=ForexAction.NO_TRADE,
+                executive_rationale="Preserve capital",
+            )
+            graph.get_last_sizing_result.return_value = None
+            graph.process_signal.return_value = "NO_TRADE"
+            graph.save_reports.return_value = None
+            _run_forex_analysis(run_id, ForexAnalysisRequest(pair="EURUSD"))
+        assert _forex_runs[run_id]["status"] == "completed"
+        assert _forex_completed_reports[run_id]["proposal_id"] is None
+        assert _forex_runs[run_id]["proposal_id"] != unrelated
+        assert journal.list_trades() == []
+
     def test_start_analysis_endpoint_queues_run_and_lists_it(self, client):
         req = {
             "pair": "EURUSD",

@@ -130,7 +130,8 @@ imports. Yahoo news coverage is partial and does not prove an absence of news.
 Broker-specific holidays and daily/weekly candle boundaries should be confirmed
 against the connected broker before relying on historical research results.
 
-Phase 0's web-analysis restriction and demo-only backtesting remain in effect.
+The web route now runs the real graph; failed or incomplete results remain failed.
+Phase 0's demo-only web backtesting restriction remains in effect.
 This phase does not claim completion of the later indicator, decision-authority,
 execution, backtesting, or dashboard phases.
 

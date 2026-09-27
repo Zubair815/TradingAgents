@@ -1,5 +1,10 @@
 # TradingAgents - Final Engineering Report
 
+> Historical implementation report, not a verification of the current branch.
+> Its completion and production-readiness claims require fresh evidence. The
+> sequential recheck reports in `docs/phases/` supersede this document as each
+> phase passes inspection, targeted tests, repository-wide lint and the full suite.
+
 ## A. Executive Summary
 The TradingAgents repository has undergone a comprehensive engineering audit, repair, and production-readiness pass. The primary objective was achieved: transforming the codebase into a coherent, multi-agent Forex decision-support and trade-journaling platform while retaining the existing stock and crypto functionality. The new architecture enforces strict read-only observation of MetaTrader 5 (MT5), deterministic risk/sizing calculations, point-in-time safe historical backtesting, and a complete post-trade learning loop (MFE/MAE tracking, reflections, and lesson retrieval). The CLI, FastAPI web layer, and frontend dashboard have been hardened and completely synchronized with the backend.
 

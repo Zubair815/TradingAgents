@@ -11,7 +11,7 @@ Provides:
    - Proposal submission, querying, status updating, and reconciliation with MT5 positions.
    - Deterministic risk engine validation and institutional margin position sizing.
 4. Forex Agent Analysis & SSE Streaming:
-   - Analysis is unavailable pending real pipeline integration; existing run query routes remain.
+   - Real graph execution with SSE progress; failures never produce successful reports.
 5. Demonstration Backtesting:
    - Explicit demo opt-in, isolated simulation results, and labeled reports.
 6. Quantitative Analytics & Diagnostics:
@@ -41,6 +41,7 @@ from pydantic import BaseModel, Field
 # Forex Domain, Journal, Risk, Backtest, Analytics, MT5, Learning imports
 from tradingagents.agents.schemas_forex import (
     ForexAction,
+    ForexRiskDecision,
     ForexRiskDecisionAction,
     ForexTraderProposal,
     OrderType,
@@ -1144,6 +1145,13 @@ def _run_forex_analysis(run_id: str, req: ForexAnalysisRequest) -> None:
         risk_decision = graph.get_last_risk_decision()
         sizing_result = graph.get_last_sizing_result()
 
+        if (
+            not final_state.get("final_trade_decision")
+            or not isinstance(proposal, ForexTraderProposal)
+            or not isinstance(risk_decision, ForexRiskDecision)
+        ):
+            raise RuntimeError("Forex analysis returned incomplete proposal or risk decision evidence")
+
         report_path = None
         try:
             report_path = graph.save_reports(final_state, req.pair, trade_date=req.date)
@@ -1152,12 +1160,6 @@ def _run_forex_analysis(run_id: str, req: ForexAnalysisRequest) -> None:
 
         report_id = report_path.parent.name if report_path else None
         proposal_id = getattr(proposal, "proposal_id", None)
-        if not proposal_id and journal and proposal:
-            latest = journal.list_proposals(pair=req.pair, limit=1)
-            if latest:
-                proposal_id = latest[0].proposal_id
-        if not proposal_id and proposal:
-            proposal_id = f"prop_{uuid.uuid4().hex[:12]}"
 
         report_payload = {
             "run_id": run_id,
