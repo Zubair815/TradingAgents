@@ -256,9 +256,9 @@ class TradeLifecycleManager:
             raise LifecycleError(f"Proposal '{proposal_id}' not found.")
 
         curr_state = LifecycleState(record.status.value)
-        if curr_state not in (LifecycleState.APPROVED, LifecycleState.MODIFIED):
+        if curr_state not in (LifecycleState.APPROVED, LifecycleState.MODIFIED, LifecycleState.WAITING_USER):
             raise LifecycleTransitionError(
-                f"Cannot open position for proposal in state {curr_state.value}. Must be APPROVED or MODIFIED."
+                f"Cannot open position for proposal in state {curr_state.value}. Must be APPROVED, MODIFIED, or WAITING_USER."
             )
 
         eff_sl = stop_loss if stop_loss is not None else (record.stop_loss or 0.0)

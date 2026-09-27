@@ -27,6 +27,7 @@ from tradingagents.mt5.models import (
     MT5Tick,
 )
 from tradingagents.mt5.observer import MT5Observer
+from tradingagents.mt5.service import MT5ObservationService
 
 __all__ = [
     # Connection
@@ -34,6 +35,7 @@ __all__ = [
     "MT5ConnectionStatus",
     # Observer
     "MT5Observer",
+    "MT5ObservationService",
     # Models
     "MT5AccountInfo",
     "MT5SymbolInfo",
