@@ -127,13 +127,21 @@ MIGRATIONS: list[dict[str, Any]] = [
         CREATE INDEX IF NOT EXISTS idx_strategy_name
             ON strategy_versions(strategy_name);
 
-        -- 5. Trade events table: immutable chronological audit timeline (Phase 15)
+        -- 5. Trade events table: immutable chronological audit timeline (Phase 15 & Phase 10)
         CREATE TABLE IF NOT EXISTS trade_events (
             event_id TEXT PRIMARY KEY,
             trade_id TEXT,
             proposal_id TEXT,
+            broker_position_id TEXT,
+            broker_order_id TEXT,
+            broker_deal_id TEXT,
             event_type TEXT NOT NULL,
             timestamp_utc TEXT NOT NULL,
+            old_value TEXT,
+            new_value TEXT,
+            price REAL,
+            volume REAL,
+            source TEXT,
             actor TEXT NOT NULL,
             description TEXT NOT NULL,
             payload_json TEXT NOT NULL DEFAULT '{}'
@@ -145,6 +153,12 @@ MIGRATIONS: list[dict[str, Any]] = [
             ON trade_events(proposal_id, timestamp_utc);
         CREATE INDEX IF NOT EXISTS idx_trade_events_type
             ON trade_events(event_type);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_trade_events_unique_deal
+            ON trade_events(trade_id, event_type, broker_deal_id)
+            WHERE broker_deal_id IS NOT NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_trade_events_unique_order
+            ON trade_events(trade_id, event_type, broker_order_id)
+            WHERE broker_order_id IS NOT NULL AND broker_deal_id IS NULL;
 
         -- 6. Trade lessons table: persistent repository of heuristics, pitfalls, and rules (Phase 17)
         CREATE TABLE IF NOT EXISTS trade_lessons (
@@ -270,10 +284,51 @@ def run_migrations(conn_or_path: sqlite3.Connection | str | Path) -> int:
                     )
                 count += 1
 
+        _upgrade_trade_events_if_needed(conn)
         return count
     finally:
         if should_close:
             conn.close()
+
+
+def _upgrade_trade_events_if_needed(conn: sqlite3.Connection) -> None:
+    """Ensure any existing trade_events table has all Phase 10 columns and indexes."""
+    try:
+        cursor = conn.execute("PRAGMA table_info(trade_events);")
+        cols = {row[1] for row in cursor.fetchall()}
+        if not cols:
+            return
+        new_cols = [
+            ("broker_position_id", "TEXT"),
+            ("broker_order_id", "TEXT"),
+            ("broker_deal_id", "TEXT"),
+            ("old_value", "TEXT"),
+            ("new_value", "TEXT"),
+            ("price", "REAL"),
+            ("volume", "REAL"),
+            ("source", "TEXT"),
+        ]
+        with conn:
+            for col_name, col_type in new_cols:
+                if col_name not in cols:
+                    conn.execute(f"ALTER TABLE trade_events ADD COLUMN {col_name} {col_type};")
+
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_trade_events_unique_deal
+                    ON trade_events(trade_id, event_type, broker_deal_id)
+                    WHERE broker_deal_id IS NOT NULL;
+                """
+            )
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_trade_events_unique_order
+                    ON trade_events(trade_id, event_type, broker_order_id)
+                    WHERE broker_order_id IS NOT NULL AND broker_deal_id IS NULL;
+                """
+            )
+    except Exception:
+        pass
 
 
 def get_current_schema_version(conn_or_path: sqlite3.Connection | str | Path) -> int:

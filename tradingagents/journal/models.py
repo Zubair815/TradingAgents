@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from tradingagents.agents.schemas_forex import ForexAction
 
@@ -37,14 +37,26 @@ class EventType(str, Enum):
     PROPOSAL_WAITING_USER = "PROPOSAL_WAITING_USER"
     PROPOSAL_INVALIDATED = "PROPOSAL_INVALIDATED"
     PROPOSAL_SUPERSEDED = "PROPOSAL_SUPERSEDED"
-    ORDER_SUBMITTED = "ORDER_SUBMITTED"
-    ORDER_FILLED = "ORDER_FILLED"
+    # Trade Execution & Raw Lifecycle Events (Phase 10)
+    ORDER_CREATED = "ORDER_CREATED"
+    ORDER_SUBMITTED = "ORDER_SUBMITTED"  # Alias
+    DEAL_FILLED = "DEAL_FILLED"
+    ORDER_FILLED = "ORDER_FILLED"        # Alias
     POSITION_OPENED = "POSITION_OPENED"
-    STOP_LOSS_MODIFIED = "STOP_LOSS_MODIFIED"
-    TAKE_PROFIT_MODIFIED = "TAKE_PROFIT_MODIFIED"
-    BREAKEVEN_APPLIED = "BREAKEVEN_APPLIED"
+    SL_CHANGED = "SL_CHANGED"
+    STOP_LOSS_MODIFIED = "STOP_LOSS_MODIFIED"  # Alias
+    TP_CHANGED = "TP_CHANGED"
+    TAKE_PROFIT_MODIFIED = "TAKE_PROFIT_MODIFIED"  # Alias
+    POSITION_ADDED = "POSITION_ADDED"
+    BREAK_EVEN_MOVE = "BREAK_EVEN_MOVE"
+    BREAKEVEN_APPLIED = "BREAKEVEN_APPLIED"  # Alias
     PARTIAL_CLOSE = "PARTIAL_CLOSE"
-    POSITION_CLOSED = "POSITION_CLOSED"
+    FINAL_CLOSE = "FINAL_CLOSE"
+    POSITION_CLOSED = "POSITION_CLOSED"    # Alias
+    COMMISSION = "COMMISSION"
+    SWAP = "SWAP"
+    FEE = "FEE"
+
     NEWS_EVENT_ALERT = "NEWS_EVENT_ALERT"
     NOTE_ADDED = "NOTE_ADDED"
     RECONCILIATION_MATCH = "RECONCILIATION_MATCH"
@@ -57,6 +69,16 @@ class EventType(str, Enum):
         for member in cls:
             if member.value == s or member.name == s:
                 return member
+        alias_map = {
+            "ORDER_SUBMITTED": cls.ORDER_CREATED,
+            "ORDER_FILLED": cls.DEAL_FILLED,
+            "STOP_LOSS_MODIFIED": cls.SL_CHANGED,
+            "TAKE_PROFIT_MODIFIED": cls.TP_CHANGED,
+            "BREAKEVEN_APPLIED": cls.BREAK_EVEN_MOVE,
+            "POSITION_CLOSED": cls.FINAL_CLOSE,
+        }
+        if s in alias_map:
+            return alias_map[s]
         return cls.NOTE_ADDED
 
 
@@ -120,18 +142,41 @@ class ReconciliationStatus(str, Enum):
 
 
 class TradeEvent(BaseModel):
-    """Immutable chronological audit event in the trade timeline."""
+    """Immutable chronological audit event in the trade timeline (Phase 10)."""
 
     event_id: str = Field(default_factory=lambda: f"evt_{uuid.uuid4().hex[:12]}")
     trade_id: str | None = None
     proposal_id: str | None = None
+    broker_position_id: str | None = None
+    broker_order_id: str | None = None
+    broker_deal_id: str | None = None
     event_type: EventType
     timestamp_utc: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc)
     )
-    actor: str = Field(default="System", description="Agent, engine, or system emitting event")
+    old_value: Any = None
+    new_value: Any = None
+    price: float | None = None
+    volume: float | None = None
+    source: str = Field(default="System", description="Agent, engine, or broker emitting event")
+    actor: str = Field(default="System", description="Agent, engine, or system emitting event (alias)")
     description: str = Field(default="", description="Human-readable event summary")
-    payload: dict[str, Any] = Field(default_factory=dict, description="Structured event metadata")
+    metadata: dict[str, Any] = Field(default_factory=dict, description="Structured event metadata")
+    payload: dict[str, Any] = Field(default_factory=dict, description="Structured event metadata (alias)")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _sync_aliases(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "actor" in data and "source" not in data:
+                data["source"] = data["actor"]
+            elif "source" in data and "actor" not in data:
+                data["actor"] = data["source"]
+            if "payload" in data and "metadata" not in data:
+                data["metadata"] = data["payload"]
+            elif "metadata" in data and "payload" not in data:
+                data["payload"] = data["metadata"]
+        return data
 
 
 # ---------------------------------------------------------------------------

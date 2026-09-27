@@ -933,11 +933,20 @@ class ForexTradeJournal:
 
     def record_event(
         self,
-        event_type: str,
+        event_type: Any,
         trade_id: str | None = None,
         proposal_id: str | None = None,
+        broker_position_id: str | None = None,
+        broker_order_id: str | None = None,
+        broker_deal_id: str | None = None,
+        old_value: Any = None,
+        new_value: Any = None,
+        price: float | None = None,
+        volume: float | None = None,
+        source: str | None = None,
         actor: str = "System",
         description: str = "",
+        metadata: dict[str, Any] | None = None,
         payload: dict[str, Any] | None = None,
         event_id: str | None = None,
         timestamp_utc: str | None = None,
@@ -945,7 +954,20 @@ class ForexTradeJournal:
         """Record an immutable chronological event in the trade timeline."""
         eid = event_id or f"evt_{uuid.uuid4().hex[:12]}"
         ts = timestamp_utc or datetime.now(timezone.utc).isoformat()
-        payload_json = json.dumps(payload or {})
+        eff_meta = metadata if metadata is not None else (payload or {})
+        eff_source = source or actor
+        payload_json = json.dumps(eff_meta)
+        evt_type_str = str(event_type.value if hasattr(event_type, "value") else event_type)
+        old_val_str = (
+            json.dumps(old_value)
+            if isinstance(old_value, (dict, list))
+            else (str(old_value) if old_value is not None else None)
+        )
+        new_val_str = (
+            json.dumps(new_value)
+            if isinstance(new_value, (dict, list))
+            else (str(new_value) if new_value is not None else None)
+        )
 
         with self._lock:
             conn = self._get_connection()
@@ -953,12 +975,31 @@ class ForexTradeJournal:
                 with conn:
                     conn.execute(
                         """
-                        INSERT INTO trade_events (
-                            event_id, trade_id, proposal_id, event_type,
-                            timestamp_utc, actor, description, payload_json
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+                        INSERT OR IGNORE INTO trade_events (
+                            event_id, trade_id, proposal_id, broker_position_id,
+                            broker_order_id, broker_deal_id, event_type, timestamp_utc,
+                            old_value, new_value, price, volume, source, actor,
+                            description, payload_json
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                         """,
-                        (eid, trade_id, proposal_id, str(event_type), ts, actor, description, payload_json),
+                        (
+                            eid,
+                            trade_id,
+                            proposal_id,
+                            str(broker_position_id) if broker_position_id is not None else None,
+                            str(broker_order_id) if broker_order_id is not None else None,
+                            str(broker_deal_id) if broker_deal_id is not None else None,
+                            evt_type_str,
+                            ts,
+                            old_val_str,
+                            new_val_str,
+                            float(price) if price is not None else None,
+                            float(volume) if volume is not None else None,
+                            eff_source,
+                            actor,
+                            description,
+                            payload_json,
+                        ),
                     )
                 return eid
             finally:
@@ -993,17 +1034,28 @@ class ForexTradeJournal:
 
                 cursor = conn.execute(query, params)
                 rows = cursor.fetchall()
+                col_names = set(rows[0].keys()) if rows else set()
                 result: list[dict[str, Any]] = []
                 for r in rows:
+                    payload_data = json.loads(r["payload_json"]) if r["payload_json"] else {}
                     result.append({
                         "event_id": r["event_id"],
                         "trade_id": r["trade_id"],
                         "proposal_id": r["proposal_id"],
+                        "broker_position_id": r["broker_position_id"] if "broker_position_id" in col_names else None,
+                        "broker_order_id": r["broker_order_id"] if "broker_order_id" in col_names else None,
+                        "broker_deal_id": r["broker_deal_id"] if "broker_deal_id" in col_names else None,
                         "event_type": r["event_type"],
                         "timestamp_utc": r["timestamp_utc"],
+                        "old_value": r["old_value"] if "old_value" in col_names else None,
+                        "new_value": r["new_value"] if "new_value" in col_names else None,
+                        "price": r["price"] if "price" in col_names else None,
+                        "volume": r["volume"] if "volume" in col_names else None,
+                        "source": (r["source"] if "source" in col_names and r["source"] else r["actor"]),
                         "actor": r["actor"],
                         "description": r["description"],
-                        "payload": json.loads(r["payload_json"]) if r["payload_json"] else {},
+                        "payload": payload_data,
+                        "metadata": payload_data,
                     })
                 return result
             finally:

@@ -314,6 +314,125 @@ class TestEventTimeline:
         assert "POSITION_CLOSED" in md
         assert "Hit TP1" in md
 
+    def test_phase10_raw_lifecycle_events_and_fields(self, memory_journal: ForexTradeJournal):
+        timeline = EventTimeline(journal=memory_journal)
+
+        event_specs = [
+            (EventType.ORDER_CREATED, "ord_101", None, None, None, 1.0850, 1.0),
+            (EventType.DEAL_FILLED, "ord_101", "deal_201", "pos_301", None, 1.0852, 1.0),
+            (EventType.POSITION_OPENED, None, None, "pos_301", None, 1.0852, 1.0),
+            (EventType.SL_CHANGED, None, None, "pos_301", "1.0800", "1.0820", None),
+            (EventType.TP_CHANGED, None, None, "pos_301", "1.0920", "1.0950", None),
+            (EventType.POSITION_ADDED, None, "deal_202", "pos_301", None, 1.0860, 0.5),
+            (EventType.BREAK_EVEN_MOVE, None, None, "pos_301", "1.0820", "1.0852", None),
+            (EventType.PARTIAL_CLOSE, None, "deal_203", "pos_301", "1.5", 1.0890, 0.5),
+            (EventType.COMMISSION, None, "deal_201", "pos_301", None, -5.0, None),
+            (EventType.SWAP, None, "deal_201", "pos_301", None, -1.25, None),
+            (EventType.FEE, None, None, "pos_301", None, -0.50, None),
+            (EventType.FINAL_CLOSE, None, "deal_204", "pos_301", "1.0", 1.0920, 1.0),
+        ]
+
+        for etype, ord_id, deal_id, pos_id, old_v, new_or_p, vol in event_specs:
+            price_val = new_or_p if isinstance(new_or_p, (int, float)) else None
+            new_val = str(new_or_p) if isinstance(new_or_p, str) else None
+            evt = timeline.record_event(
+                event_type=etype,
+                trade_id="trd_phase10",
+                proposal_id="prop_phase10",
+                broker_order_id=ord_id,
+                broker_deal_id=deal_id,
+                broker_position_id=pos_id,
+                old_value=old_v,
+                new_value=new_val,
+                price=price_val,
+                volume=vol,
+                source="MT5Observer",
+                description=f"Recorded {etype.value}",
+                metadata={"test_key": "test_val"},
+            )
+            assert evt.event_type == etype
+            assert evt.trade_id == "trd_phase10"
+            assert evt.source == "MT5Observer"
+
+        # Verify querying from journal preserves all fields
+        events = timeline.get_timeline_for_trade("trd_phase10")
+        assert len(events) == len(event_specs)
+        deal_event = [e for e in events if e.event_type == EventType.DEAL_FILLED][0]
+        assert deal_event.broker_deal_id == "deal_201"
+        assert deal_event.price == 1.0852
+        assert deal_event.volume == 1.0
+
+    def test_duplicate_deal_event_prevented_by_unique_constraint(self, memory_journal: ForexTradeJournal):
+        timeline = EventTimeline(journal=memory_journal)
+
+        # Record first deal fill
+        e1 = timeline.record_event(
+            event_type=EventType.DEAL_FILLED,
+            trade_id="trd_uniq",
+            broker_deal_id="deal_9999",
+            price=1.0850,
+            volume=0.5,
+            source="MT5Observer",
+            description="First fill",
+        )
+        assert e1 is not None
+
+        # Re-polling the same deal must not create a duplicate event
+        e2 = timeline.record_event(
+            event_type=EventType.DEAL_FILLED,
+            trade_id="trd_uniq",
+            broker_deal_id="deal_9999",
+            price=1.0850,
+            volume=0.5,
+            source="MT5Observer",
+            description="Duplicate polling fill",
+        )
+        assert e2 is not None
+
+        # Database must only have 1 event
+        events = timeline.get_timeline_for_trade("trd_uniq")
+        assert len(events) == 1
+        assert events[0].broker_deal_id == "deal_9999"
+
+    def test_partial_close_preserves_same_logical_trade(self, memory_journal: ForexTradeJournal):
+        mgr = TradeLifecycleManager(journal=memory_journal)
+        prop_id = mgr.submit_proposal(make_proposal("EURUSD", entry=1.0850, lots=1.0))
+        mgr.evaluate_risk(
+            prop_id,
+            ForexRiskDecision(
+                pair="EURUSD",
+                decision=ForexRiskDecisionAction.APPROVE,
+                original_action=ForexAction.LONG,
+                approved_action=ForexAction.LONG,
+                executive_rationale="Approved",
+            ),
+        )
+        trade_id = mgr.open_position_from_proposal(prop_id, open_price=1.0850, lots=1.0)
+
+        # Partially close 0.4 lots
+        res = mgr.partial_close_trade(
+            trade_id=trade_id,
+            lots_to_close=0.4,
+            close_price=1.0890,
+            actor="Trader",
+        )
+        assert res["lots_closed"] == 0.4
+        assert res["remaining_lots"] == 0.6
+
+        # Verify same logical trade is still open with 0.6 lots
+        trade = memory_journal.get_trade(trade_id)
+        assert trade is not None
+        assert trade.trade_id == trade_id
+        assert trade.lots == 0.6
+        assert trade.status == TradeStatus.OPEN
+
+        # Verify PARTIAL_CLOSE event logged to trade timeline
+        events = mgr.timeline.get_timeline_for_trade(trade_id)
+        partial_events = [e for e in events if e.event_type == EventType.PARTIAL_CLOSE]
+        assert len(partial_events) == 1
+        assert partial_events[0].payload["lots_closed"] == 0.4
+        assert partial_events[0].payload["remaining_lots"] == 0.6
+
 
 # ---------------------------------------------------------------------------
 # 3. Proposal Matcher & Reconciliation Tests
