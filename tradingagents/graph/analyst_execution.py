@@ -50,6 +50,27 @@ ANALYST_NODE_SPECS: dict[str, AnalystNodeSpec] = {
         tool_node="tools_fundamentals",
         report_key="fundamentals_report",
     ),
+    "forex_technical": AnalystNodeSpec(
+        key="forex_technical",
+        agent_node="Forex Technical Analyst",
+        clear_node="Msg Clear Forex Technical",
+        tool_node="tools_forex_technical",
+        report_key="market_report",
+    ),
+    "forex_macro": AnalystNodeSpec(
+        key="forex_macro",
+        agent_node="Forex Macro Analyst",
+        clear_node="Msg Clear Forex Macro",
+        tool_node="tools_forex_macro",
+        report_key="fundamentals_report",
+    ),
+    "forex_news": AnalystNodeSpec(
+        key="forex_news",
+        agent_node="Forex News Analyst",
+        clear_node="Msg Clear Forex News",
+        tool_node="tools_forex_news",
+        report_key="news_report",
+    ),
 }
 
 

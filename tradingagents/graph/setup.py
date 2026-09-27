@@ -11,6 +11,9 @@ from tradingagents.agents import (
     create_bear_researcher,
     create_bull_researcher,
     create_conservative_debater,
+    create_forex_macro_analyst,
+    create_forex_news_analyst,
+    create_forex_technical_analyst,
     create_fundamentals_analyst,
     create_market_analyst,
     create_msg_delete,
@@ -97,6 +100,9 @@ class GraphSetup:
             "social": lambda: create_sentiment_analyst(self.quick_thinking_llm),
             "news": lambda: create_news_analyst(self.quick_thinking_llm),
             "fundamentals": lambda: create_fundamentals_analyst(self.quick_thinking_llm),
+            "forex_technical": lambda: create_forex_technical_analyst(self.quick_thinking_llm),
+            "forex_macro": lambda: create_forex_macro_analyst(self.quick_thinking_llm),
+            "forex_news": lambda: create_forex_news_analyst(self.quick_thinking_llm),
         }
 
         # Create researcher and manager nodes

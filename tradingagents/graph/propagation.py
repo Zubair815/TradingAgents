@@ -69,6 +69,12 @@ class Propagator:
             "fundamentals_report": "",
             "sentiment_report": "",
             "news_report": "",
+            "forex_technical_report": "",
+            "forex_macro_report": "",
+            "forex_news_report": "",
+            "forex_as_of_utc": "",
+            "forex_proposal": None,
+            "forex_risk_decision": None,
         }
 
     def get_graph_args(self, callbacks: list | None = None) -> dict[str, Any]:

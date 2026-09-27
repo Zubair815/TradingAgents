@@ -49,6 +49,30 @@ class ConditionalLogic:
             return "tools_fundamentals"
         return "Msg Clear Fundamentals"
 
+    def should_continue_forex_technical(self, state: AgentState):
+        """Determine if forex technical analysis should continue."""
+        messages = state["messages"]
+        last_message = messages[-1]
+        if last_message.tool_calls:
+            return "tools_forex_technical"
+        return "Msg Clear Forex Technical"
+
+    def should_continue_forex_macro(self, state: AgentState):
+        """Determine if forex macro analysis should continue."""
+        messages = state["messages"]
+        last_message = messages[-1]
+        if last_message.tool_calls:
+            return "tools_forex_macro"
+        return "Msg Clear Forex Macro"
+
+    def should_continue_forex_news(self, state: AgentState):
+        """Determine if forex event/news analysis should continue."""
+        messages = state["messages"]
+        last_message = messages[-1]
+        if last_message.tool_calls:
+            return "tools_forex_news"
+        return "Msg Clear Forex News"
+
     def should_continue_debate(self, state: AgentState) -> str:
         """Determine if debate should continue."""
 

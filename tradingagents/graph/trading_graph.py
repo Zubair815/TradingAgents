@@ -14,6 +14,9 @@ import pandas as pd
 import yfinance as yf
 from langgraph.prebuilt import ToolNode
 
+from tradingagents.agents.analysts.forex_macro import FOREX_MACRO_TOOLS
+from tradingagents.agents.analysts.forex_technical import FOREX_TECHNICAL_TOOLS
+
 # Import the abstract tool methods from agent_utils
 from tradingagents.agents.utils.agent_utils import (
     build_instrument_context,
@@ -31,6 +34,7 @@ from tradingagents.agents.utils.agent_utils import (
     get_verified_market_snapshot,
     resolve_instrument_identity,
 )
+from tradingagents.agents.utils.forex_news_tools import FOREX_NEWS_TOOLS
 from tradingagents.agents.utils.memory import TradingMemoryLog
 from tradingagents.dataflows.config import build_config, config_scope
 from tradingagents.dataflows.utils import get_current_date, safe_ticker_component
@@ -306,6 +310,15 @@ class TradingAgentsGraph:
                     get_cashflow,
                     get_income_statement,
                 ]
+            ),
+            "forex_technical": ToolNode(
+                FOREX_TECHNICAL_TOOLS
+            ),
+            "forex_macro": ToolNode(
+                FOREX_MACRO_TOOLS
+            ),
+            "forex_news": ToolNode(
+                FOREX_NEWS_TOOLS
             ),
         }
 
@@ -610,12 +623,13 @@ class TradingAgentsGraph:
                 self._run_signature(asset_type, portfolio),
             )
 
-    def save_reports(self, final_state, ticker, save_path=None) -> Path:
+    def save_reports(self, final_state, ticker, save_path=None, trade_date: str | None = None) -> Path:
         """Write the markdown report tree for a completed run, like the CLI does.
 
         Programmatic callers get the same on-disk reports the CLI produces. Pass
         an explicit ``save_path`` or let it default under ``results_dir``.
         """
+        resolved_date = trade_date or (final_state.get("trade_date") if isinstance(final_state, dict) else None)
         if save_path is None:
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             save_path = (
@@ -623,7 +637,7 @@ class TradingAgentsGraph:
                 / "reports"
                 / f"{safe_ticker_component(ticker)}_{stamp}"
             )
-        return write_report_tree(final_state, ticker, save_path)
+        return write_report_tree(final_state, ticker, save_path, trade_date=resolved_date)
 
     @_with_run_config
     def create_run_state(self, company_name, trade_date, asset_type: str = "stock", portfolio=None):
