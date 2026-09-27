@@ -24,8 +24,8 @@ back to free-text generation for providers that lack native support, so
 the sentiment header (band + score + confidence) is deterministic across
 runs and providers instead of free-form per-model prose.
 
-See: https://github.com/TauricResearch/TradingAgents/issues/557
-See: https://github.com/TauricResearch/TradingAgents/issues/796
+Reference: Issue #557
+Reference: Issue #796
 """
 
 from datetime import datetime, timedelta

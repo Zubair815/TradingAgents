@@ -47,7 +47,7 @@ class RiskDebateState(TypedDict):
 
 class AgentState(MessagesState):
     company_of_interest: Annotated[str, "Company that we are interested in trading"]
-    asset_type: Annotated[Literal["stock", "crypto"], "Asset type under analysis such as stock or crypto"]
+    asset_type: Annotated[Literal["stock", "crypto", "forex"], "Asset type under analysis such as stock, crypto, or forex"]
     instrument_context: Annotated[str, "Deterministic ticker identity resolved at run start"]
     trade_date: Annotated[str, "What date we are trading at"]
 
@@ -60,6 +60,9 @@ class AgentState(MessagesState):
         str, "Report from the News Researcher of current world affairs"
     ]
     fundamentals_report: Annotated[str, "Report from the Fundamentals Researcher"]
+    forex_technical_report: Annotated[str, "Report from the Forex Technical Analyst"]
+    forex_macro_report: Annotated[str, "Report from the Forex Currency Macro Analyst"]
+    forex_news_report: Annotated[str, "Report from the Forex Event/News Analyst"]
 
     # researcher team discussion step
     investment_debate_state: Annotated[
@@ -76,3 +79,6 @@ class AgentState(MessagesState):
     final_trade_decision: Annotated[str, "Final decision made by the Risk Analysts"]
     past_context: Annotated[str, "Memory log context injected at run start (same-ticker decisions + cross-ticker lessons)"]
     portfolio_context: Annotated[str, "Caller-supplied holdings and cash, rendered at run start; empty when not provided"]
+    forex_proposal: Annotated[dict | None, "Structured ForexTraderProposal data or serialized dict"]
+    forex_risk_decision: Annotated[dict | None, "Structured ForexRiskDecision data or serialized dict"]
+    forex_as_of_utc: Annotated[str, "Immutable UTC observation cutoff for Forex data"]

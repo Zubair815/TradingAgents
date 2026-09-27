@@ -377,3 +377,28 @@ def render_sentiment_report(report: SentimentReport) -> str:
         "",
         report.narrative,
     ])
+
+
+# ---------------------------------------------------------------------------
+# Lazy Forex Schemas resolution (Phase 9)
+# ---------------------------------------------------------------------------
+
+_FOREX_SCHEMAS_EXPORTS = {
+    "ForexAction",
+    "OrderType",
+    "SetupType",
+    "ForexRiskDecisionAction",
+    "ForexTraderProposal",
+    "ForexRiskDecision",
+    "render_forex_trader_proposal",
+    "render_forex_risk_decision",
+}
+
+
+def __getattr__(name: str):
+    if name in _FOREX_SCHEMAS_EXPORTS:
+        from tradingagents.agents import schemas_forex
+        return getattr(schemas_forex, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+

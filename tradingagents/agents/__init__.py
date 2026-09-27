@@ -1,3 +1,6 @@
+from .analysts.forex_macro import create_forex_macro_analyst
+from .analysts.forex_news import create_forex_news_analyst
+from .analysts.forex_technical import create_forex_technical_analyst
 from .analysts.fundamentals_analyst import create_fundamentals_analyst
 from .analysts.market_analyst import create_market_analyst
 from .analysts.news_analyst import create_news_analyst
@@ -21,6 +24,7 @@ from .risk_mgmt.neutral_debator import (
     create_neutral_debater,
     create_neutral_debator,  # deprecated alias kept for back-compat
 )
+from .trader.forex_trader import create_forex_trader
 from .trader.trader import create_trader
 from .utils.agent_states import AgentState, InvestDebateState, RiskDebateState
 from .utils.agent_utils import create_msg_delete
@@ -33,6 +37,9 @@ __all__ = [
     "create_bear_researcher",
     "create_bull_researcher",
     "create_research_manager",
+    "create_forex_macro_analyst",
+    "create_forex_news_analyst",
+    "create_forex_technical_analyst",
     "create_fundamentals_analyst",
     "create_market_analyst",
     "create_neutral_debater",
@@ -46,4 +53,5 @@ __all__ = [
     "create_sentiment_analyst",
     "create_social_media_analyst",  # deprecated; will be removed in a future version
     "create_trader",
+    "create_forex_trader",
 ]
