@@ -105,6 +105,15 @@ class MatchConfidence(str, Enum):
     NONE = "NONE"          # No plausible match (score < 0.40)
 
 
+class ReconciliationStatus(str, Enum):
+    """Categorical reconciliation decision for proposal execution matching."""
+
+    MATCHED = "MATCHED"
+    NEEDS_CONFIRMATION = "NEEDS_CONFIRMATION"
+    UNMATCHED = "UNMATCHED"
+    MANUAL_UNPLANNED = "MANUAL_UNPLANNED"
+
+
 # ---------------------------------------------------------------------------
 # Timeline Models
 # ---------------------------------------------------------------------------
@@ -138,6 +147,7 @@ class MatchResult(BaseModel):
     symbol: str
     action: ForexAction
     confidence: MatchConfidence = MatchConfidence.NONE
+    status: ReconciliationStatus = ReconciliationStatus.UNMATCHED
     score: float = Field(default=0.0, ge=0.0, le=1.0)
     reasons: list[str] = Field(default_factory=list)
     matched_at_utc: datetime = Field(

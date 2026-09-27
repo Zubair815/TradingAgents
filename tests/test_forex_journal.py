@@ -43,6 +43,7 @@ from tradingagents.journal import (
     MatchConfidence,
     PostTradeAnalytics,
     ProposalMatcher,
+    ReconciliationStatus,
     TradeLifecycleManager,
 )
 
@@ -73,6 +74,7 @@ def make_proposal(
     tp1: float = 1.0930,
     lots: float = 0.50,
     reasoning: str = "Strong trend continuation pattern.",
+    valid_until: str | None = None,
 ) -> ForexTraderProposal:
     return ForexTraderProposal(
         pair=pair,
@@ -90,6 +92,7 @@ def make_proposal(
         confluence_factors=["EMA 20/50 Bullish Cross", "London-NY Overlap"],
         reasoning=reasoning,
         trade_rationale_summary="Long EURUSD on continuation.",
+        valid_until=valid_until,
     )
 
 
@@ -448,6 +451,142 @@ class TestProposalMatcher:
         orphans = matcher.find_orphan_positions(broker_positions, results)
         assert len(orphans) == 1
         assert orphans[0]["ticket"] == 8888
+
+    def test_single_obvious_proposal_matched(self, memory_journal: ForexTradeJournal):
+        mgr = TradeLifecycleManager(journal=memory_journal)
+        matcher = ProposalMatcher(journal=memory_journal, lifecycle=mgr)
+
+        prop_id = mgr.submit_proposal(make_proposal("EURUSD", action=ForexAction.LONG, entry=1.0850, lots=0.50))
+        mgr.evaluate_risk(
+            prop_id,
+            ForexRiskDecision(
+                pair="EURUSD",
+                decision=ForexRiskDecisionAction.APPROVE,
+                original_action=ForexAction.LONG,
+                approved_action=ForexAction.LONG,
+                executive_rationale="Approved within risk boundaries.",
+            ),
+        )
+
+        pos = {
+            "ticket": 6001,
+            "symbol": "EURUSD",
+            "type": 0,
+            "price_open": 1.0850,
+            "volume": 0.50,
+            "time": datetime.now(timezone.utc),
+        }
+
+        match = matcher.match_position(pos)
+        assert match.is_matched is True
+        assert match.status == ReconciliationStatus.MATCHED
+        assert match.proposal_id == prop_id
+
+    def test_ambiguous_proposals_require_confirmation(self, memory_journal: ForexTradeJournal):
+        mgr = TradeLifecycleManager(journal=memory_journal)
+        matcher = ProposalMatcher(journal=memory_journal, lifecycle=mgr, ambiguity_delta=0.05)
+
+        # Create two very similar proposals on EURUSD
+        prop_id1 = mgr.submit_proposal(make_proposal("EURUSD", action=ForexAction.LONG, entry=1.0850, lots=0.50))
+        mgr.evaluate_risk(
+            prop_id1,
+            ForexRiskDecision(
+                pair="EURUSD",
+                decision=ForexRiskDecisionAction.APPROVE,
+                original_action=ForexAction.LONG,
+                approved_action=ForexAction.LONG,
+                executive_rationale="Approved.",
+            ),
+        )
+
+        prop_id2 = mgr.submit_proposal(make_proposal("EURUSD", action=ForexAction.LONG, entry=1.0850, lots=0.50))
+        mgr.evaluate_risk(
+            prop_id2,
+            ForexRiskDecision(
+                pair="EURUSD",
+                decision=ForexRiskDecisionAction.APPROVE,
+                original_action=ForexAction.LONG,
+                approved_action=ForexAction.LONG,
+                executive_rationale="Approved.",
+            ),
+        )
+
+        pos = {
+            "ticket": 6002,
+            "symbol": "EURUSD",
+            "type": 0,
+            "price_open": 1.0850,
+            "volume": 0.50,
+            "time": datetime.now(timezone.utc),
+        }
+
+        match = matcher.match_position(pos)
+        assert match.is_matched is False
+        assert match.status == ReconciliationStatus.NEEDS_CONFIRMATION
+        assert any("Ambiguous match" in r for r in match.reasons)
+
+    def test_manual_unplanned_trade_journaling(self, memory_journal: ForexTradeJournal):
+        mgr = TradeLifecycleManager(journal=memory_journal)
+        matcher = ProposalMatcher(journal=memory_journal, lifecycle=mgr)
+
+        pos = {
+            "ticket": 6003,
+            "symbol": "USDCHF",
+            "type": 1,  # SELL
+            "price_open": 0.8920,
+            "volume": 0.25,
+            "sl": 0.8960,
+            "tp": 0.8840,
+            "time": datetime.now(timezone.utc),
+        }
+
+        trade_id, match_res = matcher.record_manual_unplanned_trade(pos)
+        assert match_res.status == ReconciliationStatus.MANUAL_UNPLANNED
+        assert match_res.is_matched is False
+        assert match_res.proposal_id is None
+
+        trade = memory_journal.get_trade(trade_id)
+        assert trade is not None
+        assert trade.pair == "USDCHF"
+        assert trade.action == ForexAction.SHORT
+        assert trade.open_price == 0.8920
+        assert "MANUAL_UNPLANNED" in trade.tags
+        assert trade.status == TradeStatus.OPEN
+
+    def test_entry_outside_validity_unmatched(self, memory_journal: ForexTradeJournal):
+        from datetime import timedelta
+        mgr = TradeLifecycleManager(journal=memory_journal)
+        matcher = ProposalMatcher(journal=memory_journal, lifecycle=mgr)
+        now = datetime.now(timezone.utc)
+        valid_until = (now - timedelta(hours=1)).isoformat()
+
+        prop_id = mgr.submit_proposal(
+            make_proposal("EURUSD", action=ForexAction.LONG, entry=1.0850, lots=0.50, valid_until=valid_until)
+        )
+        mgr.evaluate_risk(
+            prop_id,
+            ForexRiskDecision(
+                pair="EURUSD",
+                decision=ForexRiskDecisionAction.APPROVE,
+                original_action=ForexAction.LONG,
+                approved_action=ForexAction.LONG,
+                executive_rationale="Approved.",
+            ),
+        )
+
+        # Position executed now (after valid_until)
+        pos = {
+            "ticket": 6004,
+            "symbol": "EURUSD",
+            "type": 0,
+            "price_open": 1.0850,
+            "volume": 0.50,
+            "time": now,
+        }
+
+        match = matcher.match_position(pos)
+        assert match.is_matched is False
+        assert match.status == ReconciliationStatus.UNMATCHED
 
 
 # ---------------------------------------------------------------------------

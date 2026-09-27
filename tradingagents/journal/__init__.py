@@ -25,6 +25,7 @@ from tradingagents.journal.models import (
     MatchResult,
     PairMetrics,
     PerformanceReport,
+    ReconciliationStatus,
     SessionMetrics,
     SetupMetrics,
     TradeEvent,
@@ -48,6 +49,7 @@ __all__ = [
     "ProposalMatcher",
     "MatchConfidence",
     "MatchResult",
+    "ReconciliationStatus",
     # Analytics
     "PostTradeAnalytics",
     "PerformanceReport",

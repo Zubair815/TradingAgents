@@ -23,6 +23,7 @@ from tradingagents.database.models import (
     TradeJournalRecord,
     TradeStatus,
 )
+from tradingagents.forex.domain import normalize_forex_pair
 from tradingagents.forex.pips import pip_size_for, pips_directional
 from tradingagents.journal.models import EventType, LifecycleState
 from tradingagents.journal.timeline import EventTimeline
@@ -296,6 +297,51 @@ class TradeLifecycleManager:
                 "lots": lots,
                 "stop_loss": eff_sl,
                 "take_profit": eff_tp,
+            },
+        )
+        return trade_id
+
+    def open_unplanned_position(
+        self,
+        pair: str,
+        action: ForexAction,
+        open_price: float,
+        lots: float,
+        stop_loss: float = 0.0,
+        take_profit: float | None = None,
+        ticket: int | str | None = None,
+        open_time_utc: str | None = None,
+        actor: str = "MT5Observer",
+        notes: str = "Unplanned manual trade",
+    ) -> str:
+        """Record an unplanned manual execution in the journal without a prior proposal."""
+        norm_pair = normalize_forex_pair(pair)
+        trade_record = self.journal.record_trade_open(
+            pair=norm_pair,
+            action=action,
+            open_price=open_price,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            lots=lots,
+            proposal_id=None,
+            open_time_utc=open_time_utc,
+            tags=["MANUAL_UNPLANNED"],
+            notes=notes,
+            metadata={"broker_ticket": str(ticket) if ticket else None, "unplanned": True},
+        )
+        trade_id = trade_record.trade_id
+
+        self.timeline.record_event(
+            event_type=EventType.POSITION_OPENED,
+            trade_id=trade_id,
+            proposal_id=None,
+            actor=actor,
+            description=f"Opened unplanned manual {norm_pair} {action.value} position ({lots} lots @ {open_price})",
+            payload={
+                "trade_id": trade_id,
+                "ticket": ticket,
+                "open_price": open_price,
+                "unplanned": True,
             },
         )
         return trade_id
