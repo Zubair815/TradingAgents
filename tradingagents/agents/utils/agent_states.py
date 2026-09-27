@@ -82,3 +82,4 @@ class AgentState(MessagesState):
     forex_proposal: Annotated[dict | None, "Structured ForexTraderProposal data or serialized dict"]
     forex_risk_decision: Annotated[dict | None, "Structured ForexRiskDecision data or serialized dict"]
     forex_as_of_utc: Annotated[str, "Immutable UTC observation cutoff for Forex data"]
+    forex_proposal_id: Annotated[str | None, "Persisted identity returned by the proposal journal"]

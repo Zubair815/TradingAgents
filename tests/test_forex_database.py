@@ -77,22 +77,22 @@ class TestDatabaseMigrations:
     def test_migrations_create_tables_and_track_version(self, tmp_path: Path):
         db_file = tmp_path / "test_migration.db"
 
-        # Initial run: applies migration 1
+        # Initial run: applies legacy and research migrations
         applied = run_migrations(db_file)
-        assert applied == 1
+        assert applied == 2
 
         ver = get_current_schema_version(db_file)
-        assert ver == 1
+        assert ver == 2
 
         # Idempotency check: running again applies 0 migrations
         applied_again = run_migrations(db_file)
         assert applied_again == 0
-        assert get_current_schema_version(db_file) == 1
+        assert get_current_schema_version(db_file) == 2
 
     def test_in_memory_migration(self):
         journal = ForexTradeJournal(db_path=":memory:", auto_migrate=True)
         try:
-            assert get_current_schema_version(journal._get_connection()) == 1
+            assert get_current_schema_version(journal._get_connection()) == 2
         finally:
             journal.close()
 

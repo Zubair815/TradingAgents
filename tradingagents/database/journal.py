@@ -7,6 +7,7 @@ execution fills, strategy versioning, and post-trade performance analytics.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import logging
 import os
@@ -41,6 +42,7 @@ from tradingagents.forex.pips import (
     pip_size_for,
     pip_value_in_account_currency,
 )
+from tradingagents.research.contracts import canonical_json
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +111,12 @@ class ForexTradeJournal:
     def __enter__(self) -> ForexTradeJournal:
         return self
 
+    @property
+    def research(self):
+        """Use the same database, connection lifecycle and write lock for research."""
+        from tradingagents.research.store import ResearchStore
+        return ResearchStore(self)
+
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         self.close()
 
@@ -122,6 +130,9 @@ class ForexTradeJournal:
         risk_decision: ForexRiskDecision | dict[str, Any] | None = None,
         status: ProposalStatus = ProposalStatus.PROPOSED,
         metadata: dict[str, Any] | None = None,
+        run_id: str | None = None,
+        snapshot_id: str | None = None,
+        version_id: str | None = None,
     ) -> str:
         """Persist a Forex trade proposal and optional risk management verdict.
 
@@ -137,6 +148,9 @@ class ForexTradeJournal:
             )
         else:
             rec = proposal
+
+        payload = rec.proposal_payload or rec.to_forex_trader_proposal().model_dump(mode="json")
+        evidence = canonical_json({"proposal": payload, "risk": rec.risk_decision})
 
         with self._lock:
             conn = self._get_connection()
@@ -185,6 +199,13 @@ class ForexTradeJournal:
                             json.dumps(rec.metadata),
                         ),
                     )
+                    conn.execute(
+                        "INSERT INTO proposal_evidence VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (rec.proposal_id, rec.schema_version, run_id or rec.run_id,
+                         snapshot_id or rec.snapshot_id, version_id or rec.version_id,
+                         canonical_json(payload), canonical_json(rec.risk_decision) if rec.risk_decision is not None else None,
+                         hashlib.sha256(evidence.encode()).hexdigest()),
+                    )
                 return rec.proposal_id
             finally:
                 if should_close:
@@ -198,7 +219,9 @@ class ForexTradeJournal:
             try:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.execute(
-                    "SELECT * FROM proposals WHERE proposal_id = ?;", (proposal_id,)
+                    "SELECT proposals.*, proposal_evidence.payload_json, proposal_evidence.run_id, "
+                    "proposal_evidence.snapshot_id, proposal_evidence.version_id "
+                    "FROM proposals LEFT JOIN proposal_evidence USING(proposal_id) WHERE proposal_id = ?;", (proposal_id,)
                 )
                 row = cursor.fetchone()
                 if not row:
@@ -255,7 +278,9 @@ class ForexTradeJournal:
         limit: int = 100,
     ) -> list[ProposalRecord]:
         """Query proposals with optional filtering."""
-        query = "SELECT * FROM proposals WHERE 1=1"
+        query = ("SELECT proposals.*, proposal_evidence.payload_json, proposal_evidence.run_id, "
+                 "proposal_evidence.snapshot_id, proposal_evidence.version_id "
+                 "FROM proposals LEFT JOIN proposal_evidence USING(proposal_id) WHERE 1=1")
         params: list[Any] = []
 
         if pair:
@@ -795,6 +820,8 @@ class ForexTradeJournal:
     @staticmethod
     def _row_to_proposal_record(row: sqlite3.Row) -> ProposalRecord:
         return ProposalRecord(
+            proposal_payload=json.loads(row["payload_json"]) if row["payload_json"] else None,
+            run_id=row["run_id"], snapshot_id=row["snapshot_id"], version_id=row["version_id"],
             proposal_id=row["proposal_id"],
             created_at_utc=row["created_at_utc"],
             pair=row["pair"],

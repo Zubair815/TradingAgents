@@ -70,6 +70,7 @@ from tradingagents.journal.manager import ForexJournalManager
 from tradingagents.learning.manager import ForexLearningManager
 from tradingagents.mt5.errors import MT5Error
 from tradingagents.mt5.observer import MT5Observer
+from tradingagents.research.contracts import AnalysisRequest as ForexAnalysisRequest
 from tradingagents.risk.engine import ForexRiskEngine, ForexRiskLimits
 from tradingagents.risk.sizing import (
     BrokerExecutionConstraints,
@@ -284,21 +285,6 @@ class MT5ConnectRequest(BaseModel):
     login: int | None = Field(default=None, description="Account login")
     password: str | None = Field(default=None, description="Broker account password")
     server: str | None = Field(default=None, description="Broker server name")
-
-
-class ForexAnalysisRequest(BaseModel):
-    pair: str = Field(default="EURUSD", description="Currency pair to analyze")
-    timeframe: str = Field(default="H1", description="Trading timeframe")
-    date: str | None = Field(default=None, description="Analysis date YYYY-MM-DD")
-    analysts: list[str] = Field(
-        default=["forex_technical", "forex_macro", "forex_news"],
-        description="Forex analysts to run",
-    )
-    provider: str | None = Field(default=None)
-    quick_model: str | None = Field(default=None)
-    deep_model: str | None = Field(default=None)
-    account_balance: float = Field(default=100000.0, gt=0)
-    risk_percent: float = Field(default=1.0, gt=0, le=5.0)
 
 
 class ForexBacktestRequest(BaseModel):
@@ -1159,7 +1145,7 @@ def _run_forex_analysis(run_id: str, req: ForexAnalysisRequest) -> None:
             logger.warning("Could not write markdown report tree for %s: %s", run_id, rep_exc)
 
         report_id = report_path.parent.name if report_path else None
-        proposal_id = getattr(proposal, "proposal_id", None)
+        proposal_id = final_state.get("forex_proposal_id") or getattr(proposal, "proposal_id", None)
 
         report_payload = {
             "run_id": run_id,

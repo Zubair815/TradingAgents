@@ -248,6 +248,7 @@ def create_forex_portfolio_manager(
             except Exception as exc:
                 logger.warning("Portfolio Manager LLM synthesis failed (%s); using risk decision rendering", exc)
 
+        proposal_id = None
         # SQLite Journal Auto-Logging
         if journal is not None and proposal is not None:
             try:
@@ -260,7 +261,7 @@ def create_forex_portfolio_manager(
                     else:
                         status = ProposalStatus.REJECTED
 
-                journal.save_proposal(
+                proposal_id = journal.save_proposal(
                     proposal=proposal,
                     risk_decision=decision,
                     status=status,
@@ -269,8 +270,10 @@ def create_forex_portfolio_manager(
 
             except Exception as exc:
                 logger.error("Failed auto-logging Forex proposal to journal: %s", exc, exc_info=True)
+                raise
 
         return {
+            "forex_proposal_id": proposal_id,
             "messages": [AIMessage(content=final_summary)],
             "final_trade_decision": final_summary,
             "sender": name,
@@ -613,6 +616,7 @@ class ForexTradingAgentsGraph:
             portfolio_context=portfolio.render(canon_pair) if portfolio is not None else "",
         )
         init_state["forex_as_of_utc"] = cutoff.isoformat()
+        init_state["forex_proposal_id"] = None
         init_state["forex_proposal"] = None
         init_state["forex_risk_decision"] = None
         return init_state

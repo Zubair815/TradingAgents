@@ -132,9 +132,16 @@ class ProposalRecord(BaseModel):
     status: ProposalStatus = ProposalStatus.PROPOSED
     risk_decision: dict[str, Any] | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+    schema_version: int = 1
+    run_id: str | None = None
+    snapshot_id: str | None = None
+    version_id: str | None = None
+    proposal_payload: dict[str, Any] | None = None
 
     def to_forex_trader_proposal(self) -> ForexTraderProposal:
         """Construct domain ForexTraderProposal from database record."""
+        if self.proposal_payload is not None:
+            return ForexTraderProposal.model_validate(self.proposal_payload)
         return ForexTraderProposal(
             pair=self.pair,
             action=self.action,
@@ -174,6 +181,7 @@ class ProposalRecord(BaseModel):
 
         return cls(
             proposal_id=pid,
+            proposal_payload=proposal.model_dump(mode="json"),
             pair=proposal.pair,
             action=proposal.action,
             order_type=proposal.order_type,

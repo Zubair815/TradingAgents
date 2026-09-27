@@ -12,6 +12,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from tradingagents.research.schema import SCHEMA_V2
+
 logger = logging.getLogger(__name__)
 
 
@@ -170,7 +172,8 @@ MIGRATIONS: list[dict[str, Any]] = [
         CREATE INDEX IF NOT EXISTS idx_trade_lessons_trade
             ON trade_lessons(trade_id);
         """,
-    }
+    },
+    {"version": 2, "description": "Versioned research runs, immutable evidence and source links", "sql": SCHEMA_V2},
 ]
 
 
@@ -241,7 +244,19 @@ def run_migrations(conn_or_path: sqlite3.Connection | str | Path) -> int:
             if ver not in applied:
                 logger.info("Applying database migration %d: %s", ver, m["description"])
                 with conn:
-                    conn.executescript(m["sql"])
+                    # executescript implicitly commits an existing transaction. Execute
+                    # complete statements individually so failed DDL rolls back too.
+                    conn.execute("BEGIN IMMEDIATE")
+                    if conn.execute("SELECT 1 FROM schema_migrations WHERE version=?", (ver,)).fetchone():
+                        continue
+                    statement = ""
+                    for line in m["sql"].splitlines(keepends=True):
+                        statement += line
+                        if sqlite3.complete_statement(statement):
+                            conn.execute(statement)
+                            statement = ""
+                    if statement.strip():
+                        conn.execute(statement)
                     conn.execute(
                         """
                         INSERT INTO schema_migrations (version, applied_at_utc, description)

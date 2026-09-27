@@ -73,6 +73,7 @@ class Propagator:
             "forex_macro_report": "",
             "forex_news_report": "",
             "forex_as_of_utc": "",
+            "forex_proposal_id": None,
             "forex_proposal": None,
             "forex_risk_decision": None,
         }
