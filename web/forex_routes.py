@@ -177,13 +177,22 @@ def reset_forex_state() -> None:
         _backtest_runs.clear()
 
 
-def verify_optional_auth(request: Request) -> bool:
-    """Optional auth verification delegating to web.server if configured."""
+def verify_forex_auth(request: Request) -> bool:
+    """Enforce authentication on Forex mutation and execution routes.
+
+    Delegates to web.server.verify_auth.
+    CRITICAL: Never catch HTTPException — unauthorized requests MUST raise 401.
+    """
     try:
         from web.server import verify_auth
-        return verify_auth(request)
-    except (ImportError, HTTPException):
+    except ImportError:
         return True
+
+    return verify_auth(request)
+
+
+# Backward-compatible alias
+verify_optional_auth = verify_forex_auth
 
 
 # ---------------------------------------------------------------------------
@@ -416,9 +425,11 @@ async def get_trade(
 @router.post("/journal/trades/manual-open")
 async def manual_open_trade(
     req: ManualTradeOpenRequest,
+    request: Request,
     journal_mgr: ForexJournalManager = Depends(get_journal_manager),
 ):
     """Record an open trade directly or from a proposal."""
+    verify_forex_auth(request)
     try:
         norm_pair = normalize_forex_pair(req.pair)
         action_enum = ForexAction(req.action.upper())
@@ -458,9 +469,11 @@ async def manual_open_trade(
 async def close_trade(
     trade_id: str,
     req: TradeCloseRequest,
+    request: Request,
     journal_mgr: ForexJournalManager = Depends(get_journal_manager),
 ):
     """Close and settle an open trade."""
+    verify_forex_auth(request)
     try:
         reason_enum = TradeExitReason(req.exit_reason.upper())
     except ValueError as exc:
@@ -488,9 +501,11 @@ async def close_trade(
 async def modify_stop_loss(
     trade_id: str,
     req: ModifyStopLossRequest,
+    request: Request,
     journal_mgr: ForexJournalManager = Depends(get_journal_manager),
 ):
     """Modify stop loss level and automatically detect breakeven."""
+    verify_forex_auth(request)
     try:
         success = journal_mgr.modify_stop_loss(
             trade_id=trade_id,
@@ -508,9 +523,11 @@ async def modify_stop_loss(
 async def modify_take_profit(
     trade_id: str,
     req: ModifyTakeProfitRequest,
+    request: Request,
     journal_mgr: ForexJournalManager = Depends(get_journal_manager),
 ):
     """Modify take profit target price."""
+    verify_forex_auth(request)
     try:
         journal_mgr.modify_take_profit(
             trade_id=trade_id,
@@ -528,9 +545,11 @@ async def modify_take_profit(
 async def partial_close_trade(
     trade_id: str,
     req: PartialCloseRequest,
+    request: Request,
     journal_mgr: ForexJournalManager = Depends(get_journal_manager),
 ):
     """Scale out of an open trade partially."""
+    verify_forex_auth(request)
     try:
         reason_enum = TradeExitReason(req.exit_reason.upper())
         result = journal_mgr.partial_close(
@@ -550,9 +569,11 @@ async def partial_close_trade(
 async def update_trade_reflection(
     trade_id: str,
     req: TradeReflectionRequest,
+    request: Request,
     journal: ForexTradeJournal = Depends(get_journal),
 ):
     """Update qualitative reflection notes on a settled trade."""
+    verify_forex_auth(request)
     try:
         success = journal.update_trade_reflection(
             trade_id=trade_id,
@@ -780,9 +801,11 @@ async def size_proposal(
 async def update_proposal_status(
     proposal_id: str,
     req: UpdateProposalStatusRequest,
+    request: Request,
     journal: ForexTradeJournal = Depends(get_journal),
 ):
     """Update status of a proposal (e.g. APPROVED, REJECTED, CANCELLED, EXPIRED)."""
+    verify_forex_auth(request)
     try:
         new_status = ProposalStatus(req.status.upper())
         success = journal.update_proposal_status(proposal_id=proposal_id, status=new_status)
@@ -802,10 +825,12 @@ async def update_proposal_status(
 @router.post("/proposals/reconcile")
 async def reconcile_proposals(
     req: ReconcilePositionsRequest,
+    request: Request,
     journal_mgr: ForexJournalManager = Depends(get_journal_manager),
     mt5: MT5Observer = Depends(get_mt5_observer),
 ):
     """Reconcile broker executions with active approved proposals."""
+    verify_forex_auth(request)
     try:
         positions = mt5.get_open_positions()
     except Exception as exc:
@@ -844,9 +869,11 @@ async def get_mt5_status(
 @router.post("/mt5/connect")
 async def connect_mt5(
     req: MT5ConnectRequest,
+    request: Request,
     mt5: MT5Observer = Depends(get_mt5_observer),
 ):
     """Attempt connection to MetaTrader 5 terminal."""
+    verify_forex_auth(request)
     try:
         conn = mt5.connection
         connected = conn.connect(
@@ -867,9 +894,11 @@ async def connect_mt5(
 
 @router.post("/mt5/disconnect")
 async def disconnect_mt5(
+    request: Request,
     mt5: MT5Observer = Depends(get_mt5_observer),
 ):
     """Disconnect from MetaTrader 5 terminal."""
+    verify_forex_auth(request)
     try:
         mt5.connection.disconnect()
         return {"status": "DISCONNECTED", "is_connected": False}
@@ -1393,8 +1422,10 @@ async def get_forex_status_alias(run_id: str):
 @router.post("/backtest/run")
 async def run_backtest(
     req: ForexBacktestRequest,
+    request: Request,
 ):
     """Run an explicitly requested, isolated demonstration backtest."""
+    verify_forex_auth(request)
     if not req.demo_mode:
         raise HTTPException(
             status_code=503,
@@ -1602,10 +1633,12 @@ async def get_deep_metrics(
 @router.post("/analytics/monte-carlo")
 async def run_monte_carlo_analysis(
     req: MonteCarloRequest,
+    request: Request,
     analytics_mgr: ForexAnalyticsManager = Depends(get_analytics_manager),
     journal: ForexTradeJournal = Depends(get_journal),
 ):
     """Execute Monte Carlo bootstrap resampling and ruin probabilities."""
+    verify_forex_auth(request)
     trades = journal.list_trades(limit=10000)
     result = analytics_mgr.run_monte_carlo(
         trades=trades,
@@ -1631,11 +1664,13 @@ async def get_risk_calibration(
 
 @router.post("/analytics/ablation")
 async def run_ablation_study(
+    request: Request,
     req: dict[str, Any] | None = None,
     analytics_mgr: ForexAnalyticsManager = Depends(get_analytics_manager),
     journal: ForexTradeJournal = Depends(get_journal),
 ):
     """Evaluate marginal alpha contributions across agents in the pipeline."""
+    verify_forex_auth(request)
     trades = journal.list_trades(limit=10000)
     study = analytics_mgr.run_ablation(trades=trades)
     return {"ablation_study": _safe_model_dump(study)}
@@ -1661,9 +1696,11 @@ async def list_lessons(
 @router.post("/learning/reflect/{trade_id}")
 async def reflect_on_trade(
     trade_id: str,
+    request: Request,
     learning_mgr: ForexLearningManager = Depends(get_learning_manager),
 ):
     """Trigger automated post-trade reflection and lesson extraction for a settled position."""
+    verify_forex_auth(request)
     try:
         reflection = learning_mgr.reflect_on_trade(trade=trade_id)
         return {"reflection": _safe_model_dump(reflection), "status": "COMPLETED"}

@@ -79,7 +79,9 @@ def isolated_forex_env():
 
 @pytest.fixture
 def client():
-    return TestClient(app)
+    c = TestClient(app)
+    c.get("/")
+    return c
 
 
 # ---------------------------------------------------------------------------
@@ -1377,5 +1379,119 @@ class TestForexTimeframeFirstClass:
             assert proposal_id is not None
             saved = journal.get_proposal(proposal_id)
             assert saved.timeframe == tf
+
+
+# ---------------------------------------------------------------------------
+# 10. Authentication Enforcement Tests (Phase 5)
+# ---------------------------------------------------------------------------
+
+class TestForexAuthentication:
+    """Verify that Forex mutating routes enforce authentication and never swallow 401."""
+
+    def test_unauthenticated_request_blocked_when_api_key_configured(self):
+        import web.server as server
+
+        fresh_client = TestClient(app)
+        with patch.object(server, "DASHBOARD_API_KEY", "prod-secret-key-xyz"):
+            # Session cookie alone must NOT suffice when explicit API key is configured
+            fresh_client.cookies.set("tradingagents_session", server._SESSION_TOKEN)
+
+            # Analyze
+            res_analyze = fresh_client.post("/api/forex/analyze", json={"pair": "EURUSD"})
+            assert res_analyze.status_code == 401
+
+            # MT5 connect
+            res_connect = fresh_client.post("/api/forex/mt5/connect", json={"login": 12345, "server": "Test"})
+            assert res_connect.status_code == 401
+
+            # Journal manual open
+            res_open = fresh_client.post(
+                "/api/forex/journal/trades/manual-open",
+                json={"pair": "EURUSD", "action": "LONG", "entry_price": 1.0850, "lots": 0.1},
+            )
+            assert res_open.status_code == 401
+
+            # Proposal status
+            res_status = fresh_client.post("/api/forex/proposals/prop_test/status", json={"status": "APPROVED"})
+            assert res_status.status_code == 401
+
+    def test_incorrect_api_key_returns_401(self):
+        import web.server as server
+
+        fresh_client = TestClient(app)
+        with patch.object(server, "DASHBOARD_API_KEY", "prod-secret-key-xyz"):
+            res1 = fresh_client.post(
+                "/api/forex/analyze",
+                json={"pair": "EURUSD"},
+                headers={"X-API-Key": "wrong-key"},
+            )
+            assert res1.status_code == 401
+
+            res2 = fresh_client.post(
+                "/api/forex/mt5/connect",
+                json={"login": 12345, "server": "Test"},
+                headers={"Authorization": "Bearer invalid-token"},
+            )
+            assert res2.status_code == 401
+
+    def test_correct_api_key_accepted(self):
+        import web.server as server
+
+        fresh_client = TestClient(app)
+        with patch.object(server, "DASHBOARD_API_KEY", "prod-secret-key-xyz"):
+            # Accepted via X-API-Key
+            res1 = fresh_client.post(
+                "/api/forex/journal/trades/manual-open",
+                json={"pair": "EURUSD", "action": "LONG", "entry_price": 1.0850, "lots": 0.1},
+                headers={"X-API-Key": "prod-secret-key-xyz"},
+            )
+            assert res1.status_code == 200
+
+            # Accepted via Bearer token
+            res2 = fresh_client.post(
+                "/api/forex/journal/trades/manual-open",
+                json={"pair": "EURUSD", "action": "SHORT", "entry_price": 1.0850, "lots": 0.1},
+                headers={"Authorization": "Bearer prod-secret-key-xyz"},
+            )
+            assert res2.status_code == 200
+
+    def test_missing_session_returns_401_when_no_api_key_configured(self):
+        import web.server as server
+
+        fresh_client = TestClient(app)
+        with patch.object(server, "DASHBOARD_API_KEY", ""):
+            # Client without cookie and without session header gets 401
+            res = fresh_client.post(
+                "/api/forex/journal/trades/manual-open",
+                json={"pair": "EURUSD", "action": "LONG", "entry_price": 1.0850, "lots": 0.1},
+            )
+            assert res.status_code == 401
+
+    def test_valid_session_cookie_accepted_when_no_api_key_configured(self):
+        import web.server as server
+
+        fresh_client = TestClient(app)
+        with patch.object(server, "DASHBOARD_API_KEY", ""):
+            fresh_client.cookies.set("tradingagents_session", server._SESSION_TOKEN)
+            res = fresh_client.post(
+                "/api/forex/journal/trades/manual-open",
+                json={"pair": "EURUSD", "action": "LONG", "entry_price": 1.0850, "lots": 0.1},
+            )
+            assert res.status_code == 200
+
+    def test_verify_forex_auth_never_swallows_http_exception(self):
+        from fastapi import HTTPException
+
+        from web.forex_routes import verify_forex_auth
+
+        mock_request = MagicMock()
+        mock_request.headers = {}
+        mock_request.cookies = {}
+
+        # verify_forex_auth must raise HTTPException, never return True when unauthorized
+        with pytest.raises(HTTPException) as exc_info:
+            verify_forex_auth(mock_request)
+        assert exc_info.value.status_code == 401
+
 
 
