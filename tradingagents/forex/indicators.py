@@ -636,7 +636,7 @@ def format_multi_timeframe_indicators_summary(
     lines.append("|---|---|---|---|---|---|---|")
 
     # Order timeframes from highest to lowest
-    ordered_tfs = [Timeframe.D1, Timeframe.H4, Timeframe.H1, Timeframe.M30, Timeframe.M15, Timeframe.M5]
+    ordered_tfs = sorted(snapshots.keys(), key=lambda tf: tf.seconds, reverse=True)
 
     for tf in ordered_tfs:
         if tf not in snapshots:

@@ -166,6 +166,33 @@ def get_default_context_timeframes(execution_tf: Timeframe | str) -> tuple[Timef
     return DEFAULT_CONTEXT_TIMEFRAMES.get(tf, (Timeframe.H1, Timeframe.H4, Timeframe.D1))
 
 
+def resolve_timeframe(tf: Timeframe | str) -> Timeframe:
+    """Resolve a Timeframe enum or timeframe string (including aliases like 1m, 5m, 1h, 4h)."""
+    if isinstance(tf, Timeframe):
+        return tf
+    s = str(tf).strip().upper()
+    _aliases = {
+        "1M": Timeframe.M1,
+        "5M": Timeframe.M5,
+        "15M": Timeframe.M15,
+        "30M": Timeframe.M30,
+        "1H": Timeframe.H1,
+        "60M": Timeframe.H1,
+        "4H": Timeframe.H4,
+        "240M": Timeframe.H4,
+        "1D": Timeframe.D1,
+        "D": Timeframe.D1,
+        "DAILY": Timeframe.D1,
+        "1W": Timeframe.W1,
+        "W": Timeframe.W1,
+        "WEEKLY": Timeframe.W1,
+    }
+    if s in _aliases:
+        return _aliases[s]
+    return Timeframe.from_string(s)
+
+
+
 # ---------------------------------------------------------------------------
 # ForexPair — instrument-level Forex metadata
 # ---------------------------------------------------------------------------

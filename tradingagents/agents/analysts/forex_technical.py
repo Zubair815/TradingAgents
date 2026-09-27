@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Literal
 
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
@@ -34,6 +35,7 @@ from tradingagents.agents.utils.forex_tools import (
     get_multi_timeframe_indicators_tool,
     get_multi_timeframe_market_structure_tool,
 )
+from tradingagents.dataflows.forex_data import resolve_timeframe
 from tradingagents.forex.domain import Timeframe, get_forex_pair
 from tradingagents.forex.indicators import (
     compute_multi_timeframe_indicators,
@@ -200,6 +202,8 @@ def generate_deterministic_forex_technical_report(
     symbol: str,
     bundle: MultiTimeframeData,
     spread_pips: float | None = None,
+    execution_timeframe: Timeframe | str | None = None,
+    context_timeframes: Sequence[Timeframe | str] | None = None,
 ) -> str:
     """Generate a 100% deterministic Forex technical report from market data.
 
@@ -214,20 +218,30 @@ def generate_deterministic_forex_technical_report(
     indicator_summary = format_multi_timeframe_indicators_summary(indicator_snapshots)
 
     # 2. Multi-Timeframe Structure
-    structure_alignment = analyze_multi_timeframe_structure(bundle, lookback=2, lookforward=2)
+    structure_alignment = analyze_multi_timeframe_structure(
+        bundle,
+        lookback=2,
+        lookforward=2,
+        execution_timeframe=execution_timeframe,
+        context_timeframes=context_timeframes,
+    )
     structure_summary = format_multi_timeframe_structure_summary(structure_alignment)
 
     # 3. Session Context
-    as_of = bundle.as_of or bundle.latest_candle_time
+    as_of = bundle.as_of or bundle.latest_candle_time or datetime.now(timezone.utc)
     session_open = is_market_open(as_of)
     active_sessions = get_active_sessions_for_pair(symbol, as_of) if session_open else []
     prime_session = is_pair_in_prime_session(symbol, as_of) if session_open else False
 
     # 4. Extract latest snapshot for executive summary
-    pref_tf = (
-        Timeframe.H1 if Timeframe.H1 in indicator_snapshots
-        else (Timeframe.H4 if Timeframe.H4 in indicator_snapshots else list(indicator_snapshots.keys())[0] if indicator_snapshots else None)
-    )
+    exec_tf_resolved = resolve_timeframe(execution_timeframe) if execution_timeframe else None
+    if exec_tf_resolved and exec_tf_resolved in indicator_snapshots:
+        pref_tf = exec_tf_resolved
+    else:
+        pref_tf = (
+            Timeframe.H1 if Timeframe.H1 in indicator_snapshots
+            else (Timeframe.H4 if Timeframe.H4 in indicator_snapshots else list(indicator_snapshots.keys())[0] if indicator_snapshots else None)
+        )
     latest_ind = indicator_snapshots.get(pref_tf) if pref_tf else None
     latest_struct = structure_alignment.structures.get(pref_tf) if pref_tf else None
 

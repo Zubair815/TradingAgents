@@ -436,3 +436,166 @@ class TestMarketStructureTools:
         assert "Multi-Timeframe Market Structure Matrix" in result
         assert "| **H4** |" in result
         assert "| **H1** |" in result
+
+
+# ---------------------------------------------------------------------------
+# 10. Configurable Multi-Timeframe Analysis Tests (Phase 3)
+# ---------------------------------------------------------------------------
+
+
+class TestConfigurableMultiTimeframeAnalysis:
+    """Verify distinct roles of execution timeframe vs context timeframes."""
+
+    def test_m15_execution_with_h1_h4_d1_context(self):
+        """M15 execution with H1, H4, D1 context."""
+        bundle = MultiTimeframeData(
+            symbol="EURUSD",
+            pair=get_forex_pair("EURUSD"),
+            candles={
+                Timeframe.D1: make_uptrend_swings_df(),
+                Timeframe.H4: make_uptrend_swings_df(),
+                Timeframe.H1: make_uptrend_swings_df(),
+                Timeframe.M15: make_uptrend_swings_df(),
+            },
+        )
+        alignment = analyze_multi_timeframe_structure(
+            bundle,
+            lookback=2,
+            lookforward=2,
+            execution_timeframe="M15",
+            context_timeframes=["H1", "H4", "D1"],
+        )
+
+        assert alignment.symbol == "EURUSD"
+        assert alignment.tactical_trend == StructureTrend.BULLISH
+        assert alignment.macro_trend == StructureTrend.BULLISH
+        assert alignment.is_aligned is True
+        assert alignment.alignment_bias == AlignmentBias.CONFLUENT_BULLISH
+
+        summary = format_multi_timeframe_structure_summary(alignment)
+        lines = summary.splitlines()
+        # Verify all 4 timeframes present in table
+        assert any("| **D1** |" in line for line in lines)
+        assert any("| **H4** |" in line for line in lines)
+        assert any("| **H1** |" in line for line in lines)
+        assert any("| **M15** |" in line for line in lines)
+
+    def test_h1_execution_with_h4_d1_context(self):
+        """H1 execution with H4, D1 context."""
+        bundle = MultiTimeframeData(
+            symbol="EURUSD",
+            pair=get_forex_pair("EURUSD"),
+            candles={
+                Timeframe.D1: make_uptrend_swings_df(),
+                Timeframe.H4: make_uptrend_swings_df(),
+                Timeframe.H1: make_downtrend_swings_df(),  # Tactical pullback
+            },
+        )
+        alignment = analyze_multi_timeframe_structure(
+            bundle,
+            lookback=2,
+            lookforward=2,
+            execution_timeframe=Timeframe.H1,
+            context_timeframes=[Timeframe.H4, Timeframe.D1],
+        )
+
+        assert alignment.symbol == "EURUSD"
+        assert alignment.tactical_trend == StructureTrend.BEARISH
+        assert alignment.macro_trend == StructureTrend.BULLISH
+        assert alignment.is_aligned is False
+        assert alignment.alignment_bias == AlignmentBias.COUNTER_TREND
+
+        summary = format_multi_timeframe_structure_summary(alignment)
+        assert "| **D1** |" in summary
+        assert "| **H4** |" in summary
+        assert "| **H1** |" in summary
+
+    def test_m5_execution_with_m15_h1_h4_context(self):
+        """M5 execution with M15, H1, H4 context."""
+        bundle = MultiTimeframeData(
+            symbol="EURUSD",
+            pair=get_forex_pair("EURUSD"),
+            candles={
+                Timeframe.H4: make_uptrend_swings_df(),
+                Timeframe.H1: make_uptrend_swings_df(),
+                Timeframe.M15: make_uptrend_swings_df(),
+                Timeframe.M5: make_uptrend_swings_df(),
+            },
+        )
+        alignment = analyze_multi_timeframe_structure(
+            bundle,
+            lookback=2,
+            lookforward=2,
+            execution_timeframe="M5",
+            context_timeframes=["M15", "H1", "H4"],
+        )
+
+        assert alignment.symbol == "EURUSD"
+        assert alignment.tactical_trend == StructureTrend.BULLISH
+        assert alignment.macro_trend == StructureTrend.BULLISH
+        assert alignment.is_aligned is True
+
+        summary = format_multi_timeframe_structure_summary(alignment)
+        assert "| **H4** |" in summary
+        assert "| **H1** |" in summary
+        assert "| **M15** |" in summary
+        assert "| **M5** |" in summary
+
+    def test_deterministic_report_with_custom_execution_timeframe(self):
+        """Report generator uses requested execution timeframe for executive summary."""
+        from tradingagents.agents.analysts.forex_technical import (
+            generate_deterministic_forex_technical_report,
+        )
+
+        bundle = MultiTimeframeData(
+            symbol="EURUSD",
+            pair=get_forex_pair("EURUSD"),
+            candles={
+                Timeframe.H4: make_uptrend_swings_df(),
+                Timeframe.H1: make_uptrend_swings_df(),
+                Timeframe.M15: make_uptrend_swings_df(),
+                Timeframe.M5: make_uptrend_swings_df(),
+            },
+        )
+        report = generate_deterministic_forex_technical_report(
+            symbol="EURUSD",
+            bundle=bundle,
+            execution_timeframe="M5",
+            context_timeframes=["M15", "H1", "H4"],
+        )
+
+        assert "# Forex Technical Analysis Report: EURUSD" in report
+        assert "Multi-Timeframe Market Structure Matrix" in report
+        assert "Multi-Timeframe Technical Indicator Matrix" in report
+        assert "| **M5** |" in report
+        assert "| **H4** |" in report
+
+    def test_point_in_time_candle_filtering_excludes_future_candles(self):
+        """Candle filtering strictly excludes incomplete or future candles."""
+        from tradingagents.dataflows.forex_data import filter_candles_by_cutoff
+
+        # Create a series of 5 candles, 1 hour apart starting at 10:00
+        dates = [
+            datetime(2026, 3, 10, 10 + i, 0, tzinfo=timezone.utc)
+            for i in range(5)
+        ]
+        df = pd.DataFrame({
+            "Date": dates,
+            "Open": [1.0800] * 5,
+            "High": [1.0850] * 5,
+            "Low": [1.0750] * 5,
+            "Close": [1.0820] * 5,
+            "Volume": [1000] * 5,
+        })
+        # For H1 candles, candle 0 (10:00) closes at 11:00 UTC.
+        # Candle 1 (11:00) closes at 12:00 UTC.
+        # Candle 2 (12:00) closes at 13:00 UTC.
+        # Candle 3 (13:00) closes at 14:00 UTC.
+        # Candle 4 (14:00) closes at 15:00 UTC.
+        cutoff = datetime(2026, 3, 10, 12, 30, tzinfo=timezone.utc)
+        filtered = filter_candles_by_cutoff(df, as_of=cutoff, timeframe=Timeframe.H1)
+
+        # Only candles closing <= 12:30 should be present (candle 0 closing at 11:00, candle 1 closing at 12:00)
+        assert len(filtered) == 2
+        assert filtered.iloc[-1]["Date"] == dates[1]
+

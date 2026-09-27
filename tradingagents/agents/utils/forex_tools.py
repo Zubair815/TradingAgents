@@ -227,6 +227,8 @@ def get_multi_timeframe_market_structure_tool(
             bundle=bundle,
             lookback=lookback,
             lookforward=lookforward,
+            execution_timeframe=forex_execution_timeframe,
+            context_timeframes=forex_context_timeframes,
         )
         return "\n".join(format_data_provenance(df) for df in bundle.candles.values()) + "\n" + format_multi_timeframe_structure_summary(alignment)
     except Exception as exc:

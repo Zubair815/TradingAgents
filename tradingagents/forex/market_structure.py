@@ -14,6 +14,7 @@ Deterministic quantitative price action analysis:
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -26,7 +27,12 @@ if TYPE_CHECKING:
 
 import pandas as pd
 
-from tradingagents.forex.domain import ForexPair, Timeframe, get_forex_pair
+from tradingagents.forex.domain import (
+    ForexPair,
+    Timeframe,
+    get_forex_pair,
+    resolve_timeframe,
+)
 from tradingagents.forex.pips import pip_size_for
 
 logger = logging.getLogger(__name__)
@@ -827,8 +833,10 @@ def analyze_multi_timeframe_structure(
     bundle: MultiTimeframeData,
     lookback: int = 3,
     lookforward: int = 3,
+    execution_timeframe: Timeframe | str | None = None,
+    context_timeframes: Sequence[Timeframe | str] | None = None,
 ) -> MultiTimeframeStructureAlignment:
-    """Analyze multi-timeframe market structure alignment across H4, H1, and M15."""
+    """Analyze multi-timeframe market structure alignment across requested timeframes."""
     structures: dict[Timeframe, MarketStructureSnapshot] = {}
 
     for tf, df in bundle.candles.items():
@@ -848,17 +856,63 @@ def analyze_multi_timeframe_structure(
         except Exception as exc:
             logger.warning(f"Could not build market structure for timeframe {tf.value}: {exc}")
 
-    # Determine Macro trend (H4 prioritized, then D1)
-    macro_tf = Timeframe.H4 if Timeframe.H4 in structures else (Timeframe.D1 if Timeframe.D1 in structures else None)
-    macro_trend = structures[macro_tf].trend if macro_tf else StructureTrend.UNDEFINED
+    # Determine Tactical trend (execution timeframe prioritized)
+    tactical_tf: Timeframe | None = None
+    if execution_timeframe is not None:
+        try:
+            cand_exec = resolve_timeframe(execution_timeframe)
+            if cand_exec in structures:
+                tactical_tf = cand_exec
+        except Exception:
+            pass
+    if tactical_tf is None:
+        if Timeframe.M15 in structures:
+            tactical_tf = Timeframe.M15
+        elif Timeframe.H1 in structures:
+            tactical_tf = Timeframe.H1
+        elif structures:
+            tactical_tf = min(structures.keys(), key=lambda t: t.seconds)
 
-    # Determine Tactical trend (M15 prioritized, then H1)
-    tactical_tf = Timeframe.M15 if Timeframe.M15 in structures else (Timeframe.H1 if Timeframe.H1 in structures else None)
-    tactical_trend = structures[tactical_tf].trend if tactical_tf else StructureTrend.UNDEFINED
+    # Determine Macro trend (highest context timeframe prioritized)
+    macro_tf: Timeframe | None = None
+    if context_timeframes is not None:
+        valid_ctx = []
+        for c in context_timeframes:
+            try:
+                ctf = resolve_timeframe(c)
+                if ctf in structures and (tactical_tf is None or ctf != tactical_tf):
+                    valid_ctx.append(ctf)
+            except Exception:
+                pass
+        if valid_ctx:
+            macro_tf = max(valid_ctx, key=lambda t: t.seconds)
+    if macro_tf is None:
+        if Timeframe.H4 in structures and tactical_tf != Timeframe.H4:
+            macro_tf = Timeframe.H4
+        elif Timeframe.D1 in structures and tactical_tf != Timeframe.D1:
+            macro_tf = Timeframe.D1
+        elif structures:
+            candidates = [t for t in structures if t != tactical_tf]
+            macro_tf = max(candidates, key=lambda t: t.seconds) if candidates else tactical_tf
 
-    # Intermediate trend (H1)
-    inter_tf = Timeframe.H1 if Timeframe.H1 in structures else None
-    inter_trend = structures[inter_tf].trend if inter_tf else StructureTrend.UNDEFINED
+    # Determine Intermediate trend (timeframe between tactical and macro)
+    inter_tf: Timeframe | None = None
+    if tactical_tf and macro_tf and tactical_tf != macro_tf:
+        between = [
+            t for t in structures
+            if min(tactical_tf.seconds, macro_tf.seconds) < t.seconds < max(tactical_tf.seconds, macro_tf.seconds)
+        ]
+        if between:
+            if Timeframe.H1 in between:
+                inter_tf = Timeframe.H1
+            else:
+                inter_tf = max(between, key=lambda t: t.seconds)
+    if inter_tf is None and Timeframe.H1 in structures and Timeframe.H1 not in (tactical_tf, macro_tf):
+        inter_tf = Timeframe.H1
+
+    macro_trend = structures[macro_tf].trend if macro_tf and macro_tf in structures else StructureTrend.UNDEFINED
+    tactical_trend = structures[tactical_tf].trend if tactical_tf and tactical_tf in structures else StructureTrend.UNDEFINED
+    inter_trend = structures[inter_tf].trend if inter_tf and inter_tf in structures else StructureTrend.UNDEFINED
 
     # Evaluate alignment bias
     is_aligned = False
@@ -981,7 +1035,7 @@ def format_multi_timeframe_structure_summary(alignment: MultiTimeframeStructureA
     digits = alignment.pair.digits if alignment.pair else 5
     p_fmt = f"{{:.{digits}f}}"
 
-    ordered_tfs = [Timeframe.D1, Timeframe.H4, Timeframe.H1, Timeframe.M30, Timeframe.M15, Timeframe.M5]
+    ordered_tfs = sorted(alignment.structures.keys(), key=lambda tf: tf.seconds, reverse=True)
 
     for tf in ordered_tfs:
         if tf not in alignment.structures:

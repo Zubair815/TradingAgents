@@ -38,7 +38,12 @@ from tradingagents.dataflows.errors import NoMarketDataError, VendorDataUnavaila
 from tradingagents.dataflows.forex_quality import DataInsufficientError, validate_candles
 from tradingagents.dataflows.stockstats_utils import OHLCV_CACHE_TTL_SECONDS, yf_retry
 from tradingagents.dataflows.utils import safe_ticker_component
-from tradingagents.forex.domain import ForexPair, Timeframe, get_forex_pair
+from tradingagents.forex.domain import (
+    ForexPair,
+    Timeframe,
+    get_forex_pair,
+    resolve_timeframe,
+)
 from tradingagents.forex.pips import price_to_pips
 from tradingagents.forex.symbols import canonical_to_yahoo, strip_broker_suffix
 
@@ -119,30 +124,6 @@ class ForexBar:
 # ---------------------------------------------------------------------------
 
 
-def resolve_timeframe(tf: Timeframe | str) -> Timeframe:
-    """Resolve a Timeframe enum or timeframe string (including aliases like 1m, 5m, 1h, 4h)."""
-    if isinstance(tf, Timeframe):
-        return tf
-    s = str(tf).strip().upper()
-    _aliases = {
-        "1M": Timeframe.M1,
-        "5M": Timeframe.M5,
-        "15M": Timeframe.M15,
-        "30M": Timeframe.M30,
-        "1H": Timeframe.H1,
-        "60M": Timeframe.H1,
-        "4H": Timeframe.H4,
-        "240M": Timeframe.H4,
-        "1D": Timeframe.D1,
-        "D": Timeframe.D1,
-        "DAILY": Timeframe.D1,
-        "1W": Timeframe.W1,
-        "W": Timeframe.W1,
-        "WEEKLY": Timeframe.W1,
-    }
-    if s in _aliases:
-        return _aliases[s]
-    return Timeframe.from_string(s)
 
 
 @dataclass
@@ -159,6 +140,22 @@ class MultiTimeframeData:
     def available_timeframes(self) -> list[Timeframe]:
         """List of timeframes currently loaded in this bundle."""
         return list(self.candles.keys())
+
+    @property
+    def latest_candle_time(self) -> datetime | None:
+        """Find the latest candle timestamp across all loaded timeframes in this bundle."""
+        latest: datetime | None = None
+        for df in self.candles.values():
+            if not df.empty and "Date" in df.columns:
+                dt = df.iloc[-1]["Date"]
+                if isinstance(dt, pd.Timestamp):
+                    dt = dt.to_pydatetime()
+                if isinstance(dt, datetime):
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    if latest is None or dt > latest:
+                        latest = dt
+        return latest
 
     def get_timeframe(self, tf: Timeframe | str) -> pd.DataFrame:
         """Retrieve the DataFrame for the requested timeframe.
