@@ -16,19 +16,17 @@ Key features:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from enum import Enum
-from typing import Any, Optional, Union
-
-from tradingagents.forex.domain import ForexPair, get_forex_pair
-
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # MarketRegime — enum stub for regime classification (Phase 5)
 # ---------------------------------------------------------------------------
-
-
 from zoneinfo import ZoneInfo
+
+from tradingagents.forex.domain import ForexPair, get_forex_pair
+
 
 class MarketRegime(str, Enum):
     """Forex market regime classification.
@@ -43,7 +41,7 @@ class MarketRegime(str, Enum):
     LOW_VOLATILITY = "low_volatility"
 
     @classmethod
-    def from_string(cls, value: str) -> "MarketRegime":
+    def from_string(cls, value: str) -> MarketRegime:
         """Parse case-insensitive string → MarketRegime."""
         normalised = (value or "").strip().lower()
         for member in cls:
@@ -69,7 +67,7 @@ class TradingSession(str, Enum):
     NEW_YORK = "NEW_YORK"
 
     @classmethod
-    def from_string(cls, value: str) -> "TradingSession":
+    def from_string(cls, value: str) -> TradingSession:
         """Parse case-insensitive string → TradingSession."""
         normalised = (value or "").strip().upper().replace(" ", "_")
         for member in cls:
@@ -81,7 +79,7 @@ class TradingSession(str, Enum):
         )
 
     @property
-    def info(self) -> "SessionInfo":
+    def info(self) -> SessionInfo:
         """Detailed session metadata."""
         return _SESSION_INFOS[self]
 
@@ -189,7 +187,7 @@ class SessionOverlap(str):
 
     _short_name: str
 
-    def __new__(cls, full_name: str, short_name: str = "") -> "SessionOverlap":
+    def __new__(cls, full_name: str, short_name: str = "") -> SessionOverlap:
         obj = super().__new__(cls, full_name)
         obj._short_name = short_name or full_name
         return obj
@@ -201,9 +199,7 @@ class SessionOverlap(str):
     def __eq__(self, other: object) -> bool:
         if super().__eq__(other):
             return True
-        if isinstance(other, str) and other == self._short_name:
-            return True
-        return False
+        return isinstance(other, str) and other == self._short_name
 
     def __hash__(self) -> int:
         return super().__hash__()
@@ -420,7 +416,7 @@ def _get_next_open_for_single_session(
 
 def get_next_session_open(
     dt: datetime,
-    session: Optional[TradingSession] = None,
+    session: TradingSession | None = None,
 ) -> datetime:
     """Calculate the next session opening datetime in UTC.
 
@@ -474,7 +470,7 @@ _CURRENCY_TO_SESSIONS: dict[str, list[TradingSession]] = {
 }
 
 
-def _extract_base_quote(pair: Union[ForexPair, str]) -> tuple[str, str]:
+def _extract_base_quote(pair: ForexPair | str) -> tuple[str, str]:
     """Extract base and quote currency codes from a ForexPair or string symbol."""
     if isinstance(pair, ForexPair):
         return pair.base_currency, pair.quote_currency
@@ -494,7 +490,7 @@ def _extract_base_quote(pair: Union[ForexPair, str]) -> tuple[str, str]:
 
 
 def get_relevant_sessions_for_pair(
-    pair: Union[ForexPair, str],
+    pair: ForexPair | str,
 ) -> list[TradingSession]:
     """Return all trading sessions inherently relevant to this currency pair."""
     base, quote = _extract_base_quote(pair)
@@ -513,8 +509,8 @@ def get_relevant_sessions_for_pair(
 
 
 def session_for_pair(
-    pair: Union[ForexPair, str],
-    dt: Optional[datetime] = None,
+    pair: ForexPair | str,
+    dt: datetime | None = None,
     *,
     active_only: bool = False,
 ) -> list[TradingSession]:
@@ -547,7 +543,7 @@ def session_for_pair(
 
 
 def is_pair_in_prime_session(
-    pair: Union[ForexPair, str],
+    pair: ForexPair | str,
     dt: datetime,
 ) -> bool:
     """Check if at least one of the pair's prime trading sessions is currently active."""
@@ -557,7 +553,7 @@ def is_pair_in_prime_session(
 
 
 def get_active_sessions_for_pair(
-    pair: Union[ForexPair, str],
+    pair: ForexPair | str,
     dt: datetime,
 ) -> list[TradingSession]:
     """Convenience helper returning only the currently active sessions relevant to the pair."""
@@ -569,7 +565,7 @@ def get_active_sessions_for_pair(
 # ---------------------------------------------------------------------------
 
 
-def get_market_status(dt: Optional[datetime] = None) -> dict[str, Any]:
+def get_market_status(dt: datetime | None = None) -> dict[str, Any]:
     """Generate a comprehensive dictionary snapshot of the current Forex market state.
 
     Suitable for agent prompts, CLI headers, and web dashboards.
@@ -579,7 +575,7 @@ def get_market_status(dt: Optional[datetime] = None) -> dict[str, Any]:
     active = get_active_sessions(ref_dt)
     overlaps = get_session_overlaps(ref_dt)
 
-    next_open: Optional[datetime] = None
+    next_open: datetime | None = None
     if not market_open:
         next_open = get_next_session_open(ref_dt)
 
@@ -602,7 +598,7 @@ def get_market_status(dt: Optional[datetime] = None) -> dict[str, Any]:
     }
 
 
-def format_session_summary(dt: Optional[datetime] = None) -> str:
+def format_session_summary(dt: datetime | None = None) -> str:
     """Format a human-readable one-line summary of market state."""
     status = get_market_status(dt)
     if not status["is_market_open"]:
