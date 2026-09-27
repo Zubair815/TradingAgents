@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import secrets
 import sys
 import threading
@@ -130,6 +131,8 @@ class RunSummary(BaseModel):
     finished_at: str | None = None
     error: str | None = None
     signal: str | None = None
+    report_id: str | None = None
+    report_path: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -145,6 +148,12 @@ _NODE_LABELS = {
     "news_analyst_tools": ("News Analyst — fetching data", 3),
     "fundamentals_analyst": ("Fundamentals Analyst", 4),
     "fundamentals_analyst_tools": ("Fundamentals Analyst — fetching data", 4),
+    "forex_technical_analyst": ("Forex Technical Analyst", 1),
+    "forex_technical_analyst_tools": ("Forex Technical Analyst — fetching data", 1),
+    "forex_macro_analyst": ("Currency Macro Analyst", 4),
+    "forex_macro_analyst_tools": ("Currency Macro Analyst — fetching data", 4),
+    "forex_news_analyst": ("Forex News Analyst", 3),
+    "forex_news_analyst_tools": ("Forex News Analyst — fetching data", 3),
     "bull_researcher": ("Bull Researcher", 5),
     "bull_researcher_tools": ("Bull Researcher — fetching data", 5),
     "bear_researcher": ("Bear Researcher", 6),
@@ -231,6 +240,9 @@ def _run_analysis(run_id: str, req: AnalysisRequest):
                 "social": "social_media_analyst",
                 "news": "news_analyst",
                 "fundamentals": "fundamentals_analyst",
+                "forex_technical": "forex_technical_analyst",
+                "forex_macro": "forex_macro_analyst",
+                "forex_news": "forex_news_analyst",
             }
             first_node = analyst_key_map.get(first_analyst, "market_analyst")
             seen_nodes.add(first_node)
@@ -324,11 +336,17 @@ def _run_analysis(run_id: str, req: AnalysisRequest):
         # Process signal
         signal = graph.process_signal(final_state.get("final_trade_decision", ""))
 
-        # Save reports
-        report_path = graph.save_reports(final_state, req.ticker)
+        # Ensure trade_date is preserved in final_state
+        final_state.setdefault("trade_date", trade_date)
+
+        # Save reports with explicit trade_date
+        report_path = graph.save_reports(final_state, req.ticker, trade_date=trade_date)
+        report_folder = report_path.parent.name
 
         # Store the state for retrieval
         report_data = {
+            "run_id": run_id,
+            "report_id": report_folder,
             "ticker": req.ticker,
             "date": trade_date,
             "signal": signal,
@@ -344,12 +362,16 @@ def _run_analysis(run_id: str, req: AnalysisRequest):
             "report_path": str(report_path),
         }
         _completed_reports[run_id] = report_data
+        _completed_reports[report_folder] = report_data
 
         _runs[run_id]["status"] = "completed"
         _runs[run_id]["signal"] = signal
         _runs[run_id]["finished_at"] = datetime.now().isoformat()
+        _runs[run_id]["report_id"] = report_folder
+        _runs[run_id]["report_path"] = str(report_path)
         _emit(run_id, "complete", {
             "signal": signal,
+            "report_id": report_folder,
             "message": f"Analysis complete: {signal}",
         })
 
@@ -407,6 +429,10 @@ STATIC_DIR = Path(__file__).parent / "static"
 STATIC_DIR.mkdir(exist_ok=True)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
+# Mount Forex REST and SSE router (Phase 20)
+from web.forex_routes import router as forex_router  # noqa: E402
+app.include_router(forex_router)
+
 
 # ---------------------------------------------------------------------------
 # Routes
@@ -428,24 +454,17 @@ async def index(response: Response):
 
 
 @app.get("/api/config")
-async def get_config(response: Response):
+async def get_config():
     """Return safe config (no secrets) for the frontend."""
-    response.set_cookie(
-        key="tradingagents_session",
-        value=_SESSION_TOKEN,
-        httponly=True,
-        samesite="lax",
-        path="/",
-    )
     return {
         "auth_required": bool(DASHBOARD_API_KEY),
-        "session_token": _SESSION_TOKEN if not DASHBOARD_API_KEY else None,
         "provider": DEFAULT_CONFIG.get("llm_provider", "openai"),
         "quick_model": DEFAULT_CONFIG.get("quick_think_llm", ""),
         "deep_model": DEFAULT_CONFIG.get("deep_think_llm", ""),
         "max_tokens": DEFAULT_CONFIG.get("max_tokens"),
         "temperature": DEFAULT_CONFIG.get("temperature"),
         "analysts": ["market", "social", "news", "fundamentals"],
+        "forex_analysts": ["forex_technical", "forex_macro", "forex_news"],
         "providers": [
             {"id": "openai", "name": "OpenAI", "models": ["gpt-4o", "gpt-4o-mini", "o3-mini", "gpt-5.6", "gpt-5.6-luna"]},
             {"id": "openrouter", "name": "OpenRouter", "models": ["deepseek/deepseek-chat-v3-0324", "anthropic/claude-3.5-sonnet", "google/gemini-2.5-flash", "openai/gpt-4o"]},
@@ -505,7 +524,10 @@ def _load_on_disk_report(run_id: str) -> dict | None:
     if not reports_dir.exists():
         return None
 
-    clean_id = Path(run_id).name
+    if run_id in _runs and _runs[run_id].get("report_id"):
+        clean_id = Path(_runs[run_id]["report_id"]).name
+    else:
+        clean_id = Path(run_id).name
     item_dir = reports_dir / clean_id
     if not item_dir.exists() or not item_dir.is_dir():
         return None
@@ -519,17 +541,24 @@ def _load_on_disk_report(run_id: str) -> dict | None:
         parts = clean_id.split("_")
         ticker = parts[0] if parts else clean_id
         date_str = ""
-        if len(parts) > 1 and len(parts[1]) == 8:
+        date_match = re.search(
+            r"^(?:Analysis Date|Trade Date|Date):\s*(\d{4}-\d{2}-\d{2})",
+            content,
+            re.MULTILINE | re.IGNORECASE,
+        )
+        if date_match:
+            date_str = date_match.group(1)
+        elif len(parts) > 1 and len(parts[1]) == 8:
             date_str = f"{parts[1][:4]}-{parts[1][4:6]}-{parts[1][6:8]}"
 
         def _read_sub(subpath: str) -> str:
             p = item_dir / subpath
             return p.read_text(encoding="utf-8") if p.exists() else ""
 
-        market_report = _read_sub("1_analysts/market.md")
+        market_report = _read_sub("1_analysts/forex_technical.md") or _read_sub("1_analysts/market.md")
         sentiment_report = _read_sub("1_analysts/sentiment.md")
-        news_report = _read_sub("1_analysts/news.md")
-        fundamentals_report = _read_sub("1_analysts/fundamentals.md")
+        news_report = _read_sub("1_analysts/forex_news.md") or _read_sub("1_analysts/news.md")
+        fundamentals_report = _read_sub("1_analysts/forex_macro.md") or _read_sub("1_analysts/fundamentals.md")
 
         bull_history = _read_sub("2_research/bull.md")
         bear_history = _read_sub("2_research/bear.md")
@@ -580,6 +609,13 @@ async def get_report(run_id: str):
     """Get the full report for a completed run or saved report."""
     if run_id in _completed_reports:
         return _completed_reports[run_id]
+    if run_id in _runs and _runs[run_id].get("report_id"):
+        rep_id = _runs[run_id]["report_id"]
+        if rep_id in _completed_reports:
+            return _completed_reports[rep_id]
+        disk_report = _load_on_disk_report(rep_id)
+        if disk_report is not None:
+            return disk_report
     disk_report = _load_on_disk_report(run_id)
     if disk_report is not None:
         return disk_report
@@ -639,7 +675,14 @@ async def get_history():
                         ticker = parts[0] if parts else item.name
                         date_str = ""
                         time_str = ""
-                        if len(parts) > 1 and len(parts[1]) == 8:
+                        date_match = re.search(
+                            r"^(?:Analysis Date|Trade Date|Date):\s*(\d{4}-\d{2}-\d{2})",
+                            content,
+                            re.MULTILINE | re.IGNORECASE,
+                        )
+                        if date_match:
+                            date_str = date_match.group(1)
+                        elif len(parts) > 1 and len(parts[1]) == 8:
                             date_str = f"{parts[1][:4]}-{parts[1][4:6]}-{parts[1][6:8]}"
                         if len(parts) > 2 and len(parts[2]) >= 4:
                             time_str = f"{parts[2][:2]}:{parts[2][2:4]}"
@@ -648,9 +691,16 @@ async def get_history():
                         parsed = parse_rating(content)
                         signal = parsed if parsed and parsed != "REVIEW" else None
 
+                        live_run_id = None
+                        for r in _runs.values():
+                            if r.get("report_id") == item.name or r.get("report_path") == str(report_file):
+                                live_run_id = r["run_id"]
+                                break
+
                         history.append({
                             "id": item.name,
                             "run_id": item.name,
+                            "live_run_id": live_run_id,
                             "ticker": ticker,
                             "date": date_str or datetime.now().strftime("%Y-%m-%d"),
                             "time": time_str,
