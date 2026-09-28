@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 
@@ -22,8 +23,11 @@ from tradingagents.learning.models import (
 )
 from tradingagents.learning.retriever import LessonRetriever
 from tradingagents.learning.store import ForexLessonStore
-from tradingagents.metrics.mfe_mae import calculate_trade_mfe_mae
+from tradingagents.metrics.mfe_mae import calculate_trade_mfe_mae, parse_utc_timestamp
 from tradingagents.metrics.outcome import TradeOutcomeEngine
+
+if TYPE_CHECKING:
+    from tradingagents.learning.history_provider import TradeHistoryProvider
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +40,7 @@ class ForexLearningManager:
         journal: ForexTradeJournal | None = None,
         db_path: str | Path | None = None,
         store: ForexLessonStore | None = None,
+        history_provider: TradeHistoryProvider | None = None,
     ) -> None:
         if journal is not None:
             self.journal = journal
@@ -49,6 +54,13 @@ class ForexLearningManager:
 
         self.agent = ForexReflectionAgent(store=self.store)
         self.retriever = LessonRetriever(store=self.store)
+
+        if history_provider is not None:
+            self.history_provider = history_provider
+        else:
+            from tradingagents.learning.history_provider import MT5TradeHistoryProvider
+
+            self.history_provider = MT5TradeHistoryProvider()
 
     def reflect_on_trade(
         self,
@@ -88,8 +100,32 @@ class ForexLearningManager:
                 events.append(rev)
 
         # Calculate excursion metrics & outcome classification
-        candle_data = candles if candles is not None else []
-        mfe_mae = calculate_trade_mfe_mae(trade=trade_rec, candles=candle_data)
+        if candles is not None:
+            mfe_mae = calculate_trade_mfe_mae(
+                trade=trade_rec,
+                candles=candles,
+                source="MANUAL",
+            )
+        else:
+            open_dt = parse_utc_timestamp(trade_rec.open_time_utc) or datetime.now(timezone.utc)
+            close_dt = parse_utc_timestamp(trade_rec.close_time_utc) or datetime.now(timezone.utc)
+            history_res = self.history_provider.get_history(
+                pair=trade_rec.pair,
+                start_time=open_dt,
+                end_time=close_dt,
+                timeframe="M1",
+            )
+            candle_data = history_res.candles if history_res.candles is not None else []
+            mfe_mae = calculate_trade_mfe_mae(
+                trade=trade_rec,
+                candles=candle_data,
+                source=history_res.source,
+                resolution=history_res.resolution,
+                precision=history_res.precision,
+                retrieval_time_utc=history_res.retrieval_time_utc,
+                is_available=history_res.is_available,
+                unavailable_reason=history_res.unavailable_reason,
+            )
         outcome = TradeOutcomeEngine.classify_outcome(mfe_mae=mfe_mae, trade=trade_rec)
 
         # Assemble full operational context

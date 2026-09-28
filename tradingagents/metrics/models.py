@@ -103,6 +103,14 @@ class TradeMfeMae(BaseModel):
 
     candle_count: int = 0
 
+    # Data provenance and precision (Phase 11)
+    source: str = "MANUAL"
+    resolution: str = "M1"
+    precision: str = "BAR_APPROXIMATION"
+    retrieval_time_utc: str | None = None
+    is_available: bool = True
+    unavailable_reason: str | None = None
+
 
 # ---------------------------------------------------------------------------
 # Trade Outcome Result Model

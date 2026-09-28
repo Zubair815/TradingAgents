@@ -623,3 +623,144 @@ def test_learning_manager_missing_trade_error(tmp_path: Path):
     with pytest.raises(ValueError, match="Trade with id 'non_existent' not found"):
         manager.reflect_on_trade("non_existent")
 
+
+# ===========================================================================
+# 8. Phase 11 Automated MFE/MAE History Acquisition & Provenance Tests
+# ===========================================================================
+
+
+def test_automatic_mfe_mae_history_acquisition_with_provider(tmp_path: Path):
+    """Verify learning manager automatically fetches M1 bars from history provider when candles=None."""
+    from tradingagents.learning.history_provider import InMemoryTradeHistoryProvider
+
+    journal = ForexTradeJournal(db_path=tmp_path / "test_history_acq.db")
+    t_open = datetime(2025, 1, 15, 10, 0, tzinfo=timezone.utc)
+    t_close = datetime(2025, 1, 15, 10, 5, tzinfo=timezone.utc)
+
+    open_rec = journal.record_trade_open(
+        trade_id="trd_acq_1",
+        pair="EURUSD",
+        action=ForexAction.LONG,
+        open_price=1.0800,
+        stop_loss=1.0750,
+        lots=1.0,
+        open_time_utc=t_open.isoformat(),
+    )
+    trade = journal.record_trade_close(
+        trade_id=open_rec.trade_id,
+        close_price=1.0850,
+        close_time_utc=t_close.isoformat(),
+        exit_reason=TradeExitReason.MANUAL,
+    )
+
+    # 5 M1 bars during the holding period
+    bars = [
+        ForexBar(timestamp=t_open + timedelta(minutes=1), open=1.0800, high=1.0820, low=1.0790, close=1.0815, volume=10.0),
+        ForexBar(timestamp=t_open + timedelta(minutes=2), open=1.0815, high=1.0870, low=1.0810, close=1.0860, volume=15.0),
+        ForexBar(timestamp=t_open + timedelta(minutes=3), open=1.0860, high=1.0890, low=1.0850, close=1.0880, volume=20.0),
+        ForexBar(timestamp=t_open + timedelta(minutes=4), open=1.0880, high=1.0885, low=1.0830, close=1.0840, volume=12.0),
+        ForexBar(timestamp=t_open + timedelta(minutes=5), open=1.0840, high=1.0855, low=1.0835, close=1.0850, volume=8.0),
+    ]
+
+    provider = InMemoryTradeHistoryProvider(
+        candle_map={"EURUSD": bars},
+        source="MT5",
+        precision="BAR_APPROXIMATION",
+    )
+    manager = ForexLearningManager(journal=journal, history_provider=provider)
+
+    # Reflect without passing manual candles
+    reflection = manager.reflect_on_trade("trd_acq_1")
+
+    # Verify that history was automatically acquired and excursion metrics calculated
+    assert reflection is not None
+    # Check trade record was updated in journal
+    updated_trade = journal.get_trade("trd_acq_1")
+    assert updated_trade.reflection is not None
+
+    # Inspect direct mfe_mae calculation via calculate_trade_mfe_mae with provider
+    history_res = provider.get_history("EURUSD", t_open, t_close, "M1")
+    assert history_res.is_available is True
+    assert history_res.precision == "BAR_APPROXIMATION"
+    assert len(history_res.candles) == 5
+
+    from tradingagents.metrics.mfe_mae import calculate_trade_mfe_mae
+
+    res = calculate_trade_mfe_mae(
+        trade=trade,
+        candles=history_res.candles,
+        source=history_res.source,
+        resolution=history_res.resolution,
+        precision=history_res.precision,
+        retrieval_time_utc=history_res.retrieval_time_utc,
+        is_available=history_res.is_available,
+    )
+    assert res.is_available is True
+    assert res.source == "MT5"
+    assert res.resolution == "M1"
+    assert res.precision == "BAR_APPROXIMATION"
+    assert res.mfe_price == 1.0890
+    assert res.mae_price == 1.0790
+    assert res.mfe_pips == 90.0  # (1.0890 - 1.0800) / 0.0001
+    assert res.mae_pips == 10.0  # (1.0800 - 1.0790) / 0.0001
+
+
+def test_mfe_mae_unavailable_when_no_history_provider_or_candles(tmp_path: Path):
+    """Verify that when no candles can be fetched, excursion metrics are marked UNAVAILABLE."""
+    from tradingagents.learning.history_provider import InMemoryTradeHistoryProvider
+    from tradingagents.metrics.mfe_mae import calculate_trade_mfe_mae
+
+    trade = TradeJournalRecord(
+        trade_id="trd_empty_acq",
+        pair="GBPUSD",
+        action=ForexAction.SHORT,
+        open_price=1.2500,
+        close_price=1.2450,
+        stop_loss=1.2550,
+        lots=1.0,
+        status=TradeStatus.CLOSED,
+    )
+
+    empty_provider = InMemoryTradeHistoryProvider(candle_map={})
+    res_history = empty_provider.get_history("GBPUSD", datetime.now(timezone.utc), datetime.now(timezone.utc))
+    assert res_history.is_available is False
+    assert res_history.precision == "UNAVAILABLE"
+    assert "MFE_MAE_UNAVAILABLE" in res_history.unavailable_reason
+
+    res = calculate_trade_mfe_mae(
+        trade=trade,
+        candles=[],
+        source=res_history.source,
+        resolution=res_history.resolution,
+        precision=res_history.precision,
+        retrieval_time_utc=res_history.retrieval_time_utc,
+        is_available=res_history.is_available,
+        unavailable_reason=res_history.unavailable_reason,
+    )
+    assert res.is_available is False
+    assert res.precision == "UNAVAILABLE"
+    assert "MFE_MAE_UNAVAILABLE" in res.unavailable_reason
+
+
+def test_mt5_trade_history_provider_disconnected():
+    """Verify MT5TradeHistoryProvider reports UNAVAILABLE when terminal is not connected."""
+    from unittest.mock import MagicMock
+
+    from tradingagents.learning.history_provider import MT5TradeHistoryProvider
+
+    mock_obs = MagicMock()
+    mock_obs.is_connected = False
+    mock_obs.connection.is_connected = False
+    mock_obs.connection.connect.side_effect = RuntimeError("Terminal connection refused")
+
+    provider = MT5TradeHistoryProvider(observer=mock_obs)
+    res = provider.get_history(
+        pair="USDJPY",
+        start_time=datetime(2025, 1, 1, tzinfo=timezone.utc),
+        end_time=datetime(2025, 1, 2, tzinfo=timezone.utc),
+    )
+    assert res.is_available is False
+    assert res.precision == "UNAVAILABLE"
+    assert "MFE_MAE_UNAVAILABLE" in res.unavailable_reason
+
+

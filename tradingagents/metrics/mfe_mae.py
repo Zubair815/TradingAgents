@@ -82,6 +82,12 @@ def calculate_mfe_mae(
     open_time_utc: str | datetime | None = None,
     close_time_utc: str | datetime | None = None,
     trade_id: str = "trd_unspecified",
+    source: str = "MANUAL",
+    resolution: str = "M1",
+    precision: str = "BAR_APPROXIMATION",
+    retrieval_time_utc: str | None = None,
+    is_available: bool = True,
+    unavailable_reason: str | None = None,
 ) -> TradeMfeMae:
     """Calculate Maximum Favorable and Adverse Excursions for a single trade.
 
@@ -107,6 +113,18 @@ def calculate_mfe_mae(
         Timestamp when position was closed.
     trade_id:
         Trade identifier for tracking.
+    source:
+        Data source identifier (e.g. 'MT5', 'MANUAL').
+    resolution:
+        Timeframe resolution of the underlying candles (default 'M1').
+    precision:
+        Precision grade ('TICK', 'BAR_APPROXIMATION', 'UNAVAILABLE').
+    retrieval_time_utc:
+        ISO timestamp when historical bars were queried.
+    is_available:
+        Whether historical excursion data was successfully obtained.
+    unavailable_reason:
+        Reason if excursion data is unavailable.
 
     Returns
     -------
@@ -201,6 +219,12 @@ def calculate_mfe_mae(
         runup_eff = 100.0 if (realized_pips > 0 and mfe_pips > 0) else 0.0
         dd_eff = max(0.0, min(100.0, round(((sl_pips - mae_pips) / sl_pips) * 100.0, 1)))
 
+        eff_available = False
+        eff_precision = "UNAVAILABLE"
+        eff_reason = (
+            unavailable_reason
+            or "MFE_MAE_UNAVAILABLE: No historical intraday bars found for holding interval."
+        )
         return TradeMfeMae(
             trade_id=trade_id,
             pair=pair,
@@ -225,6 +249,12 @@ def calculate_mfe_mae(
             drawdown_efficiency_pct=dd_eff,
             exit_efficiency_pct=100.0,
             candle_count=0,
+            source=source,
+            resolution=resolution,
+            precision=eff_precision,
+            retrieval_time_utc=retrieval_time_utc or datetime.now(timezone.utc).isoformat(),
+            is_available=eff_available,
+            unavailable_reason=eff_reason,
         )
 
     # Find extremes across active candles
@@ -325,12 +355,24 @@ def calculate_mfe_mae(
         drawdown_efficiency_pct=dd_eff,
         exit_efficiency_pct=exit_eff,
         candle_count=len(active_candles),
+        source=source,
+        resolution=resolution,
+        precision=precision,
+        retrieval_time_utc=retrieval_time_utc or datetime.now(timezone.utc).isoformat(),
+        is_available=True,
+        unavailable_reason=None,
     )
 
 
 def calculate_trade_mfe_mae(
     trade: TradeJournalRecord | dict[str, Any],
     candles: Sequence[Any] | pd.DataFrame,
+    source: str = "MANUAL",
+    resolution: str = "M1",
+    precision: str = "BAR_APPROXIMATION",
+    retrieval_time_utc: str | None = None,
+    is_available: bool = True,
+    unavailable_reason: str | None = None,
 ) -> TradeMfeMae:
     """Convenience adapter calculating MFE/MAE directly from a TradeJournalRecord."""
     if isinstance(trade, TradeJournalRecord):
@@ -345,6 +387,12 @@ def calculate_trade_mfe_mae(
             open_time_utc=trade.open_time_utc,
             close_time_utc=trade.close_time_utc,
             trade_id=trade.trade_id,
+            source=source,
+            resolution=resolution,
+            precision=precision,
+            retrieval_time_utc=retrieval_time_utc,
+            is_available=is_available,
+            unavailable_reason=unavailable_reason,
         )
 
     # Dictionary representation
@@ -359,4 +407,14 @@ def calculate_trade_mfe_mae(
         open_time_utc=trade.get("open_time_utc"),
         close_time_utc=trade.get("close_time_utc"),
         trade_id=str(trade.get("trade_id", "trd_unspecified")),
+        source=source,
+        resolution=resolution,
+        precision=precision,
+        retrieval_time_utc=retrieval_time_utc,
+        is_available=is_available,
+        unavailable_reason=unavailable_reason,
     )
+
+
+# Canonical public alias
+parse_utc_timestamp = _parse_utc_timestamp
