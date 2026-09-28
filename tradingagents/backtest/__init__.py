@@ -23,6 +23,13 @@ from pathlib import Path
 
 from tradingagents.agents.utils.memory import TradingMemoryLog
 from tradingagents.agents.utils.rating import RATING_REVIEW
+from tradingagents.backtest.ablation import (
+    AblationConfigVariant,
+    AblationVariantMetric,
+    ForexAblationReport,
+    ForexAblationRunner,
+    create_standard_ablation_matrix,
+)
 from tradingagents.backtest.agent_backtester import (
     AgentBacktestConfig,
     AgentBacktestEstimate,
@@ -249,4 +256,18 @@ __all__ = [
     "HistoricalAgentBacktestReport",
     "HistoricalForexAgentBacktester",
     "estimate_agent_analyses",
+    # Walk-forward validation (Phase 21)
+    "EvaluationPeriodType",
+    "ForexWalkForwardValidator",
+    "PeriodPerformanceReport",
+    "PeriodWindow",
+    "WalkForwardSplit",
+    "WalkForwardValidationReport",
+    "compute_config_hash",
+    # Ablation testing (Phase 22)
+    "AblationConfigVariant",
+    "AblationVariantMetric",
+    "ForexAblationReport",
+    "ForexAblationRunner",
+    "create_standard_ablation_matrix",
 ]
