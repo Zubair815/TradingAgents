@@ -25,6 +25,7 @@ from tradingagents.metrics.mfe_mae import (
 from tradingagents.metrics.models import (
     ExecutionQuality,
     MetricsSummary,
+    ProposalExecutionComparison,
     TradeMfeMae,
     TradeOutcomeCategory,
     TradeOutcomeResult,
@@ -117,6 +118,38 @@ class ForexMetricsManager:
             execution_delay_ms=execution_delay_ms,
             session=session,
             broker=broker,
+        )
+
+    def compare_proposal_execution(
+        self,
+        proposal: Any,
+        trade: Any,
+        execution: Any = None,
+        mfe_mae: Any = None,
+        spread_pips: float = 0.0,
+        fees: float = 0.0,
+    ) -> ProposalExecutionComparison:
+        """Compare an immutable proposal against actual broker execution (Phase 12)."""
+        if isinstance(proposal, str) and self.journal is not None:
+            proposal_rec = self.journal.get_proposal(proposal)
+            if proposal_rec:
+                proposal = proposal_rec
+        if isinstance(trade, str) and self.journal is not None:
+            trade_rec = self.journal.get_trade(trade)
+            if trade_rec:
+                trade = trade_rec
+        if execution is None and self.journal is not None and hasattr(trade, "trade_id"):
+            execs = self.journal.list_executions_for_trade(trade.trade_id)
+            if execs:
+                execution = execs[0]
+
+        return self.execution_analyzer.compare_proposal_execution(
+            proposal=proposal,
+            trade=trade,
+            execution=execution,
+            mfe_mae=mfe_mae,
+            spread_pips=spread_pips,
+            fees=fees,
         )
 
     def compute_summary(

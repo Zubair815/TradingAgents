@@ -551,3 +551,188 @@ def test_metrics_manager_integration(tmp_path: Path):
     assert "# Forex MFE/MAE & Execution Quality Dashboard" in markdown
     assert "Runup Capture Efficiency" in markdown
     assert "Execution Quality Score" in markdown
+
+
+# ===========================================================================
+# 6. Phase 12 Execution Quality Engine Tests
+# ===========================================================================
+
+
+def test_compare_proposal_against_execution_long():
+    """Verify execution quality comparison for Long proposal with adverse slippage and MFE capture."""
+    from tradingagents.metrics.execution import compare_proposal_against_execution
+    from tradingagents.metrics.models import TradeMfeMae
+
+    proposal = {
+        "proposal_id": "prop_long_1",
+        "pair": "EURUSD",
+        "action": ForexAction.LONG,
+        "entry_price": 1.0800,
+        "stop_loss": 1.0750,
+        "take_profit_1": 1.0900,
+        "suggested_lot_size": 1.0,
+        "created_at_utc": "2025-01-15T12:00:00+00:00",
+    }
+    trade = {
+        "trade_id": "trd_long_1",
+        "pair": "EURUSD",
+        "action": ForexAction.LONG,
+        "open_price": 1.0802,  # 2.0 pips adverse slippage
+        "stop_loss": 1.0750,
+        "take_profit": 1.0900,
+        "lots": 1.0,
+        "open_time_utc": "2025-01-15T12:00:15+00:00",  # 15s delay
+        "commission": 5.0,
+        "swap": 1.5,
+        "r_multiple": 0.8,
+    }
+    mfe_mae = TradeMfeMae(
+        trade_id="trd_long_1",
+        pair="EURUSD",
+        action=ForexAction.LONG,
+        open_price=1.0802,
+        stop_loss=1.0750,
+        mfe_price=1.09268,
+        mae_price=1.0776,
+        mfe_r=2.4,
+        mae_r=0.5,
+        realized_r=0.8,
+    )
+
+    comparison = compare_proposal_against_execution(
+        proposal=proposal,
+        trade=trade,
+        mfe_mae=mfe_mae,
+        spread_pips=1.0,
+        fees=2.0,
+        account_currency="USD",
+    )
+
+    assert comparison.proposal_id == "prop_long_1"
+    assert comparison.trade_id == "trd_long_1"
+    assert comparison.pair == "EURUSD"
+    assert comparison.action == ForexAction.LONG
+
+    # Deviations
+    assert comparison.entry_deviation_pips == 2.0
+    assert comparison.sl_deviation_pips == 0.0
+    assert comparison.tp_deviation_pips == 0.0
+    assert comparison.volume_deviation == 0.0
+    assert comparison.timing_deviation_seconds == 15.0
+
+    # Frictions
+    assert comparison.slippage_pips == 2.0
+    assert comparison.slippage_cost == 20.0  # 2.0 pips * $10/pip at 1.0 lot
+    assert comparison.spread_cost == 10.0   # 1.0 pip * $10/pip at 1.0 lot
+    assert comparison.commission == 5.0
+    assert comparison.swap == 1.5
+    assert comparison.fees == 2.0
+    assert comparison.total_execution_friction == 38.5  # 20 + 10 + 5 + 1.5 + 2
+
+    # R:R and Excursions
+    assert comparison.proposed_rr == 2.0  # (1.0900 - 1.0800) / (1.0800 - 1.0750) = 100 / 50 = 2.0
+    assert comparison.actual_initial_rr == round((1.0900 - 1.0802) / (1.0802 - 1.0750), 2)  # 98 / 52 ≈ 1.88
+    assert comparison.realized_r == 0.8
+    assert comparison.mfe_r == 2.4
+    assert comparison.mae_r == 0.5
+
+    # Captured MFE percentage: 0.8 / 2.4 * 100 ≈ 33.3%
+    assert comparison.captured_mfe_pct == 33.3
+
+
+def test_compare_proposal_against_execution_short_price_improvement():
+    """Verify execution quality comparison for Short proposal with price improvement and volume deviation."""
+    from tradingagents.metrics.execution import compare_proposal_against_execution
+
+    proposal = {
+        "proposal_id": "prop_short_1",
+        "pair": "GBPUSD",
+        "action": ForexAction.SHORT,
+        "entry_price": 1.2500,
+        "stop_loss": 1.2550,
+        "take_profit_1": 1.2400,
+        "suggested_lot_size": 0.5,
+        "created_at_utc": "2025-01-15T10:00:00+00:00",
+    }
+    trade = {
+        "trade_id": "trd_short_1",
+        "pair": "GBPUSD",
+        "action": ForexAction.SHORT,
+        "open_price": 1.2503,  # Sold higher -> 3.0 pips price improvement
+        "stop_loss": 1.2560,   # SL placed 10 pips higher
+        "take_profit": 1.2380, # TP placed 20 pips lower
+        "lots": 0.6,           # Volume deviation +0.1 lot
+        "open_time_utc": "2025-01-15T10:00:30+00:00",  # 30s delay
+        "close_price": 1.2400,
+        "commission": 3.0,
+        "swap": 0.5,
+    }
+
+    comparison = compare_proposal_against_execution(
+        proposal=proposal,
+        trade=trade,
+        spread_pips=1.5,
+        fees=1.0,
+        account_currency="USD",
+    )
+
+    assert comparison.entry_deviation_pips == -3.0
+    assert comparison.slippage_pips == -3.0
+    assert comparison.slippage_cost == -18.0  # -3.0 * ($10 * 0.6) = -18.0
+    assert comparison.sl_deviation_pips == 10.0
+    assert comparison.tp_deviation_pips == -20.0
+    assert comparison.volume_deviation == 0.1
+    assert comparison.timing_deviation_seconds == 30.0
+    assert comparison.proposed_rr == 2.0  # 100 / 50 = 2.0
+    # Actual initial RR: (1.2503 - 1.2380) / (1.2560 - 1.2503) = 123 / 57 ≈ 2.16
+    assert comparison.actual_initial_rr == 2.16
+
+
+def test_forex_metrics_manager_compare_proposal_execution_integration(tmp_path: Path):
+    """Verify ForexMetricsManager seamlessly resolves proposal and trade records from journal."""
+    from tradingagents.database.journal import ForexTradeJournal
+    from tradingagents.database.models import ForexAction, ProposalRecord, TradeExitReason
+    from tradingagents.metrics.manager import ForexMetricsManager
+
+    journal = ForexTradeJournal(db_path=tmp_path / "test_comp_journal.db")
+    manager = ForexMetricsManager(journal=journal)
+
+    # 1. Store proposal
+    prop = ProposalRecord(
+        proposal_id="prop_int_1",
+        pair="EURUSD",
+        action=ForexAction.LONG,
+        entry_price=1.0800,
+        stop_loss=1.0750,
+        take_profit_1=1.0900,
+        suggested_lot_size=1.0,
+        created_at_utc="2025-01-15T09:00:00+00:00",
+    )
+    journal.save_proposal(prop)
+
+    # 2. Store trade open and close
+    open_rec = journal.record_trade_open(
+        trade_id="trd_int_1",
+        proposal_id="prop_int_1",
+        pair="EURUSD",
+        action=ForexAction.LONG,
+        open_price=1.0801,
+        stop_loss=1.0750,
+        take_profit=1.0900,
+        lots=1.0,
+        open_time_utc="2025-01-15T09:00:10+00:00",
+    )
+    journal.record_trade_close(
+        trade_id=open_rec.trade_id,
+        close_price=1.0880,
+        exit_reason=TradeExitReason.TAKE_PROFIT,
+    )
+
+    # 3. Compare using string IDs
+    comp = manager.compare_proposal_execution("prop_int_1", "trd_int_1", spread_pips=1.0)
+    assert comp.proposal_id == "prop_int_1"
+    assert comp.trade_id == "trd_int_1"
+    assert comp.entry_deviation_pips == 1.0
+    assert comp.timing_deviation_seconds == 10.0
+    assert comp.proposed_rr == 2.0
+

@@ -15,15 +15,18 @@ from tradingagents.metrics.execution import (
     calculate_execution_slippage,
     calculate_slippage_cost,
     calculate_spread_cost,
+    compare_proposal_against_execution,
 )
 from tradingagents.metrics.manager import ForexMetricsManager
 from tradingagents.metrics.mfe_mae import (
     calculate_mfe_mae,
     calculate_trade_mfe_mae,
+    parse_utc_timestamp,
 )
 from tradingagents.metrics.models import (
     ExecutionQuality,
     MetricsSummary,
+    ProposalExecutionComparison,
     SlippageType,
     TradeMfeMae,
     TradeOutcomeCategory,
@@ -39,11 +42,13 @@ __all__ = [
     "TradeOutcomeCategory",
     "TradeOutcomeResult",
     "ExecutionQuality",
+    "ProposalExecutionComparison",
     "SlippageType",
     "MetricsSummary",
     # MFE / MAE Calculations
     "calculate_mfe_mae",
     "calculate_trade_mfe_mae",
+    "parse_utc_timestamp",
     # Outcome Engine
     "TradeOutcomeEngine",
     # Execution & Slippage
@@ -52,4 +57,5 @@ __all__ = [
     "calculate_slippage_cost",
     "calculate_spread_cost",
     "calculate_execution_quality_score",
+    "compare_proposal_against_execution",
 ]

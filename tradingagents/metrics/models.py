@@ -175,6 +175,62 @@ class ExecutionQuality(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Proposal vs Execution Comparison Model (Phase 12)
+# ---------------------------------------------------------------------------
+
+
+class ProposalExecutionComparison(BaseModel):
+    """Rigorous mathematical comparison of immutable proposal against actual broker execution (Phase 12)."""
+
+    proposal_id: str | None = None
+    trade_id: str
+    deal_id: str | None = None
+    pair: str
+    action: ForexAction
+
+    # Price / Order parameters
+    proposed_entry: float
+    actual_entry: float
+    entry_deviation_pips: float
+
+    proposed_sl: float
+    actual_sl: float
+    sl_deviation_pips: float
+
+    proposed_tp: float | None = None
+    actual_tp: float | None = None
+    tp_deviation_pips: float | None = None
+
+    proposed_volume: float
+    actual_volume: float
+    volume_deviation: float
+
+    proposal_time_utc: str | None = None
+    execution_time_utc: str | None = None
+    timing_deviation_seconds: float = 0.0
+
+    # Frictions
+    spread_pips: float = 0.0
+    spread_cost: float = 0.0
+    slippage_pips: float = 0.0
+    slippage_cost: float = 0.0
+    commission: float = 0.0
+    swap: float = 0.0
+    fees: float = 0.0
+    total_execution_friction: float = 0.0
+
+    # Risk:Reward & Excursion comparison
+    proposed_rr: float | None = None
+    actual_initial_rr: float | None = None
+    realized_r: float = 0.0
+    mfe_r: float = 0.0
+    mae_r: float = 0.0
+
+    # Efficiency
+    captured_mfe_pct: float = Field(default=0.0, ge=0.0, le=100.0)
+
+
+# ---------------------------------------------------------------------------
 # Aggregated Metrics Summary Model
 # ---------------------------------------------------------------------------
 

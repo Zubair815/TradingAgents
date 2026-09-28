@@ -16,7 +16,12 @@ from tradingagents.agents.schemas_forex import ForexAction
 from tradingagents.database.models import OrderExecutionRecord
 from tradingagents.forex.pips import pip_size_for, pip_value_in_account_currency
 from tradingagents.forex.sessions import session_for_pair
-from tradingagents.metrics.models import ExecutionQuality, SlippageType
+from tradingagents.metrics.mfe_mae import parse_utc_timestamp
+from tradingagents.metrics.models import (
+    ExecutionQuality,
+    ProposalExecutionComparison,
+    SlippageType,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -365,3 +370,230 @@ class ExecutionQualityAnalyzer:
             "by_pair": pair_summary,
             "by_session": session_summary,
         }
+
+    def compare_proposal_execution(
+        self,
+        proposal: Any,
+        trade: Any,
+        execution: Any = None,
+        mfe_mae: Any = None,
+        spread_pips: float = 0.0,
+        fees: float = 0.0,
+    ) -> ProposalExecutionComparison:
+        """Compare immutable proposal against actual broker execution for quality and deviations."""
+        return compare_proposal_against_execution(
+            proposal=proposal,
+            trade=trade,
+            execution=execution,
+            mfe_mae=mfe_mae,
+            spread_pips=spread_pips,
+            fees=fees,
+            account_currency=self.account_currency,
+        )
+
+
+def compare_proposal_against_execution(
+    proposal: Any,
+    trade: Any,
+    execution: Any = None,
+    mfe_mae: Any = None,
+    spread_pips: float = 0.0,
+    fees: float = 0.0,
+    account_currency: str = "USD",
+) -> ProposalExecutionComparison:
+    """Compare an immutable proposal against actual broker execution (Phase 12).
+
+    Calculates:
+    - Entry deviation in pips (slippage)
+    - Stop loss & Take profit deviations in pips
+    - Volume deviation (actual - proposed)
+    - Timing deviation in seconds (execution_time - proposal_time)
+    - Spread cost, slippage cost, commission, swap, fees, and total execution friction
+    - Proposed RR vs actual initial RR vs realized R, MFE R, MAE R
+    - Captured MFE percentage (realized_r / mfe_r)
+    """
+    def _val(obj: Any, key: str, default: Any = None) -> Any:
+        if obj is None:
+            return default
+        if isinstance(obj, dict):
+            return obj.get(key, default)
+        return getattr(obj, key, default)
+
+    # Resolve proposal fields
+    proposal_id = _val(proposal, "proposal_id")
+    pair = str(_val(proposal, "pair") or _val(trade, "pair") or "EURUSD").strip().upper()
+    pip_sz = pip_size_for(pair)
+
+    raw_action = _val(proposal, "action") or _val(trade, "action") or ForexAction.LONG
+    if isinstance(raw_action, str):
+        act_str = raw_action.strip().upper()
+        action = ForexAction.SHORT if ("SELL" in act_str or "SHORT" in act_str) else ForexAction.LONG
+    else:
+        action = raw_action
+
+    proposed_entry = float(_val(proposal, "entry_price") or _val(trade, "open_price") or 0.0)
+    proposed_sl = float(_val(proposal, "stop_loss") or _val(trade, "stop_loss") or 0.0)
+
+    raw_prop_tp = _val(proposal, "take_profit_1") or _val(proposal, "take_profit")
+    proposed_tp = float(raw_prop_tp) if raw_prop_tp is not None else None
+
+    proposed_volume = float(
+        _val(proposal, "suggested_lot_size")
+        or _val(proposal, "lots")
+        or _val(trade, "lots")
+        or 0.1
+    )
+    proposal_time_utc = _val(proposal, "created_at_utc")
+
+    # Resolve trade fields
+    trade_id = str(_val(trade, "trade_id") or "trd_unspecified")
+    actual_entry = float(
+        _val(trade, "open_price")
+        if _val(trade, "open_price") is not None
+        else proposed_entry
+    )
+    actual_sl = float(
+        _val(trade, "stop_loss")
+        if _val(trade, "stop_loss") is not None
+        else proposed_sl
+    )
+
+    raw_act_tp = _val(trade, "take_profit")
+    actual_tp = float(raw_act_tp) if raw_act_tp is not None else None
+
+    actual_volume = float(
+        _val(trade, "lots")
+        if _val(trade, "lots") is not None
+        else proposed_volume
+    )
+    execution_time_utc = _val(trade, "open_time_utc")
+    commission = float(_val(trade, "commission") or 0.0)
+    swap = float(_val(trade, "swap") or 0.0)
+
+    # Resolve execution fill details if provided
+    deal_id = _val(execution, "deal_id")
+    if execution is not None:
+        if _val(execution, "spread_at_open_pips") is not None:
+            spread_pips = float(_val(execution, "spread_at_open_pips"))
+        if _val(execution, "timestamp_utc") and not execution_time_utc:
+            execution_time_utc = _val(execution, "timestamp_utc")
+
+    # 1. Deviations
+    # Slippage and entry deviation
+    slippage_pips, _ = calculate_execution_slippage(
+        requested_price=proposed_entry,
+        fill_price=actual_entry,
+        action=action,
+        pair=pair,
+    )
+    entry_deviation_pips = slippage_pips
+
+    sl_deviation_pips = round((actual_sl - proposed_sl) / pip_sz, 2)
+    tp_deviation_pips = (
+        round((actual_tp - proposed_tp) / pip_sz, 2)
+        if (actual_tp is not None and proposed_tp is not None)
+        else None
+    )
+    volume_deviation = round(actual_volume - proposed_volume, 4)
+
+    # Timing deviation in seconds
+    timing_dev_sec = 0.0
+    prop_dt = parse_utc_timestamp(proposal_time_utc)
+    exec_dt = parse_utc_timestamp(execution_time_utc)
+    if prop_dt and exec_dt:
+        timing_dev_sec = max(0.0, round((exec_dt - prop_dt).total_seconds(), 2))
+
+    # 2. Friction
+    spread_cost = calculate_spread_cost(
+        spread_pips=spread_pips,
+        volume=actual_volume,
+        pair=pair,
+        account_currency=account_currency,
+    )
+    slippage_cost = calculate_slippage_cost(
+        slippage_pips=slippage_pips,
+        volume=actual_volume,
+        pair=pair,
+        account_currency=account_currency,
+    )
+    total_friction = round(slippage_cost + spread_cost + commission + swap + fees, 2)
+
+    # 3. Risk / Reward comparison
+    # Proposed RR
+    proposed_risk = abs(proposed_entry - proposed_sl)
+    if proposed_tp is not None and proposed_risk > 0:
+        proposed_rr = round(abs(proposed_tp - proposed_entry) / proposed_risk, 2)
+    else:
+        raw_pr_rr = _val(proposal, "risk_reward_ratio")
+        proposed_rr = float(raw_pr_rr) if raw_pr_rr is not None else None
+
+    # Actual Initial RR
+    actual_risk = abs(actual_entry - actual_sl)
+    if actual_tp is not None and actual_risk > 0:
+        actual_initial_rr = round(abs(actual_tp - actual_entry) / actual_risk, 2)
+    else:
+        actual_initial_rr = None
+
+    # Realized R
+    raw_realized_r = _val(trade, "r_multiple")
+    if raw_realized_r is not None and float(raw_realized_r) != 0.0:
+        realized_r = float(raw_realized_r)
+    else:
+        close_price = _val(trade, "close_price")
+        if close_price is not None and actual_risk > 0:
+            pips_gain = (
+                (float(close_price) - actual_entry) / pip_sz
+                if action == ForexAction.LONG
+                else (actual_entry - float(close_price)) / pip_sz
+            )
+            sl_pips = actual_risk / pip_sz
+            realized_r = round(pips_gain / sl_pips, 2)
+        else:
+            realized_r = 0.0
+
+    # MFE / MAE R
+    mfe_r = float(_val(mfe_mae, "mfe_r") or 0.0)
+    mae_r = float(_val(mfe_mae, "mae_r") or 0.0)
+
+    # 4. Captured MFE percentage
+    if mfe_r > 0.0 and realized_r > 0.0:
+        captured_mfe_pct = max(0.0, min(100.0, round((realized_r / mfe_r) * 100.0, 1)))
+    else:
+        captured_mfe_pct = 0.0
+
+    return ProposalExecutionComparison(
+        proposal_id=proposal_id,
+        trade_id=trade_id,
+        deal_id=deal_id,
+        pair=pair,
+        action=action,
+        proposed_entry=proposed_entry,
+        actual_entry=actual_entry,
+        entry_deviation_pips=entry_deviation_pips,
+        proposed_sl=proposed_sl,
+        actual_sl=actual_sl,
+        sl_deviation_pips=sl_deviation_pips,
+        proposed_tp=proposed_tp,
+        actual_tp=actual_tp,
+        tp_deviation_pips=tp_deviation_pips,
+        proposed_volume=proposed_volume,
+        actual_volume=actual_volume,
+        volume_deviation=volume_deviation,
+        proposal_time_utc=proposal_time_utc,
+        execution_time_utc=execution_time_utc,
+        timing_deviation_seconds=timing_dev_sec,
+        spread_pips=spread_pips,
+        spread_cost=spread_cost,
+        slippage_pips=slippage_pips,
+        slippage_cost=slippage_cost,
+        commission=commission,
+        swap=swap,
+        fees=fees,
+        total_execution_friction=total_friction,
+        proposed_rr=proposed_rr,
+        actual_initial_rr=actual_initial_rr,
+        realized_r=realized_r,
+        mfe_r=mfe_r,
+        mae_r=mae_r,
+        captured_mfe_pct=captured_mfe_pct,
+    )
