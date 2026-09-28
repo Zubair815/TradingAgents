@@ -744,6 +744,36 @@ class ForexTradeJournal:
                 if should_close:
                     conn.close()
 
+    def list_executions(self, limit: int = 1000) -> list[OrderExecutionRecord]:
+        """List recent execution fills across all trades."""
+        with self._lock:
+            conn = self._get_connection()
+            should_close = conn != self._mem_conn
+            try:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.execute(
+                    "SELECT * FROM executions ORDER BY timestamp_utc DESC LIMIT ?;",
+                    (limit,),
+                )
+                return [
+                    OrderExecutionRecord(
+                        deal_id=row["deal_id"],
+                        trade_id=row["trade_id"],
+                        proposal_id=row["proposal_id"],
+                        pair=row["pair"],
+                        order_type=row["order_type"],
+                        volume=row["volume"],
+                        price=row["price"],
+                        slippage_pips=row["slippage_pips"],
+                        spread_at_open_pips=row["spread_at_open_pips"],
+                        timestamp_utc=row["timestamp_utc"],
+                    )
+                    for row in cursor.fetchall()
+                ]
+            finally:
+                if should_close:
+                    conn.close()
+
     # -----------------------------------------------------------------------
     # Strategy Versioning
     # -----------------------------------------------------------------------

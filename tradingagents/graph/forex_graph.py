@@ -655,10 +655,11 @@ class ForexTradingAgentsGraph:
         past_ctx = ""
         applied_lesson_ids: list[str] = []
         learning_mgr = getattr(self, "learning_manager", None)
-        if learning_mgr is None and self.journal is not None:
+        journal_obj = getattr(self, "journal", None)
+        if learning_mgr is None and journal_obj is not None:
             try:
                 from tradingagents.learning.manager import ForexLearningManager
-                learning_mgr = ForexLearningManager(journal=self.journal)
+                learning_mgr = ForexLearningManager(journal=journal_obj)
                 self.learning_manager = learning_mgr
             except Exception:
                 learning_mgr = None

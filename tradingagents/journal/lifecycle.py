@@ -63,6 +63,7 @@ ALLOWED_TRANSITIONS: dict[LifecycleState, set[LifecycleState]] = {
         LifecycleState.ACTIVE_POSITION,
         LifecycleState.EXECUTED,
         LifecycleState.SKIPPED,
+        LifecycleState.SKIPPED_BY_USER,
         LifecycleState.CANCELLED,
         LifecycleState.EXPIRED,
         LifecycleState.INVALIDATED,
@@ -74,6 +75,7 @@ ALLOWED_TRANSITIONS: dict[LifecycleState, set[LifecycleState]] = {
         LifecycleState.ACTIVE_POSITION,
         LifecycleState.EXECUTED,
         LifecycleState.SKIPPED,
+        LifecycleState.SKIPPED_BY_USER,
         LifecycleState.CANCELLED,
         LifecycleState.EXPIRED,
         LifecycleState.INVALIDATED,
@@ -84,6 +86,7 @@ ALLOWED_TRANSITIONS: dict[LifecycleState, set[LifecycleState]] = {
         LifecycleState.ACTIVE_POSITION,
         LifecycleState.EXECUTED,
         LifecycleState.SKIPPED,
+        LifecycleState.SKIPPED_BY_USER,
         LifecycleState.CANCELLED,
         LifecycleState.EXPIRED,
         LifecycleState.INVALIDATED,
@@ -115,6 +118,7 @@ ALLOWED_TRANSITIONS: dict[LifecycleState, set[LifecycleState]] = {
     LifecycleState.CANCELLED: set(),
     LifecycleState.EXPIRED: set(),
     LifecycleState.SKIPPED: set(),
+    LifecycleState.SKIPPED_BY_USER: set(),
     LifecycleState.INVALIDATED: set(),
     LifecycleState.SUPERSEDED: set(),
 }
@@ -633,6 +637,11 @@ class TradeLifecycleManager:
             next_status = ProposalStatus.EXECUTED
             evt_type = EventType.PROPOSAL_EXECUTED
             desc = f"Trader recorded execution intent: {reason or 'Manual execution recorded'}"
+        elif action_clean == "SKIPPED_BY_USER":
+            next_state = LifecycleState.SKIPPED_BY_USER
+            next_status = ProposalStatus.SKIPPED_BY_USER
+            evt_type = EventType.PROPOSAL_SKIPPED
+            desc = f"Trader skipped proposal: {reason or 'User decision'}"
         elif action_clean in ("SKIPPED", "SKIP"):
             next_state = LifecycleState.SKIPPED
             next_status = ProposalStatus.SKIPPED
@@ -645,7 +654,7 @@ class TradeLifecycleManager:
             desc = f"Trader placed proposal on hold: {reason or 'Awaiting trigger'}"
         else:
             raise LifecycleError(
-                f"Unsupported user action '{action}'. Must be EXECUTED, SKIPPED, or WAIT."
+                f"Unsupported user action '{action}'. Must be EXECUTED, SKIPPED, SKIPPED_BY_USER, or WAIT."
             )
 
         self.validate_transition(curr_state, next_state)

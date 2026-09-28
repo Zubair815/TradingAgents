@@ -94,6 +94,7 @@ class LifecycleState(str, Enum):
     WAITING_USER = "WAITING_USER"
     EXECUTED = "EXECUTED"
     SKIPPED = "SKIPPED"
+    SKIPPED_BY_USER = "SKIPPED_BY_USER"
     EXPIRED = "EXPIRED"
     INVALIDATED = "INVALIDATED"
     SUPERSEDED = "SUPERSEDED"
@@ -112,6 +113,7 @@ class LifecycleState(str, Enum):
             LifecycleState.CANCELLED,
             LifecycleState.EXPIRED,
             LifecycleState.SKIPPED,
+            LifecycleState.SKIPPED_BY_USER,
             LifecycleState.INVALIDATED,
             LifecycleState.SUPERSEDED,
         )

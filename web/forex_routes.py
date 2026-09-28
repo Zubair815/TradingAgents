@@ -70,6 +70,7 @@ from tradingagents.journal.lifecycle import LifecycleError, LifecycleTransitionE
 from tradingagents.journal.manager import ForexJournalManager
 from tradingagents.journal.models import LifecycleState
 from tradingagents.learning.manager import ForexLearningManager
+from tradingagents.metrics.manager import ForexMetricsManager
 from tradingagents.mt5.errors import MT5Error
 from tradingagents.mt5.observer import MT5Observer
 from tradingagents.research.contracts import AnalysisRequest as ForexAnalysisRequest
@@ -92,6 +93,7 @@ _lock = threading.RLock()
 _journal: ForexTradeJournal | None = None
 _journal_mgr: ForexJournalManager | None = None
 _analytics_mgr: ForexAnalyticsManager | None = None
+_metrics_mgr: ForexMetricsManager | None = None
 _learning_mgr: ForexLearningManager | None = None
 _mt5_observer: MT5Observer | None = None
 
@@ -129,6 +131,15 @@ def get_analytics_manager() -> ForexAnalyticsManager:
         return _analytics_mgr
 
 
+def get_metrics_manager() -> ForexMetricsManager:
+    """Provide active ForexMetricsManager instance."""
+    global _metrics_mgr
+    with _lock:
+        if _metrics_mgr is None:
+            _metrics_mgr = ForexMetricsManager(journal=get_journal())
+        return _metrics_mgr
+
+
 def get_learning_manager() -> ForexLearningManager:
     """Provide active ForexLearningManager instance."""
     global _learning_mgr
@@ -151,26 +162,29 @@ def set_forex_dependencies(
     journal: ForexTradeJournal | None = None,
     journal_manager: ForexJournalManager | None = None,
     analytics_manager: ForexAnalyticsManager | None = None,
+    metrics_manager: ForexMetricsManager | None = None,
     learning_manager: ForexLearningManager | None = None,
     mt5_observer: MT5Observer | None = None,
 ) -> None:
     """Inject dependencies for testing or configuration."""
-    global _journal, _journal_mgr, _analytics_mgr, _learning_mgr, _mt5_observer
+    global _journal, _journal_mgr, _analytics_mgr, _metrics_mgr, _learning_mgr, _mt5_observer
     with _lock:
         _journal = journal
         _journal_mgr = journal_manager
         _analytics_mgr = analytics_manager
+        _metrics_mgr = metrics_manager
         _learning_mgr = learning_manager
         _mt5_observer = mt5_observer
 
 
 def reset_forex_state() -> None:
     """Reset all in-memory runs, events, backtests, and dependency singletons."""
-    global _journal, _journal_mgr, _analytics_mgr, _learning_mgr, _mt5_observer
+    global _journal, _journal_mgr, _analytics_mgr, _metrics_mgr, _learning_mgr, _mt5_observer
     with _lock:
         _journal = None
         _journal_mgr = None
         _analytics_mgr = None
+        _metrics_mgr = None
         _learning_mgr = None
         _mt5_observer = None
         _forex_runs.clear()
@@ -812,7 +826,7 @@ async def update_proposal_status(
     journal = journal_mgr.journal
     clean_status = req.status.strip().upper()
 
-    if clean_status in ("EXECUTED", "EXECUTE", "SKIPPED", "SKIP", "WAIT", "WAITING", "WAITING_USER"):
+    if clean_status in ("EXECUTED", "EXECUTE", "SKIPPED", "SKIP", "SKIPPED_BY_USER", "WAIT", "WAITING", "WAITING_USER"):
         try:
             next_status = journal_mgr.record_user_action(
                 proposal_id=proposal_id,
@@ -1761,3 +1775,64 @@ async def retrieve_lessons(
         "markdown_prompt": markdown_prompt,
         "count": len(retrieved),
     }
+
+
+# ---------------------------------------------------------------------------
+# 8. Skipped Proposal Evaluation & Comparative Performance Endpoints (Phase 17)
+# ---------------------------------------------------------------------------
+
+@router.get("/metrics/skipped")
+async def list_skipped_proposals(
+    pair: str | None = None,
+    limit: int = Query(default=100, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+    journal: ForexTradeJournal = Depends(get_journal),
+):
+    """Query skipped proposals and their persisted simulation outcomes."""
+    props = journal.list_proposals(pair=pair, limit=limit + offset)
+    skipped = [
+        p for p in props
+        if p.status in (ProposalStatus.SKIPPED, ProposalStatus.SKIPPED_BY_USER)
+    ]
+    sliced = skipped[offset : offset + limit]
+    return {
+        "skipped_proposals": [_safe_model_dump(p) for p in sliced],
+        "count": len(sliced),
+        "total_skipped": len(skipped),
+    }
+
+
+@router.post("/metrics/skipped/evaluate")
+async def evaluate_skipped_proposals(
+    request: Request,
+    metrics_mgr: ForexMetricsManager = Depends(get_metrics_manager),
+    mt5: MT5Observer = Depends(get_mt5_observer),
+):
+    """Run counterfactual market simulation across all skipped/expired proposals."""
+    verify_forex_auth(request)
+    try:
+        from tradingagents.learning.history_provider import MT5TradeHistoryProvider
+        provider = MT5TradeHistoryProvider(observer=mt5)
+        simulations = metrics_mgr.evaluate_skipped_proposals(history_provider=provider)
+        return {
+            "evaluated_count": len(simulations),
+            "simulations": [_safe_model_dump(s) for s in simulations],
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get("/metrics/comparative")
+async def get_comparative_performance(
+    metrics_mgr: ForexMetricsManager = Depends(get_metrics_manager),
+    mt5: MT5Observer = Depends(get_mt5_observer),
+):
+    """Benchmark AI theoretical performance against actual human execution and skipped trades."""
+    try:
+        from tradingagents.learning.history_provider import MT5TradeHistoryProvider
+        provider = MT5TradeHistoryProvider(observer=mt5)
+        summary = metrics_mgr.get_comparative_performance(history_provider=provider)
+        return {"comparative_performance": _safe_model_dump(summary)}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+

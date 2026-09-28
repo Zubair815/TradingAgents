@@ -33,6 +33,17 @@ from tradingagents.metrics.models import (
     TradeOutcomeResult,
 )
 from tradingagents.metrics.outcome import TradeOutcomeEngine
+from tradingagents.metrics.skipped_proposals import (
+    AITheoreticalMetrics,
+    ComparativePerformanceSummary,
+    ProposalSimulationStatus,
+    SkippedProposalEvaluator,
+    SkippedProposalSimulation,
+    UserExecutionMetrics,
+    calculate_ai_theoretical_performance,
+    calculate_user_execution_performance,
+    compare_ai_vs_user_performance,
+)
 
 __all__ = [
     # Facade Manager
@@ -45,6 +56,11 @@ __all__ = [
     "ProposalExecutionComparison",
     "SlippageType",
     "MetricsSummary",
+    "ProposalSimulationStatus",
+    "SkippedProposalSimulation",
+    "AITheoreticalMetrics",
+    "UserExecutionMetrics",
+    "ComparativePerformanceSummary",
     # MFE / MAE Calculations
     "calculate_mfe_mae",
     "calculate_trade_mfe_mae",
@@ -58,4 +74,9 @@ __all__ = [
     "calculate_spread_cost",
     "calculate_execution_quality_score",
     "compare_proposal_against_execution",
+    # Skipped Proposal Simulation & Comparative Performance
+    "SkippedProposalEvaluator",
+    "calculate_ai_theoretical_performance",
+    "calculate_user_execution_performance",
+    "compare_ai_vs_user_performance",
 ]

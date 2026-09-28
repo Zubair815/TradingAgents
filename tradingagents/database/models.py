@@ -45,6 +45,7 @@ class ProposalStatus(str, Enum):
     WAITING_USER = "WAITING_USER"   # Awaiting trader review/action
     EXECUTED = "EXECUTED"           # Logged as executed (workflow intent or broker match)
     SKIPPED = "SKIPPED"             # Explicitly skipped by user
+    SKIPPED_BY_USER = "SKIPPED_BY_USER" # Explicitly skipped by user (Phase 17)
     EXPIRED = "EXPIRED"             # Validity window lapsed without execution
     INVALIDATED = "INVALIDATED"     # Market structure / condition invalidated
     SUPERSEDED = "SUPERSEDED"       # Replaced by newer analysis for same pair
@@ -59,6 +60,10 @@ class ProposalStatus(str, Enum):
             return cls.WAITING_USER
         if s == "RISK_REJECTED":
             return cls.RISK_REJECTED
+        if s == "SKIPPED_BY_USER":
+            return cls.SKIPPED_BY_USER
+        if s in ("SKIPPED", "SKIP"):
+            return cls.SKIPPED
         for member in cls:
             if member.value == s or member.name == s:
                 return member

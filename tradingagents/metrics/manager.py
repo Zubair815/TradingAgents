@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -15,12 +16,20 @@ import pandas as pd
 
 from tradingagents.agents.schemas_forex import ForexAction
 from tradingagents.database.journal import ForexTradeJournal
-from tradingagents.database.models import OrderExecutionRecord, TradeJournalRecord, TradeStatus
+from tradingagents.database.models import (
+    OrderExecutionRecord,
+    ProposalRecord,
+    ProposalStatus,
+    TradeJournalRecord,
+    TradeStatus,
+)
+from tradingagents.learning.history_provider import TradeHistoryProvider
 from tradingagents.metrics.execution import (
     ExecutionQualityAnalyzer,
 )
 from tradingagents.metrics.mfe_mae import (
     calculate_trade_mfe_mae,
+    parse_utc_timestamp,
 )
 from tradingagents.metrics.models import (
     ExecutionQuality,
@@ -31,6 +40,12 @@ from tradingagents.metrics.models import (
     TradeOutcomeResult,
 )
 from tradingagents.metrics.outcome import TradeOutcomeEngine
+from tradingagents.metrics.skipped_proposals import (
+    ComparativePerformanceSummary,
+    SkippedProposalEvaluator,
+    SkippedProposalSimulation,
+    compare_ai_vs_user_performance,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +69,7 @@ class ForexMetricsManager:
 
         self.execution_analyzer = ExecutionQualityAnalyzer(account_currency=self.account_currency)
         self.outcome_engine = TradeOutcomeEngine()
+        self.proposal_evaluator = SkippedProposalEvaluator()
 
     def analyze_trade(
         self,
@@ -241,10 +257,13 @@ class ForexMetricsManager:
             pair_quality_scores=pair_scores,
         )
 
+    analyze_portfolio = compute_summary
+
     def render_markdown_dashboard(
         self,
         summary: MetricsSummary,
         title: str = "Forex MFE/MAE & Execution Quality Dashboard",
+        comparative: ComparativePerformanceSummary | None = None,
     ) -> str:
         """Render a formatted institutional Markdown dashboard with KPI tables."""
         lines: list[str] = [
@@ -322,4 +341,108 @@ class ForexMetricsManager:
                 lines.append(f"| `{pair}` | `{score:.1f}` | {rating} |")
             lines.append("")
 
+        if comparative:
+            lines.extend([
+                "## 4. AI Theoretical Edge vs Actual Human Discretion",
+                "",
+                "| Performance Dimension | AI Theoretical (Baseline) | Actual Human Execution | Discretion Variance / Alpha |",
+                "|:---|:---:|:---:|:---|",
+                f"| **Win Rate** | `{comparative.ai_theoretical.win_rate_pct:.1f}%` ({comparative.ai_theoretical.win_count}/{comparative.ai_theoretical.win_count + comparative.ai_theoretical.loss_count}) | `{comparative.user_execution.win_rate_pct:.1f}%` ({comparative.user_execution.win_count}/{comparative.user_execution.win_count + comparative.user_execution.loss_count}) | `{comparative.user_execution.win_rate_pct - comparative.ai_theoretical.win_rate_pct:+.1f}%` |",
+                f"| **Average R-Multiple** | `{comparative.ai_theoretical.avg_theoretical_r:+.2f}R` | `{comparative.user_execution.avg_realized_r:+.2f}R` | `{comparative.user_execution.avg_realized_r - comparative.ai_theoretical.avg_theoretical_r:+.2f}R` |",
+                f"| **Expectancy per Trade** | `{comparative.ai_theoretical.expectancy_r:+.2f}R` | `{comparative.user_execution.expectancy_r:+.2f}R` | `{comparative.user_execution.expectancy_r - comparative.ai_theoretical.expectancy_r:+.2f}R` |",
+                f"| **User Skip Alpha** | — | `{comparative.user_skip_alpha_r:+.2f}R` | Avoided {comparative.skipped_avoided_losses} losses, missed {comparative.skipped_missed_winners} wins |",
+                "",
+                f"> **Audit Verdict:** {comparative.verdict}",
+                "",
+            ])
+
         return "\n".join(lines)
+
+    def evaluate_proposal(
+        self,
+        proposal: ProposalRecord | dict[str, Any] | str,
+        candles: Sequence[Any] | pd.DataFrame,
+        sub_resolution_candles: Sequence[Any] | pd.DataFrame | None = None,
+        history_provider: TradeHistoryProvider | None = None,
+    ) -> SkippedProposalSimulation:
+        """Simulate market outcome for an individual proposal against historical candles."""
+        if isinstance(proposal, str):
+            if self.journal is None:
+                raise ValueError("Cannot resolve proposal_id string without an attached journal instance.")
+            prop_rec = self.journal.get_proposal(proposal)
+            if prop_rec is None:
+                raise ValueError(f"Proposal with id {proposal!r} not found in journal.")
+            prop_obj = prop_rec
+        else:
+            prop_obj = proposal
+
+        return self.proposal_evaluator.evaluate(
+            proposal=prop_obj,
+            candles=candles,
+            sub_resolution_candles=sub_resolution_candles,
+            history_provider=history_provider,
+        )
+
+    def evaluate_skipped_proposals(
+        self,
+        history_provider: TradeHistoryProvider | None = None,
+        default_window_hours: int = 24,
+    ) -> list[SkippedProposalSimulation]:
+        """Query all SKIPPED / SKIPPED_BY_USER proposals and simulate their outcomes."""
+        if self.journal is None:
+            return []
+
+        skipped_props: list[ProposalRecord] = []
+        for st in (ProposalStatus.SKIPPED, ProposalStatus.SKIPPED_BY_USER):
+            skipped_props.extend(self.journal.list_proposals(status=st, limit=1000))
+
+        provider = history_provider or getattr(self, "history_provider", None)
+        results: list[SkippedProposalSimulation] = []
+
+        for p in skipped_props:
+            dt_start = parse_utc_timestamp(p.created_at_utc) or datetime.now(timezone.utc)
+            valid_until_dt = parse_utc_timestamp(p.valid_until)
+            dt_end = valid_until_dt or (dt_start + timedelta(hours=default_window_hours))
+
+            candles: list[Any] = []
+            if provider is not None:
+                hist_res = provider.get_history(
+                    pair=p.pair,
+                    start_time=dt_start,
+                    end_time=dt_end,
+                    timeframe=getattr(p, "timeframe", "H1") or "H1",
+                )
+                if hist_res and hist_res.is_available and hist_res.candles:
+                    candles = list(hist_res.candles)
+
+            sim = self.proposal_evaluator.evaluate(
+                proposal=p,
+                candles=candles,
+                history_provider=provider,
+            )
+            results.append(sim)
+
+        return results
+
+    def get_comparative_performance(
+        self,
+        simulations: Sequence[SkippedProposalSimulation] | None = None,
+        history_provider: TradeHistoryProvider | None = None,
+    ) -> ComparativePerformanceSummary:
+        """Compute comparative performance between AI theoretical recommendations and actual user executions."""
+        proposals = self.journal.list_proposals(limit=5000) if self.journal else []
+        trades = self.journal.list_trades(limit=5000) if self.journal else []
+        executions = self.journal.list_executions(limit=10000) if self.journal else []
+
+        active_sims = (
+            list(simulations)
+            if simulations is not None
+            else self.evaluate_skipped_proposals(history_provider=history_provider)
+        )
+
+        return compare_ai_vs_user_performance(
+            proposals=proposals,
+            simulations=active_sims,
+            trades=trades,
+            executions=executions,
+        )
