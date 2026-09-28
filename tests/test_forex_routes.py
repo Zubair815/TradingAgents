@@ -346,6 +346,141 @@ class TestProposalRoutes:
         res_illegal = client.post(f"/api/forex/proposals/{prop_id}/status", json={"status": "APPROVED"})
         assert res_illegal.status_code == 400
 
+    def test_list_proposals_advanced_filters(self, client):
+        """Phase 28: Validate multi-field proposal filtering (pair, date, status, action, setup, timeframe)."""
+        # Create Proposal 1: EURUSD, LONG, BREAKOUT, H1
+        p1 = client.post(
+            "/api/forex/proposals",
+            json={
+                "pair": "EURUSD",
+                "action": "LONG",
+                "order_type": "MARKET",
+                "setup_type": "BREAKOUT",
+                "timeframe": "H1",
+                "entry_price": 1.0850,
+                "stop_loss": 1.0820,
+                "take_profit": 1.0910,
+            },
+        ).json()["proposal_id"]
+
+        # Create Proposal 2: USDJPY, SHORT, LIQUIDITY_SWEEP, M15
+        p2 = client.post(
+            "/api/forex/proposals",
+            json={
+                "pair": "USDJPY",
+                "action": "SHORT",
+                "order_type": "LIMIT",
+                "setup_type": "LIQUIDITY_SWEEP",
+                "timeframe": "M15",
+                "entry_price": 150.50,
+                "stop_loss": 150.90,
+                "take_profit": 149.70,
+            },
+        ).json()["proposal_id"]
+
+        # 1. Filter by pair
+        res_pair = client.get("/api/forex/proposals?pair=USDJPY")
+        assert res_pair.status_code == 200
+        ids_pair = [p["proposal_id"] for p in res_pair.json()["proposals"]]
+        assert p2 in ids_pair
+        assert p1 not in ids_pair
+
+        # 2. Filter by action
+        res_act = client.get("/api/forex/proposals?action=SHORT")
+        assert res_act.status_code == 200
+        assert all(p["action"] == "SHORT" for p in res_act.json()["proposals"])
+
+        # 3. Filter by setup
+        res_setup = client.get("/api/forex/proposals?setup=LIQUIDITY_SWEEP")
+        assert res_setup.status_code == 200
+        assert all(p["setup_type"] == "LIQUIDITY_SWEEP" for p in res_setup.json()["proposals"])
+
+        # 4. Filter by timeframe
+        res_tf = client.get("/api/forex/proposals?timeframe=M15")
+        assert res_tf.status_code == 200
+        assert all(p["timeframe"] == "M15" for p in res_tf.json()["proposals"])
+
+        # 5. Combined filter
+        res_comb = client.get("/api/forex/proposals?pair=EURUSD&action=LONG&setup=BREAKOUT&timeframe=H1")
+        assert res_comb.status_code == 200
+        ids_comb = [p["proposal_id"] for p in res_comb.json()["proposals"]]
+        assert p1 in ids_comb
+        assert p2 not in ids_comb
+
+    def test_get_proposal_detail_complete_contract(self, client):
+        """Phase 28: Validate complete proposal detail payload including immutable original proposal, risk review, user decision, matched execution, final outcome, and lessons."""
+        prop_res = client.post(
+            "/api/forex/proposals",
+            json={
+                "pair": "GBPUSD",
+                "action": "LONG",
+                "order_type": "LIMIT",
+                "setup_type": "TREND_PULLBACK",
+                "timeframe": "H4",
+                "entry_price": 1.2800,
+                "stop_loss": 1.2750,
+                "take_profit": 1.2900,
+                "suggested_risk_percent": 1.0,
+                "invalidation_condition": "H4 close below 1.2740",
+                "reasoning": "Bullish trend continuation test of H4 EMA 50.",
+            },
+        )
+        assert prop_res.status_code == 200
+        prop_id = prop_res.json()["proposal_id"]
+
+        # 1. Update status to APPROVED
+        app_res = client.post(f"/api/forex/proposals/{prop_id}/status", json={"status": "APPROVED"})
+        assert app_res.status_code == 200
+
+        # 2. Record matched execution trade in journal
+        open_res = client.post(
+            "/api/forex/journal/trades/manual-open",
+            json={
+                "pair": "GBPUSD",
+                "action": "LONG",
+                "entry_price": 1.2800,
+                "lots": 1.5,
+                "stop_loss": 1.2750,
+                "take_profit": 1.2900,
+                "proposal_id": prop_id,
+                "notes": "Matched execution against approved proposal",
+            },
+        )
+        assert open_res.status_code == 200
+        trade_id = open_res.json()["trade_id"]
+
+        # Close trade to produce final outcome
+        close_res = client.post(
+            f"/api/forex/journal/trades/{trade_id}/close",
+            json={
+                "close_price": 1.2900,
+                "exit_reason": "TAKE_PROFIT",
+                "reflection": "TP reached cleanly according to thesis",
+            },
+        )
+        assert close_res.status_code == 200
+
+        # 3. Retrieve proposal detail via GET /api/forex/proposals/{proposal_id}
+        detail_res = client.get(f"/api/forex/proposals/{prop_id}")
+        assert detail_res.status_code == 200
+        detail = detail_res.json()
+
+        # Check all Phase 28 contract elements
+        assert "proposal" in detail
+        assert "original_proposal" in detail
+        assert detail["original_proposal"]["invalidation_condition"] == "H4 close below 1.2740"
+        assert "risk_review" in detail
+        assert "user_decision" in detail
+        assert detail["user_decision"]["status"] == "EXECUTED"
+        assert "matched_execution" in detail
+        assert detail["matched_execution"]["trade_id"] == trade_id
+        assert detail["matched_execution"]["lots"] == 1.5
+        assert "final_outcome" in detail
+        assert detail["final_outcome"]["status"] == "CLOSED"
+        assert detail["final_outcome"]["exit_reason"] == "TAKE_PROFIT"
+        assert detail["final_outcome"]["pips_gained"] > 0
+        assert "lessons" in detail
+
     def test_evaluate_risk_endpoint(self, client):
         eval_payload = {
             "proposal": {

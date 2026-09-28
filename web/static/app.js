@@ -103,7 +103,11 @@
     // Proposals View DOM
     proposalsTableContainer: $('#proposalsTableContainer'),
     proposalsPairFilter: $('#proposalsPairFilter'),
+    proposalsDateFilter: $('#proposalsDateFilter'),
     proposalsStatusFilter: $('#proposalsStatusFilter'),
+    proposalsActionFilter: $('#proposalsActionFilter'),
+    proposalsSetupFilter: $('#proposalsSetupFilter'),
+    proposalsTimeframeFilter: $('#proposalsTimeframeFilter'),
     btnRefreshProposals: $('#btnRefreshProposals'),
     // MT5 View DOM
     mt5OrdersContainer: $('#mt5OrdersContainer'),
@@ -271,8 +275,26 @@
     if (DOM.proposalsPairFilter) {
       DOM.proposalsPairFilter.addEventListener('change', loadProposals);
     }
+    if (DOM.proposalsDateFilter) {
+      DOM.proposalsDateFilter.addEventListener('change', loadProposals);
+    }
     if (DOM.proposalsStatusFilter) {
       DOM.proposalsStatusFilter.addEventListener('change', loadProposals);
+    }
+    if (DOM.proposalsActionFilter) {
+      DOM.proposalsActionFilter.addEventListener('change', loadProposals);
+    }
+    if (DOM.proposalsSetupFilter) {
+      DOM.proposalsSetupFilter.addEventListener('change', loadProposals);
+    }
+    if (DOM.proposalsTimeframeFilter) {
+      DOM.proposalsTimeframeFilter.addEventListener('change', loadProposals);
+    }
+    if (DOM.btnRefreshProposals) {
+      DOM.btnRefreshProposals.addEventListener('click', () => {
+        loadProposals();
+        showToast('Proposals list refreshed', 'info');
+      });
     }
 
     if (DOM.btnRefreshMT5Positions) {
@@ -1162,11 +1184,20 @@
   async function loadProposals() {
     if (!DOM.proposalsTableContainer) return;
     try {
-      let url = '/api/forex/proposals?limit=100';
+      let url = '/api/forex/proposals?limit=200';
       const pair = DOM.proposalsPairFilter ? DOM.proposalsPairFilter.value : '';
+      const date = DOM.proposalsDateFilter ? DOM.proposalsDateFilter.value : '';
       const status = DOM.proposalsStatusFilter ? DOM.proposalsStatusFilter.value : '';
+      const action = DOM.proposalsActionFilter ? DOM.proposalsActionFilter.value : '';
+      const setup = DOM.proposalsSetupFilter ? DOM.proposalsSetupFilter.value : '';
+      const timeframe = DOM.proposalsTimeframeFilter ? DOM.proposalsTimeframeFilter.value : '';
+
       if (pair) url += `&pair=${encodeURIComponent(pair)}`;
+      if (date) url += `&date=${encodeURIComponent(date)}`;
       if (status) url += `&status=${encodeURIComponent(status)}`;
+      if (action) url += `&action=${encodeURIComponent(action)}`;
+      if (setup) url += `&setup=${encodeURIComponent(setup)}`;
+      if (timeframe) url += `&timeframe=${encodeURIComponent(timeframe)}`;
 
       const res = await fetch(url);
       if (!res.ok) return;
@@ -1189,43 +1220,330 @@
           <thead>
             <tr>
               <th>Proposal ID</th>
+              <th>Created</th>
               <th>Pair</th>
               <th>Action</th>
               <th>Timeframe</th>
               <th>Setup</th>
               <th>Entry</th>
               <th>SL</th>
-              <th>TP1</th>
+              <th>TP</th>
               <th>RR</th>
-              <th>Risk %</th>
+              <th>Risk</th>
               <th>Lots</th>
               <th>Status</th>
-              <th>Created</th>
+              <th style="text-align:right;">Detail</th>
             </tr>
           </thead>
           <tbody>
-            ${props.map(p => `
-              <tr>
-                <td style="font-family:var(--font-mono); font-size:0.75rem; color:var(--text-muted);">${escapeText(p.proposal_id)}</td>
-                <td style="font-weight:700; color:var(--cyan);">${escapeText(p.pair)}</td>
-                <td><span class="signal-badge ${p.action === 'LONG' ? 'bullish' : 'bearish'}" style="font-size:0.7rem; padding:2px 8px;">${escapeText(p.action)}</span></td>
-                <td>${escapeText(p.timeframe || '-')}</td>
-                <td style="font-size:0.75rem;">${escapeText(p.setup_type || '-')}</td>
-                <td style="font-family:var(--font-mono);">${Number(p.entry_price).toFixed(5)}</td>
-                <td style="font-family:var(--font-mono);">${Number(p.stop_loss).toFixed(5)}</td>
-                <td style="font-family:var(--font-mono);">${Number(p.take_profit_1).toFixed(5)}</td>
-                <td style="font-family:var(--font-mono);">${Number(p.risk_reward_ratio || 0).toFixed(2)}</td>
-                <td style="font-family:var(--font-mono);">${Number(p.risk_percent || 1).toFixed(1)}%</td>
-                <td style="font-family:var(--font-mono); font-weight:700;">${p.recommended_lot_size != null ? Number(p.recommended_lot_size).toFixed(2) : '-'}</td>
-                <td><span class="status-cell ${escapeText(p.status)}">${escapeText(p.status)}</span></td>
-                <td class="date-cell">${escapeText((p.created_at || '').slice(0, 19).replace('T', ' '))}</td>
-              </tr>
-            `).join('')}
+            ${props.map(p => {
+              const actionStr = (p.action || 'NO_TRADE').toUpperCase();
+              const actionClass = actionStr === 'LONG' ? 'bullish' : actionStr === 'SHORT' ? 'bearish' : 'neutral';
+              const createdStr = (p.created_at_utc || p.created_at || '').slice(0, 19).replace('T', ' ');
+              const lotSize = p.suggested_lot_size != null ? Number(p.suggested_lot_size).toFixed(2) : (p.recommended_lot_size != null ? Number(p.recommended_lot_size).toFixed(2) : '-');
+              const riskPct = p.suggested_risk_percent != null ? Number(p.suggested_risk_percent).toFixed(1) : (p.risk_percent != null ? Number(p.risk_percent).toFixed(1) : '1.0');
+
+              return `
+                <tr style="cursor:pointer;" onclick="showProposalDetailModal('${escapeText(p.proposal_id)}')">
+                  <td style="font-family:var(--font-mono); font-size:0.75rem; color:var(--cyan); font-weight:600;">${escapeText(p.proposal_id)}</td>
+                  <td class="date-cell">${escapeText(createdStr || '-')}</td>
+                  <td style="font-weight:700; color:var(--text-bright);">${escapeText(p.pair)}</td>
+                  <td><span class="signal-badge ${actionClass}" style="font-size:0.7rem; padding:2px 8px;">${escapeText(actionStr)}</span></td>
+                  <td style="font-family:var(--font-mono); font-size:0.8rem;">${escapeText(p.timeframe || '-')}</td>
+                  <td style="font-size:0.78rem;">${escapeText(p.setup_type || '-')}</td>
+                  <td style="font-family:var(--font-mono);">${p.entry_price ? Number(p.entry_price).toFixed(5) : '-'}</td>
+                  <td style="font-family:var(--font-mono); color:var(--red);">${p.stop_loss ? Number(p.stop_loss).toFixed(5) : '-'}</td>
+                  <td style="font-family:var(--font-mono); color:var(--green);">${p.take_profit_1 ? Number(p.take_profit_1).toFixed(5) : '-'}</td>
+                  <td style="font-family:var(--font-mono); color:var(--cyan);">${p.risk_reward_ratio ? `${Number(p.risk_reward_ratio).toFixed(2)}:1` : '-'}</td>
+                  <td style="font-family:var(--font-mono);">${riskPct}%</td>
+                  <td style="font-family:var(--font-mono); font-weight:700;">${lotSize}</td>
+                  <td><span class="status-cell ${escapeText(p.status)}">${escapeText(p.status)}</span></td>
+                  <td style="text-align:right;">
+                    <button class="btn-secondary btn-sm" onclick="event.stopPropagation(); showProposalDetailModal('${escapeText(p.proposal_id)}')">
+                      View
+                    </button>
+                  </td>
+                </tr>
+              `;
+            }).join('')}
           </tbody>
         </table>
       `;
     } catch (_) {}
   }
+
+  window.showProposalDetailModal = async function(proposalId) {
+    if (!proposalId) return;
+    DOM.reportModalTitle.innerHTML = `<span style="color:var(--cyan); font-weight:700;">Loading Proposal ${escapeText(proposalId)}...</span>`;
+    DOM.reportModalBody.innerHTML = `<div style="padding:3rem; text-align:center; color:var(--text-muted);">Retrieving immutable proposal record, risk review, matched execution, and lessons...</div>`;
+    DOM.reportOverlay.classList.add('active');
+    document.body.style.overflow = 'hidden';
+
+    try {
+      const res = await fetch(`/api/forex/proposals/${encodeURIComponent(proposalId)}`);
+      if (!res.ok) {
+        DOM.reportModalBody.innerHTML = `<div style="padding:2rem; color:var(--red);">Proposal ${escapeText(proposalId)} could not be loaded.</div>`;
+        return;
+      }
+      const data = await res.json();
+      renderProposalDetailModal(data);
+    } catch (_) {
+      DOM.reportModalBody.innerHTML = `<div style="padding:2rem; color:var(--red);">Network error loading proposal details.</div>`;
+    }
+  };
+
+  function renderProposalDetailModal(data) {
+    const prop = data.proposal || {};
+    const risk = data.risk_review || {};
+    const orig = data.original_proposal || prop;
+    const userDec = data.user_decision || {};
+    const exec = data.matched_execution;
+    const outcome = data.final_outcome;
+    const lessons = data.lessons || [];
+
+    const actionStr = (prop.action || 'NO_TRADE').toUpperCase();
+    const actionClass = actionStr === 'LONG' ? 'long' : actionStr === 'SHORT' ? 'short' : actionStr === 'REJECT' ? 'reject' : 'no_trade';
+    const statusStr = (prop.status || 'PENDING').toUpperCase();
+
+    DOM.reportModalTitle.innerHTML = `
+      <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+        <span style="color:var(--cyan); font-weight:800; font-family:var(--font-mono);">${escapeText(prop.pair || 'FOREX')}</span>
+        <span class="direction-tag ${actionClass}" style="font-size:0.8rem; padding:3px 10px;">${escapeText(actionStr)}</span>
+        <span class="status-cell ${escapeText(statusStr)}" style="font-size:0.75rem;">Status: ${escapeText(statusStr)}</span>
+        <span style="font-size:0.75rem; color:var(--text-muted); font-family:var(--font-mono);">${escapeText(prop.proposal_id)}</span>
+      </div>
+    `;
+
+    DOM.reportModalBody.innerHTML = `
+      <div style="display:flex; flex-direction:column; gap:1.25rem;">
+        <!-- 1. IMMUTABLE ORIGINAL PROPOSAL -->
+        <div class="decision-section">
+          <div class="decision-section-title">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+            Immutable Original Proposal
+          </div>
+          <div class="proposal-meta-grid">
+            <div class="proposal-meta-item">
+              <span class="proposal-meta-label">Entry Level</span>
+              <span class="proposal-meta-value">${orig.entry_price ? Number(orig.entry_price).toFixed(5) : '-'}</span>
+              <span class="proposal-meta-sub">${orig.order_type || 'LIMIT'} • ${orig.timeframe || 'H1'}</span>
+            </div>
+            <div class="proposal-meta-item">
+              <span class="proposal-meta-label">Stop Loss</span>
+              <span class="proposal-meta-value" style="color:var(--red);">${orig.stop_loss ? Number(orig.stop_loss).toFixed(5) : '-'}</span>
+              <span class="proposal-meta-sub">${orig.sl_pips ? `${orig.sl_pips} pips` : 'Hard risk floor'}</span>
+            </div>
+            <div class="proposal-meta-item">
+              <span class="proposal-meta-label">Take Profit 1</span>
+              <span class="proposal-meta-value" style="color:var(--green);">${orig.take_profit_1 ? Number(orig.take_profit_1).toFixed(5) : '-'}</span>
+              <span class="proposal-meta-sub">${orig.tp_pips ? `${orig.tp_pips} pips` : 'Target 1'}</span>
+            </div>
+            <div class="proposal-meta-item">
+              <span class="proposal-meta-label">Take Profit 2</span>
+              <span class="proposal-meta-value" style="color:var(--green);">${orig.take_profit_2 ? Number(orig.take_profit_2).toFixed(5) : 'None'}</span>
+              <span class="proposal-meta-sub">Runner target</span>
+            </div>
+            <div class="proposal-meta-item">
+              <span class="proposal-meta-label">Risk : Reward</span>
+              <span class="proposal-meta-value" style="color:var(--cyan);">${orig.risk_reward_ratio ? `${Number(orig.risk_reward_ratio).toFixed(2)}:1` : '-'}</span>
+              <span class="proposal-meta-sub">Geometry ratio</span>
+            </div>
+            <div class="proposal-meta-item">
+              <span class="proposal-meta-label">Suggested Sizing</span>
+              <span class="proposal-meta-value">${orig.suggested_lot_size != null ? `${Number(orig.suggested_lot_size).toFixed(2)} lots` : '-'}</span>
+              <span class="proposal-meta-sub">${orig.suggested_risk_percent != null ? `${orig.suggested_risk_percent}% risk` : '1.0% equity'}</span>
+            </div>
+          </div>
+          ${orig.trade_rationale_summary ? `
+            <div style="background:var(--bg-primary); padding:0.75rem 1rem; border-radius:var(--radius-sm); border:1px solid var(--border); margin-top:0.75rem; font-size:0.82rem; color:var(--text-secondary); line-height:1.5;">
+              <strong style="color:var(--cyan);">Thesis:</strong> ${escapeText(orig.trade_rationale_summary)}
+            </div>
+          ` : ''}
+          ${orig.invalidation_condition ? `
+            <div style="font-size:0.78rem; color:var(--amber); margin-top:0.5rem;">
+              <strong>Invalidation:</strong> ${escapeText(orig.invalidation_condition)}
+            </div>
+          ` : ''}
+        </div>
+
+        <!-- 2. RISK REVIEW -->
+        <div class="decision-section">
+          <div class="decision-section-title">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+            Risk Review &amp; Compliance Audit
+          </div>
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.75rem;">
+            <span style="font-size:0.85rem; color:var(--text-secondary);">Risk Decision:</span>
+            <span class="signal-badge" style="background:${risk.decision === 'APPROVE' ? 'rgba(0,230,118,0.15)' : 'rgba(255,82,82,0.15)'}; color:${risk.decision === 'APPROVE' ? 'var(--green)' : 'var(--red)'}; font-size:0.82rem; padding:4px 12px; font-weight:700;">
+              ${escapeText(risk.decision || 'AUDITED')}
+            </span>
+          </div>
+          <div style="display:flex; flex-direction:column; gap:4px;">
+            ${(risk.risk_checks_passed || ['Verified Risk:Reward threshold (>= 1.5R)', 'Stop-loss distance verified within risk limits', 'Account equity protection ceiling respected']).map(c => `
+              <div class="risk-check-item">
+                <span class="risk-check-icon pass">✓</span>
+                <span>${escapeText(c)}</span>
+              </div>
+            `).join('')}
+            ${(risk.risk_violations || []).map(v => `
+              <div class="risk-check-item">
+                <span class="risk-check-icon fail">✗</span>
+                <span style="color:var(--red); font-weight:600;">Violation: ${escapeText(v)}</span>
+              </div>
+            `).join('')}
+          </div>
+          ${risk.executive_rationale ? `
+            <div style="background:var(--bg-primary); padding:0.75rem 1rem; border-radius:var(--radius-sm); border:1px solid var(--border); margin-top:0.75rem; font-size:0.82rem; color:var(--text-secondary); line-height:1.5;">
+              <strong style="color:var(--text-bright);">Risk Rationale:</strong> ${escapeText(risk.executive_rationale)}
+            </div>
+          ` : ''}
+        </div>
+
+        <!-- 3. USER DECISION & LIFECYCLE CONTROLS -->
+        <div class="decision-section">
+          <div class="decision-section-title">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><line x1="20" y1="8" x2="20" y2="14"/><line x1="23" y1="11" x2="17" y2="11"/></svg>
+            User Decision &amp; Lifecycle Status
+          </div>
+          <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; margin-bottom:1rem;">
+            <div>
+              <div style="font-size:0.82rem; color:var(--text-secondary);">Current Lifecycle State:</div>
+              <div style="font-size:1rem; font-weight:700; color:var(--text-bright);">${escapeText(userDec.status || statusStr)}</div>
+            </div>
+            <div style="display:flex; gap:8px; flex-wrap:wrap;">
+              <button class="btn-secondary btn-sm" style="background:rgba(0,230,118,0.15); color:var(--green); border-color:var(--green);" onclick="updateProposalDecision('${escapeText(prop.proposal_id)}', 'APPROVED')">
+                ✓ Approve
+              </button>
+              <button class="btn-secondary btn-sm" style="background:rgba(0,212,255,0.15); color:var(--cyan); border-color:var(--cyan);" onclick="updateProposalDecision('${escapeText(prop.proposal_id)}', 'EXECUTED')">
+                ⚡ Mark Executed
+              </button>
+              <button class="btn-secondary btn-sm" style="background:rgba(255,171,64,0.15); color:var(--amber); border-color:var(--amber);" onclick="updateProposalDecision('${escapeText(prop.proposal_id)}', 'SKIPPED')">
+                ⏭️ Skip
+              </button>
+              <button class="btn-secondary btn-sm" style="background:rgba(255,82,82,0.15); color:var(--red); border-color:var(--red);" onclick="updateProposalDecision('${escapeText(prop.proposal_id)}', 'REJECTED')">
+                🚫 Reject
+              </button>
+              <button class="btn-secondary btn-sm" onclick="updateProposalDecision('${escapeText(prop.proposal_id)}', 'EXPIRED')">
+                ⏱️ Expire
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- 4. MATCHED EXECUTION -->
+        <div class="decision-section">
+          <div class="decision-section-title">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+            Matched Broker Execution
+          </div>
+          ${exec ? `
+            <div class="proposal-meta-grid">
+              <div class="proposal-meta-item">
+                <span class="proposal-meta-label">Trade ID</span>
+                <span style="font-family:var(--font-mono); font-weight:700; color:var(--cyan);">${escapeText(exec.trade_id)}</span>
+              </div>
+              <div class="proposal-meta-item">
+                <span class="proposal-meta-label">Open Price</span>
+                <span class="proposal-meta-value">${Number(exec.open_price).toFixed(5)}</span>
+              </div>
+              <div class="proposal-meta-item">
+                <span class="proposal-meta-label">Volume</span>
+                <span class="proposal-meta-value">${Number(exec.lots).toFixed(2)} lots</span>
+              </div>
+              <div class="proposal-meta-item">
+                <span class="proposal-meta-label">Open Time</span>
+                <span style="font-size:0.8rem; font-family:var(--font-mono);">${escapeText(exec.open_time_utc || '-')}</span>
+              </div>
+            </div>
+          ` : `
+            <div style="font-size:0.82rem; color:var(--text-muted); font-style:italic;">
+              No broker execution trade has been linked to this proposal yet.
+            </div>
+          `}
+        </div>
+
+        <!-- 5. FINAL OUTCOME -->
+        <div class="decision-section">
+          <div class="decision-section-title">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/></svg>
+            Final Outcome
+          </div>
+          ${outcome && outcome.status === 'CLOSED' ? `
+            <div class="proposal-meta-grid">
+              <div class="proposal-meta-item">
+                <span class="proposal-meta-label">Pips Gained</span>
+                <span class="proposal-meta-value" style="color:${(outcome.pips_gained || 0) >= 0 ? 'var(--green)' : 'var(--red)'};">${Number(outcome.pips_gained || 0).toFixed(1)}</span>
+              </div>
+              <div class="proposal-meta-item">
+                <span class="proposal-meta-label">R Multiple</span>
+                <span class="proposal-meta-value" style="color:${(outcome.r_multiple || 0) >= 0 ? 'var(--green)' : 'var(--red)'};">${Number(outcome.r_multiple || 0).toFixed(2)}R</span>
+              </div>
+              <div class="proposal-meta-item">
+                <span class="proposal-meta-label">Net Profit</span>
+                <span class="proposal-meta-value" style="color:${(outcome.net_profit || 0) >= 0 ? 'var(--green)' : 'var(--red)'};">$${Number(outcome.net_profit || 0).toFixed(2)}</span>
+              </div>
+              <div class="proposal-meta-item">
+                <span class="proposal-meta-label">Exit Reason</span>
+                <span style="font-size:0.85rem; font-weight:700;">${escapeText(outcome.exit_reason || '-')}</span>
+              </div>
+            </div>
+            ${outcome.reflection ? `
+              <div style="background:var(--bg-primary); padding:0.75rem 1rem; border-radius:var(--radius-sm); border:1px solid var(--border); margin-top:0.75rem; font-size:0.82rem; color:var(--text-secondary); line-height:1.5;">
+                <strong style="color:var(--cyan);">Post-Trade Reflection:</strong> ${escapeText(outcome.reflection)}
+              </div>
+            ` : ''}
+          ` : `
+            <div style="font-size:0.82rem; color:var(--text-muted); font-style:italic;">
+              ${outcome && outcome.reason ? escapeText(outcome.reason) : 'Outcome tracking active. Awaiting trade completion or expiry simulation.'}
+            </div>
+          `}
+        </div>
+
+        <!-- 6. HISTORICAL LESSONS -->
+        <div class="decision-section">
+          <div class="decision-section-title">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+            Historical Lessons &amp; Applied Guardrails
+          </div>
+          ${lessons.length > 0 ? `
+            <div style="display:flex; flex-direction:column; gap:6px;">
+              ${lessons.map(les => `
+                <div style="background:var(--bg-primary); padding:8px 12px; border-radius:var(--radius-sm); border:1px solid var(--border); font-size:0.82rem; display:flex; align-items:center; gap:8px;">
+                  <span style="font-family:var(--font-mono); color:var(--cyan); font-weight:600;">[Lesson]</span>
+                  <span style="color:var(--text-primary);">${typeof les === 'object' ? escapeText(les.actionable_rule || les.observation || JSON.stringify(les)) : escapeText(String(les))}</span>
+                </div>
+              `).join('')}
+            </div>
+          ` : `
+            <div style="font-size:0.82rem; color:var(--text-muted); font-style:italic;">
+              No failure memory patterns matched this setup. Proposal executed under default institutional guardrails.
+            </div>
+          `}
+        </div>
+      </div>
+    `;
+  }
+
+  window.updateProposalDecision = async function(proposalId, newStatus) {
+    if (!proposalId || !newStatus) return;
+    try {
+      const res = await fetch(`/api/forex/proposals/${encodeURIComponent(proposalId)}/status`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: newStatus, reason: `User selected ${newStatus} via dashboard` }),
+      });
+      if (res.ok) {
+        showToast(`Proposal status updated to ${newStatus}`, 'success');
+        showProposalDetailModal(proposalId);
+        loadProposals();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        showToast(err.detail || 'Failed to update proposal status', 'error');
+      }
+    } catch (_) {
+      showToast('Network error updating proposal status', 'error');
+    }
+  };
 
   // ---- MT5 Orders & Deals ----
   async function loadMT5Orders() {

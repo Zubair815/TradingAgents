@@ -575,6 +575,25 @@ class ForexTradeJournal:
                 if should_close:
                     conn.close()
 
+    def get_trade_by_proposal_id(self, proposal_id: str) -> TradeJournalRecord | None:
+        """Retrieve a trade record associated with a proposal_id."""
+        with self._lock:
+            conn = self._get_connection()
+            should_close = conn != self._mem_conn
+            try:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.execute(
+                    "SELECT * FROM trades WHERE proposal_id = ? ORDER BY open_time_utc DESC LIMIT 1;",
+                    (proposal_id,),
+                )
+                row = cursor.fetchone()
+                if not row:
+                    return None
+                return self._row_to_trade_record(row)
+            finally:
+                if should_close:
+                    conn.close()
+
     def list_trades(
         self,
         pair: str | None = None,

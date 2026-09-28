@@ -511,7 +511,7 @@
             Forex Trade Proposals Log
           </h2>
           <div class="toolbar-group">
-            <select class="form-select" id="proposalsPairFilter" style="width: 140px; padding: 6px 10px; font-size: 0.8rem;">
+            <select class="form-select" id="proposalsPairFilter" style="width: 120px; padding: 6px 10px; font-size: 0.8rem;">
               <option value="">All Pairs</option>
               <option value="EURUSD">EURUSD</option>
               <option value="GBPUSD">GBPUSD</option>
@@ -519,7 +519,8 @@
               <option value="AUDUSD">AUDUSD</option>
               <option value="USDCHF">USDCHF</option>
             </select>
-            <select class="form-select" id="proposalsStatusFilter" style="width: 150px; padding: 6px 10px; font-size: 0.8rem;">
+            <input type="date" class="form-input" id="proposalsDateFilter" style="width: 135px; padding: 5px 8px; font-size: 0.8rem;" title="Filter by Created Date">
+            <select class="form-select" id="proposalsStatusFilter" style="width: 130px; padding: 6px 10px; font-size: 0.8rem;">
               <option value="">All Statuses</option>
               <option value="PENDING">PENDING</option>
               <option value="APPROVED">APPROVED</option>
@@ -527,6 +528,29 @@
               <option value="EXECUTED">EXECUTED</option>
               <option value="SKIPPED">SKIPPED</option>
               <option value="EXPIRED">EXPIRED</option>
+              <option value="CANCELLED">CANCELLED</option>
+            </select>
+            <select class="form-select" id="proposalsActionFilter" style="width: 110px; padding: 6px 10px; font-size: 0.8rem;">
+              <option value="">All Actions</option>
+              <option value="LONG">LONG</option>
+              <option value="SHORT">SHORT</option>
+              <option value="NO_TRADE">NO_TRADE</option>
+            </select>
+            <select class="form-select" id="proposalsSetupFilter" style="width: 140px; padding: 6px 10px; font-size: 0.8rem;">
+              <option value="">All Setups</option>
+              <option value="BREAKOUT">BREAKOUT</option>
+              <option value="TREND_PULLBACK">TREND_PULLBACK</option>
+              <option value="RANGE_BOUND">RANGE_BOUND</option>
+              <option value="LIQUIDITY_SWEEP">LIQUIDITY_SWEEP</option>
+              <option value="NEWS_MOMENTUM">NEWS_MOMENTUM</option>
+            </select>
+            <select class="form-select" id="proposalsTimeframeFilter" style="width: 110px; padding: 6px 10px; font-size: 0.8rem;">
+              <option value="">All TFs</option>
+              <option value="M5">M5</option>
+              <option value="M15">M15</option>
+              <option value="H1">H1</option>
+              <option value="H4">H4</option>
+              <option value="D1">D1</option>
             </select>
             <button class="btn-secondary btn-sm" id="btnRefreshProposals">🔄 Refresh</button>
           </div>

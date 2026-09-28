@@ -693,11 +693,15 @@ async def get_journal_performance(
 async def list_proposals(
     pair: str | None = None,
     status: str | None = None,
+    date: str | None = None,
+    action: str | None = None,
+    setup: str | None = None,
+    timeframe: str | None = None,
     limit: int = Query(default=100, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
     journal: ForexTradeJournal = Depends(get_journal),
 ):
-    """Query proposals from SQLite store."""
+    """Query proposals from SQLite store with multi-field filtering."""
     prop_status = None
     if status:
         try:
@@ -705,8 +709,37 @@ async def list_proposals(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=f"Invalid proposal status: {status}") from exc
 
+    start_date = f"{date}T00:00:00" if date else None
+    end_date = f"{date}T23:59:59" if date else None
 
-    proposals = journal.list_proposals(pair=pair, status=prop_status, limit=limit + offset)
+    fetch_limit = 1000 if (action or setup or timeframe) else (limit + offset)
+    proposals = journal.list_proposals(
+        pair=pair,
+        status=prop_status,
+        start_date=start_date,
+        end_date=end_date,
+        limit=fetch_limit,
+    )
+
+    if action:
+        act_val = action.strip().upper()
+        proposals = [
+            p for p in proposals
+            if (p.action.value if hasattr(p.action, "value") else str(p.action)).upper() == act_val
+        ]
+    if setup:
+        set_val = setup.strip().upper()
+        proposals = [
+            p for p in proposals
+            if (p.setup_type.value if hasattr(p.setup_type, "value") else str(p.setup_type)).upper() == set_val
+        ]
+    if timeframe:
+        tf_val = timeframe.strip().upper()
+        proposals = [
+            p for p in proposals
+            if (p.timeframe or "").strip().upper() == tf_val
+        ]
+
     sliced_proposals = proposals[offset : offset + limit]
     return {"proposals": [_safe_model_dump(p) for p in sliced_proposals], "count": len(sliced_proposals)}
 
@@ -716,11 +749,66 @@ async def get_proposal(
     proposal_id: str,
     journal: ForexTradeJournal = Depends(get_journal),
 ):
-    """Retrieve specific proposal by ID."""
+    """Retrieve specific proposal with immutable original evidence, risk review, matched execution, outcome, and lessons."""
     proposal = journal.get_proposal(proposal_id)
     if not proposal:
         raise HTTPException(status_code=404, detail=f"Proposal {proposal_id} not found")
-    return {"proposal": _safe_model_dump(proposal)}
+
+    prop_dict = _safe_model_dump(proposal)
+    matched_trade = journal.get_trade_by_proposal_id(proposal_id)
+    matched_dict = _safe_model_dump(matched_trade) if matched_trade else None
+
+    # Retrieve lessons linked to matched trade or pair setup
+    lessons = []
+    try:
+        if matched_trade:
+            lessons = journal.list_lessons(trade_id=matched_trade.trade_id)
+        if not lessons:
+            setup_val = proposal.setup_type.value if hasattr(proposal.setup_type, "value") else str(proposal.setup_type)
+            lessons = journal.list_lessons(pair=proposal.pair, setup_type=setup_val)
+    except Exception:
+        lessons = []
+
+    # Derive final outcome
+    final_outcome = None
+    status_str = proposal.status.value if hasattr(proposal.status, "value") else str(proposal.status)
+    if matched_trade and getattr(matched_trade.status, "value", str(matched_trade.status)) == "CLOSED":
+        final_outcome = {
+            "status": "CLOSED",
+            "pips_gained": matched_trade.pips_gained,
+            "r_multiple": matched_trade.r_multiple,
+            "net_profit": matched_trade.net_profit,
+            "exit_reason": matched_trade.exit_reason.value if hasattr(matched_trade.exit_reason, "value") else str(matched_trade.exit_reason),
+            "close_time": matched_trade.close_time_utc,
+            "reflection": matched_trade.reflection,
+        }
+    elif matched_trade:
+        final_outcome = {
+            "status": "OPEN",
+            "current_action": "Live broker position active",
+            "open_price": matched_trade.open_price,
+            "lots": matched_trade.lots,
+        }
+    elif status_str in ("EXPIRED", "SKIPPED", "SKIPPED_BY_USER", "CANCELLED", "REJECTED"):
+        final_outcome = {
+            "status": status_str,
+            "reason": (proposal.metadata or {}).get("status_reason") or f"Proposal marked as {status_str}",
+        }
+
+    return {
+        "proposal": prop_dict,
+        "original_proposal": proposal.proposal_payload or prop_dict,
+        "risk_review": proposal.risk_decision or {},
+        "user_decision": {
+            "status": status_str,
+            "action": (proposal.metadata or {}).get("user_action") or status_str,
+            "updated_at": (proposal.metadata or {}).get("user_action_at") or proposal.created_at_utc,
+        },
+        "matched_execution": matched_dict,
+        "final_outcome": final_outcome,
+        "lessons": lessons,
+    }
+
 
 
 @router.post("/proposals")
@@ -731,9 +819,9 @@ async def create_proposal(
     """Submit and persist a new ForexTraderProposal."""
     try:
         norm_pair = normalize_forex_pair(req.pair)
-        action_enum = ForexAction(req.action.upper())
-        order_enum = OrderType(req.order_type.upper())
-        setup_enum = SetupType(req.setup_type.upper())
+        action_enum = ForexAction.from_str(req.action)
+        order_enum = OrderType.from_str(req.order_type)
+        setup_enum = SetupType.from_str(req.setup_type)
 
         proposal = ForexTraderProposal(
             pair=norm_pair,
