@@ -109,9 +109,26 @@
     proposalsSetupFilter: $('#proposalsSetupFilter'),
     proposalsTimeframeFilter: $('#proposalsTimeframeFilter'),
     btnRefreshProposals: $('#btnRefreshProposals'),
-    // MT5 View DOM
-    mt5OrdersContainer: $('#mt5OrdersContainer'),
-    mt5DealsContainer: $('#mt5DealsContainer'),
+    // MT5 View DOM (Phase 29)
+    btnMT5Connect:          $('#btnMT5Connect'),
+    btnMT5Disconnect:       $('#btnMT5Disconnect'),
+    btnMT5RefreshStatus:    $('#btnMT5RefreshStatus'),
+    mt5ConnBadge:           $('#mt5ConnBadge'),
+    mt5TerminalPathInput:   $('#mt5TerminalPathInput'),
+    mt5ServerInput:         $('#mt5ServerInput'),
+    mt5LoginInput:          $('#mt5LoginInput'),
+    mt5DiagTerminalPath:    $('#mt5DiagTerminalPath'),
+    mt5DiagServer:          $('#mt5DiagServer'),
+    mt5DiagLogin:           $('#mt5DiagLogin'),
+    mt5Margin:              $('#mt5Margin'),
+    mt5MarginLevel:         $('#mt5MarginLevel'),
+    mt5Leverage:            $('#mt5Leverage'),
+    mt5CurrencyVal:         $('#mt5CurrencyVal'),
+    mt5SymbolInput:         $('#mt5SymbolInput'),
+    btnMT5LookupSymbol:     $('#btnMT5LookupSymbol'),
+    mt5SymbolResultContainer:$('#mt5SymbolResultContainer'),
+    mt5OrdersContainer:     $('#mt5OrdersContainer'),
+    mt5DealsContainer:      $('#mt5DealsContainer'),
     btnRefreshMT5Positions: $('#btnRefreshMT5Positions'),
     // Performance View DOM
     btnRefreshAnalytics: $('#btnRefreshAnalytics'),
@@ -193,6 +210,9 @@
           loadMT5Positions();
           loadMT5Orders();
           loadMT5Deals();
+          if (DOM.mt5SymbolInput && DOM.mt5SymbolInput.value) {
+            lookupMT5Symbol(DOM.mt5SymbolInput.value);
+          }
         } else if (tab.dataset.view === 'journal') {
           loadJournalTrades();
         } else if (tab.dataset.view === 'performance') {
@@ -303,6 +323,43 @@
         loadMT5Orders();
         loadMT5Deals();
         showToast('MT5 observer data refreshed', 'info');
+      });
+    }
+
+    if (DOM.btnMT5Connect) {
+      DOM.btnMT5Connect.addEventListener('click', connectMT5);
+    }
+    if (DOM.btnMT5Disconnect) {
+      DOM.btnMT5Disconnect.addEventListener('click', disconnectMT5);
+    }
+    if (DOM.btnMT5RefreshStatus) {
+      DOM.btnMT5RefreshStatus.addEventListener('click', () => {
+        loadMT5Status();
+        loadMT5Account();
+        loadMT5Positions();
+        loadMT5Orders();
+        loadMT5Deals();
+        showToast('MT5 status refreshed', 'info');
+      });
+    }
+    if (DOM.btnMT5LookupSymbol) {
+      DOM.btnMT5LookupSymbol.addEventListener('click', () => lookupMT5Symbol());
+    }
+    if (DOM.mt5SymbolInput) {
+      DOM.mt5SymbolInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          lookupMT5Symbol();
+        }
+      });
+    }
+    const symbolChips = $$('.symbol-chip');
+    if (symbolChips.length > 0) {
+      symbolChips.forEach(chip => {
+        chip.addEventListener('click', () => {
+          const sym = chip.dataset.symbol;
+          if (sym) lookupMT5Symbol(sym);
+        });
       });
     }
 
@@ -448,6 +505,13 @@
     return num.toFixed(d);
   }
 
+  function maskAccountLogin(login) {
+    if (!login) return '--';
+    const s = String(login).trim();
+    if (s.length <= 3) return '***';
+    return s.slice(0, 3) + '*'.repeat(s.length - 3);
+  }
+
   function showMT5Unavailable() {
     const unav = 'Unavailable';
     if (DOM.mt5Balance) DOM.mt5Balance.textContent = unav;
@@ -462,9 +526,18 @@
       DOM.dashFloating.textContent = unav;
       DOM.dashFloating.style.color = 'var(--text-muted)';
     }
+    if (DOM.mt5Margin) DOM.mt5Margin.textContent = unav;
     if (DOM.mt5FreeMargin) DOM.mt5FreeMargin.textContent = unav;
     if (DOM.dashFreeMargin) DOM.dashFreeMargin.textContent = unav;
+    if (DOM.mt5MarginLevel) DOM.mt5MarginLevel.textContent = unav;
+    if (DOM.mt5Leverage) DOM.mt5Leverage.textContent = unav;
+    if (DOM.mt5CurrencyVal) DOM.mt5CurrencyVal.textContent = 'USD';
     if (DOM.dashCurrency) DOM.dashCurrency.textContent = 'Standby / Unconnected';
+    if (DOM.mt5ConnBadge) {
+      DOM.mt5ConnBadge.textContent = 'DISCONNECTED';
+      DOM.mt5ConnBadge.style.background = 'var(--amber-dim)';
+      DOM.mt5ConnBadge.style.color = 'var(--amber)';
+    }
   }
 
   // ---- MetaTrader 5 Passive Observer ----
@@ -475,10 +548,34 @@
         const data = await res.json();
         const connected = data.is_connected === true || data.connected === true || data.status === 'CONNECTED';
         const login = data.login || data.account_login;
+        const masked = data.masked_login || maskAccountLogin(login);
+        const server = data.server || '--';
+        const terminalPath = data.terminal_path || '--';
+
         DOM.mt5Dot.style.background = connected ? 'var(--green)' : 'var(--amber)';
         DOM.mt5Status.textContent = connected
           ? `MT5: Observed (${login ? '#' + login : 'Live'})`
           : 'MT5: Read-Only Observer';
+
+        if (DOM.mt5ConnBadge) {
+          DOM.mt5ConnBadge.textContent = connected ? 'CONNECTED' : 'DISCONNECTED';
+          DOM.mt5ConnBadge.style.background = connected ? 'var(--green-dim)' : 'var(--amber-dim)';
+          DOM.mt5ConnBadge.style.color = connected ? 'var(--green)' : 'var(--amber)';
+        }
+        if (DOM.mt5DiagTerminalPath) DOM.mt5DiagTerminalPath.textContent = terminalPath;
+        if (DOM.mt5DiagServer) DOM.mt5DiagServer.textContent = server;
+        if (DOM.mt5DiagLogin) DOM.mt5DiagLogin.textContent = masked;
+
+        if (DOM.mt5TerminalPathInput && !DOM.mt5TerminalPathInput.value && data.terminal_path) {
+          DOM.mt5TerminalPathInput.value = data.terminal_path;
+        }
+        if (DOM.mt5ServerInput && !DOM.mt5ServerInput.value && data.server) {
+          DOM.mt5ServerInput.value = data.server;
+        }
+        if (DOM.mt5LoginInput && !DOM.mt5LoginInput.value && data.login) {
+          DOM.mt5LoginInput.value = data.login;
+        }
+
         if (!connected) {
           showMT5Unavailable();
         }
@@ -509,19 +606,29 @@
         const freeStr = (acc && acc.margin_free != null)
           ? `$${Number(acc.margin_free).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
           : 'Unavailable';
+        const marginStr = (acc && acc.margin != null)
+          ? `$${Number(acc.margin).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+          : 'Unavailable';
+        const marginLevelStr = (acc && acc.margin_level != null)
+          ? `${Number(acc.margin_level).toFixed(1)}%`
+          : 'Unavailable';
 
         if (DOM.mt5Balance) DOM.mt5Balance.textContent = balStr;
         if (DOM.dashBalance) DOM.dashBalance.textContent = balStr;
         if (DOM.mt5Equity) DOM.mt5Equity.textContent = eqStr;
         if (DOM.dashEquity) DOM.dashEquity.textContent = eqStr;
+        if (DOM.mt5Margin) DOM.mt5Margin.textContent = marginStr;
         if (DOM.mt5FreeMargin) DOM.mt5FreeMargin.textContent = freeStr;
         if (DOM.dashFreeMargin) DOM.dashFreeMargin.textContent = freeStr;
+        if (DOM.mt5MarginLevel) DOM.mt5MarginLevel.textContent = marginLevelStr;
 
-        if (acc && acc.currency && DOM.dashCurrency) {
-          DOM.dashCurrency.textContent = `Currency: ${acc.currency}`;
+        if (acc && acc.currency) {
+          if (DOM.mt5CurrencyVal) DOM.mt5CurrencyVal.textContent = acc.currency;
+          if (DOM.dashCurrency) DOM.dashCurrency.textContent = `Currency: ${acc.currency}`;
         }
-        if (acc && acc.leverage && DOM.dashLeverage) {
-          DOM.dashLeverage.textContent = `Leverage 1:${acc.leverage}`;
+        if (acc && acc.leverage) {
+          if (DOM.mt5Leverage) DOM.mt5Leverage.textContent = `1:${acc.leverage}`;
+          if (DOM.dashLeverage) DOM.dashLeverage.textContent = `Leverage 1:${acc.leverage}`;
         }
 
         if (acc && acc.profit != null) {
@@ -577,14 +684,15 @@
           <thead>
             <tr>
               <th>Ticket</th>
+              <th>Time</th>
               <th>Symbol</th>
               <th>Type</th>
               <th>Volume</th>
               <th>Open Price</th>
-              <th>Stop Loss</th>
-              <th>Take Profit</th>
               <th>Current Price</th>
-              <th>Profit</th>
+              <th>SL</th>
+              <th>TP</th>
+              <th>Floating P/L</th>
             </tr>
           </thead>
           <tbody>
@@ -595,17 +703,20 @@
               const isBuy = typeStr === 'LONG' || typeStr === 'BUY' || p.type === 0;
               const dirLabel = isBuy ? 'BUY' : 'SELL';
               const badgeClass = isBuy ? 'bullish' : 'bearish';
+              const timeStr = p.time ? new Date(p.time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '--';
+              const pipsStr = p.unrealized_pips != null ? ` (${p.unrealized_pips >= 0 ? '+' : ''}${p.unrealized_pips} pips)` : '';
               return `
                 <tr>
                   <td style="font-family:var(--font-mono); font-size:0.8rem;">#${escapeText(p.ticket)}</td>
+                  <td style="font-size:0.75rem; color:var(--text-muted);">${escapeText(timeStr)}</td>
                   <td style="font-weight:700; color:var(--cyan);">${escapeText(p.symbol)}</td>
                   <td><span class="signal-badge ${badgeClass}" style="font-size:0.7rem; padding:2px 8px;">${dirLabel}</span></td>
                   <td style="font-family:var(--font-mono);">${Number(p.volume).toFixed(2)}</td>
                   <td style="font-family:var(--font-mono);">${formatForexPrice(p.price_open, p.symbol, p.digits)}</td>
+                  <td style="font-family:var(--font-mono); font-weight:600;">${formatForexPrice(p.price_current, p.symbol, p.digits)}</td>
                   <td style="font-family:var(--font-mono);">${formatForexPrice(p.sl, p.symbol, p.digits)}</td>
                   <td style="font-family:var(--font-mono);">${formatForexPrice(p.tp, p.symbol, p.digits)}</td>
-                  <td style="font-family:var(--font-mono);">${formatForexPrice(p.price_current, p.symbol, p.digits)}</td>
-                  <td style="font-family:var(--font-mono); font-weight:700; color:${pnlColor};">${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}</td>
+                  <td style="font-family:var(--font-mono); font-weight:700; color:${pnlColor};">${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}${pipsStr}</td>
                 </tr>
               `;
             }).join('')}
@@ -613,6 +724,7 @@
         </table>
       `;
     } catch (_) {}
+  }
   }
 
   // ---- Journal & Learning Data ----
@@ -1545,7 +1657,7 @@
     }
   };
 
-  // ---- MT5 Orders & Deals ----
+  // ---- MT5 Orders, Deals & Observer Actions (Phase 29) ----
   async function loadMT5Orders() {
     if (!DOM.mt5OrdersContainer) return;
     try {
@@ -1574,6 +1686,7 @@
               <th>Price</th>
               <th>SL</th>
               <th>TP</th>
+              <th>State</th>
             </tr>
           </thead>
           <tbody>
@@ -1581,11 +1694,12 @@
               <tr>
                 <td style="font-family:var(--font-mono); font-size:0.8rem;">#${escapeText(o.ticket)}</td>
                 <td style="font-weight:700; color:var(--cyan);">${escapeText(o.symbol)}</td>
-                <td>${escapeText(o.type_str || o.type)}</td>
+                <td><span class="badge-readonly" style="font-size:0.7rem;">${escapeText(o.type_str || o.type)}</span></td>
                 <td style="font-family:var(--font-mono);">${Number(o.volume_initial || o.volume_current || 0).toFixed(2)}</td>
-                <td style="font-family:var(--font-mono);">${formatForexPrice(o.price_open, o.symbol)}</td>
+                <td style="font-family:var(--font-mono); font-weight:600;">${formatForexPrice(o.price_open, o.symbol)}</td>
                 <td style="font-family:var(--font-mono);">${formatForexPrice(o.sl, o.symbol)}</td>
                 <td style="font-family:var(--font-mono);">${formatForexPrice(o.tp, o.symbol)}</td>
+                <td style="font-size:0.75rem; color:var(--text-muted);">${escapeText(o.state || 'PLACED')}</td>
               </tr>
             `).join('')}
           </tbody>
@@ -1620,20 +1734,23 @@
               <th>Type</th>
               <th>Volume</th>
               <th>Price</th>
+              <th>Comm / Swap</th>
               <th>Profit</th>
             </tr>
           </thead>
           <tbody>
-            ${deals.slice(0, 10).map(d => {
+            ${deals.slice(0, 15).map(d => {
               const pnl = Number(d.profit || 0);
               const pnlColor = pnl >= 0 ? 'var(--green)' : 'var(--red)';
+              const comm = Number(d.commission || 0) + Number(d.swap || 0);
               return `
                 <tr>
                   <td style="font-family:var(--font-mono); font-size:0.8rem;">#${escapeText(d.deal_id || d.ticket)}</td>
                   <td style="font-weight:700; color:var(--cyan);">${escapeText(d.symbol)}</td>
-                  <td>${escapeText(d.type_str || d.type)}</td>
+                  <td>${escapeText(d.type_str || d.type || (d.entry ? 'DEAL ' + d.entry : 'DEAL'))}</td>
                   <td style="font-family:var(--font-mono);">${Number(d.volume || 0).toFixed(2)}</td>
-                  <td style="font-family:var(--font-mono);">${formatForexPrice(d.price, d.symbol)}</td>
+                  <td style="font-family:var(--font-mono); font-weight:600;">${formatForexPrice(d.price, d.symbol)}</td>
+                  <td style="font-family:var(--font-mono); font-size:0.75rem; color:var(--text-muted);">${comm !== 0 ? '$' + comm.toFixed(2) : '$0.00'}</td>
                   <td style="font-family:var(--font-mono); font-weight:700; color:${pnlColor};">${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}</td>
                 </tr>
               `;
@@ -1642,6 +1759,200 @@
         </table>
       `;
     } catch (_) {}
+  }
+
+  async function connectMT5() {
+    const path = DOM.mt5TerminalPathInput ? DOM.mt5TerminalPathInput.value.trim() : '';
+    const server = DOM.mt5ServerInput ? DOM.mt5ServerInput.value.trim() : '';
+    const loginRaw = DOM.mt5LoginInput ? DOM.mt5LoginInput.value.trim() : '';
+    const login = loginRaw ? parseInt(loginRaw, 10) : null;
+
+    showToast('Connecting to MetaTrader 5 observer...', 'info');
+    if (DOM.btnMT5Connect) DOM.btnMT5Connect.disabled = true;
+
+    const payload = {};
+    if (path) payload.path = path;
+    if (server) payload.server = server;
+    if (login) payload.login = login;
+
+    const headers = { 'Content-Type': 'application/json' };
+    const savedApiKey = inMemoryApiKey || (DOM.apiKey ? DOM.apiKey.value.trim() : '');
+    if (savedApiKey) headers['X-API-Key'] = savedApiKey;
+
+    try {
+      const res = await fetch('/api/forex/mt5/connect', {
+        method: 'POST',
+        headers: headers,
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.connected) {
+        showToast('Connected to MT5 observer in Read-Only mode', 'success');
+        await loadMT5Status();
+        await loadMT5Account();
+        await loadMT5Positions();
+        await loadMT5Orders();
+        await loadMT5Deals();
+      } else {
+        showToast(data.error || 'Failed to connect to MT5 terminal', 'error');
+        await loadMT5Status();
+      }
+    } catch (err) {
+      showToast('Error connecting to MT5: ' + err.message, 'error');
+      await loadMT5Status();
+    } finally {
+      if (DOM.btnMT5Connect) DOM.btnMT5Connect.disabled = false;
+    }
+  }
+
+  async function disconnectMT5() {
+    showToast('Disconnecting MT5 observer...', 'info');
+    if (DOM.btnMT5Disconnect) DOM.btnMT5Disconnect.disabled = true;
+
+    const headers = { 'Content-Type': 'application/json' };
+    const savedApiKey = inMemoryApiKey || (DOM.apiKey ? DOM.apiKey.value.trim() : '');
+    if (savedApiKey) headers['X-API-Key'] = savedApiKey;
+
+    try {
+      const res = await fetch('/api/forex/mt5/disconnect', {
+        method: 'POST',
+        headers: headers,
+        body: JSON.stringify({}),
+      });
+      if (res.ok) {
+        showToast('MT5 observer disconnected', 'success');
+      } else {
+        const data = await res.json().catch(() => ({}));
+        showToast(data.detail || 'MT5 disconnect returned an error', 'warning');
+      }
+      await loadMT5Status();
+      await loadMT5Account();
+      await loadMT5Positions();
+      await loadMT5Orders();
+      await loadMT5Deals();
+    } catch (err) {
+      showToast('Error disconnecting: ' + err.message, 'error');
+      await loadMT5Status();
+    } finally {
+      if (DOM.btnMT5Disconnect) DOM.btnMT5Disconnect.disabled = false;
+    }
+  }
+
+  async function lookupMT5Symbol(symbolOverride) {
+    const rawSym = (symbolOverride || (DOM.mt5SymbolInput ? DOM.mt5SymbolInput.value : '')).trim().toUpperCase();
+    if (!rawSym) {
+      showToast('Please enter a symbol (e.g. EURUSD)', 'error');
+      return;
+    }
+    if (DOM.mt5SymbolInput) DOM.mt5SymbolInput.value = rawSym;
+
+    const symbolChips = $$('.symbol-chip');
+    symbolChips.forEach(chip => {
+      if (chip.dataset.symbol === rawSym) {
+        chip.classList.add('active');
+      } else {
+        chip.classList.remove('active');
+      }
+    });
+
+    if (DOM.mt5SymbolResultContainer) {
+      DOM.mt5SymbolResultContainer.innerHTML = `
+        <div class="empty-state" style="padding: 1.5rem;">
+          <div class="empty-state-icon">⏳</div>
+          <div class="empty-state-title">Retrieving ${escapeText(rawSym)} Quote...</div>
+          <div class="empty-state-desc">Querying MetaTrader 5 contract specifications and live market tick...</div>
+        </div>
+      `;
+    }
+
+    try {
+      const res = await fetch(`/api/forex/mt5/symbol/${encodeURIComponent(rawSym)}`);
+      if (res.ok) {
+        const data = await res.json();
+        renderMT5SymbolQuote(data.symbol_info || data, data.tick);
+      } else {
+        const tickRes = await fetch(`/api/forex/mt5/tick/${encodeURIComponent(rawSym)}`);
+        if (tickRes.ok) {
+          const tickData = await tickRes.json();
+          renderMT5SymbolQuote({ name: rawSym, canonical_symbol: rawSym }, tickData.tick || tickData);
+        } else {
+          const errData = await res.json().catch(() => ({}));
+          DOM.mt5SymbolResultContainer.innerHTML = `
+            <div class="empty-state" style="padding: 1.5rem;">
+              <div class="empty-state-icon">⚠️</div>
+              <div class="empty-state-title">Symbol Unavailable</div>
+              <div class="empty-state-desc">${escapeText(errData.detail || `Symbol "${rawSym}" not found on active MT5 broker market watch.`)}</div>
+            </div>
+          `;
+        }
+      }
+    } catch (err) {
+      DOM.mt5SymbolResultContainer.innerHTML = `
+        <div class="empty-state" style="padding: 1.5rem;">
+          <div class="empty-state-icon">⚠️</div>
+          <div class="empty-state-title">Lookup Failed</div>
+          <div class="empty-state-desc">${escapeText(err.message || 'Unable to connect to MT5 server.')}</div>
+        </div>
+      `;
+    }
+  }
+
+  function renderMT5SymbolQuote(info, tick) {
+    if (!DOM.mt5SymbolResultContainer) return;
+    const canon = info.canonical_symbol || info.name || '--';
+    const brokerSym = info.name || canon;
+    const digits = info.digits != null ? info.digits : 5;
+    const point = info.point != null ? info.point : 0.00001;
+
+    const bidVal = tick && tick.bid != null ? tick.bid : info.bid;
+    const askVal = tick && tick.ask != null ? tick.ask : info.ask;
+    const bidStr = (bidVal != null && bidVal > 0) ? formatForexPrice(bidVal, brokerSym, digits) : '--';
+    const askStr = (askVal != null && askVal > 0) ? formatForexPrice(askVal, brokerSym, digits) : '--';
+
+    const spreadPts = tick && tick.spread_points != null ? tick.spread_points : (info.spread_points != null ? info.spread_points : '--');
+    const spreadPips = tick && tick.spread_pips != null ? tick.spread_pips : (info.spread_pips != null ? info.spread_pips : '--');
+    const spreadStr = (spreadPts !== '--') ? `${spreadPts} pts (${spreadPips} pips)` : '--';
+
+    const timeStr = tick && tick.time ? new Date(tick.time).toISOString().replace('T', ' ').substring(0, 19) + ' UTC' : 'Live Quote';
+
+    DOM.mt5SymbolResultContainer.innerHTML = `
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem; flex-wrap: wrap; gap: 0.5rem;">
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <span style="font-size: 1.15rem; font-weight: 800; color: var(--cyan); font-family: var(--font-mono);">${escapeText(brokerSym)}</span>
+          <span class="badge-readonly" style="font-size: 0.7rem;">ISO: ${escapeText(canon)}</span>
+          ${info.path ? `<span style="font-size: 0.75rem; color: var(--text-muted); font-family: var(--font-mono);">${escapeText(info.path)}</span>` : ''}
+        </div>
+        <div style="font-size: 0.75rem; color: var(--text-muted); font-family: var(--font-mono);">
+          Quote Time: <span style="color: var(--text-secondary);">${escapeText(timeStr)}</span>
+        </div>
+      </div>
+      <div class="mt5-quote-grid">
+        <div class="mt5-quote-card">
+          <span class="mt5-quote-label">Bid Price</span>
+          <span class="mt5-quote-value" style="color: var(--green);">${escapeText(bidStr)}</span>
+        </div>
+        <div class="mt5-quote-card">
+          <span class="mt5-quote-label">Ask Price</span>
+          <span class="mt5-quote-value" style="color: var(--cyan);">${escapeText(askStr)}</span>
+        </div>
+        <div class="mt5-quote-card">
+          <span class="mt5-quote-label">Broker Spread</span>
+          <span class="mt5-quote-value" style="color: var(--amber); font-size: 1rem;">${escapeText(spreadStr)}</span>
+        </div>
+        <div class="mt5-quote-card">
+          <span class="mt5-quote-label">Precision &amp; Point</span>
+          <span class="mt5-quote-value" style="font-size: 0.95rem;">${digits} digits / ${point}</span>
+        </div>
+        <div class="mt5-quote-card">
+          <span class="mt5-quote-label">Contract Size</span>
+          <span class="mt5-quote-value" style="font-size: 0.95rem;">${Number(info.contract_size || 100000).toLocaleString()} units</span>
+        </div>
+        <div class="mt5-quote-card">
+          <span class="mt5-quote-label">Volume Constraints</span>
+          <span class="mt5-quote-value" style="font-size: 0.85rem; color: var(--text-secondary);">${Number(info.volume_min || 0.01).toFixed(2)} min | ${Number(info.volume_step || 0.01).toFixed(2)} step | ${Number(info.volume_max || 100).toFixed(0)} max</span>
+        </div>
+      </div>
+    `;
   }
 
   // ---- Performance Breakdown View ----

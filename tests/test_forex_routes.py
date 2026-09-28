@@ -667,6 +667,7 @@ class TestMT5Routes:
         assert data_disc["status"] == "DISCONNECTED"
         assert data_disc["is_connected"] is False
         assert data_disc["connected"] is False
+        assert data_disc["masked_login"] == "Not Set"
 
         # 2. Connected
         _, _, mock_observer = isolated_forex_env
@@ -684,6 +685,7 @@ class TestMT5Routes:
         assert data_conn["connected"] is True
         assert data_conn["login"] == 654321
         assert data_conn["account_login"] == 654321
+        assert data_conn["masked_login"] == "654***"
         assert data_conn["server"] == "Demo-Server"
 
     def test_mt5_account_contract_canonical_and_flat(self, client, isolated_forex_env):
@@ -2028,3 +2030,80 @@ class TestDashboardOverview:
         assert data["trading"]["today_result"]["trade_count"] == 1
         assert data["trading"]["today_result"]["net_profit"] == 250.0
         assert data["trading"]["today_result"]["total_r"] == 2.5
+
+    def test_mt5_symbol_info_with_tick_enrichment(self, client, isolated_forex_env):
+        """Verify get_mt5_symbol_info returns symbol specifications and enriches with live tick."""
+        _, _, mock_observer = isolated_forex_env
+        mock_sym = MT5SymbolInfo(
+            name="EURUSD",
+            canonical_symbol="EURUSD",
+            path="Forex/Majors/EURUSD",
+            digits=5,
+            point=0.00001,
+            spread_points=12,
+            spread_pips=1.2,
+            bid=1.08500,
+            ask=1.08512,
+            volume_min=0.01,
+            volume_max=100.0,
+            volume_step=0.01,
+            contract_size=100000.0,
+        )
+        mock_tick = MT5Tick(
+            symbol="EURUSD",
+            time=datetime.now(timezone.utc),
+            bid=1.08500,
+            ask=1.08512,
+            spread_points=12,
+            spread_pips=1.2,
+        )
+        mock_observer.get_symbol_info.return_value = mock_sym
+        mock_observer.get_current_tick.return_value = mock_tick
+
+        res = client.get("/api/forex/mt5/symbol/EURUSD")
+        assert res.status_code == 200
+        body = res.json()
+        assert "symbol_info" in body
+        assert body["symbol_info"]["name"] == "EURUSD"
+        assert body["symbol_info"]["digits"] == 5
+        assert body["symbol_info"]["spread_pips"] == 1.2
+        assert "tick" in body
+        assert body["tick"]["bid"] == 1.08500
+        assert body["tick"]["ask"] == 1.08512
+
+    def test_mt5_observer_page_connect_disconnect_flow(self, client, isolated_forex_env):
+        """Verify MT5 connect and disconnect observer endpoints and ensure no password leaks."""
+        _, _, mock_observer = isolated_forex_env
+        mock_conn = mock_observer.connection
+        mock_conn.connect.return_value = True
+        mock_conn.get_status.return_value = MT5ConnectionStatus.CONNECTED
+        mock_conn.login = 12345678
+        mock_conn.server = "MetaQuotes-Demo"
+
+        # 1. Connect request (without password or with masked password)
+        res_connect = client.post(
+            "/api/forex/mt5/connect",
+            json={"login": 12345678, "server": "MetaQuotes-Demo", "path": "terminal64.exe"},
+        )
+        assert res_connect.status_code == 200
+        conn_data = res_connect.json()
+        assert conn_data["connected"] is True
+        assert conn_data["status"] == "CONNECTED"
+        assert "password" not in conn_data
+
+        # 2. Check status returns masked login
+        mock_conn.is_connected.return_value = True
+        res_status = client.get("/api/forex/mt5/status")
+        assert res_status.status_code == 200
+        status_data = res_status.json()
+        assert status_data["is_connected"] is True
+        assert status_data["masked_login"] == "123*****"
+        assert "password" not in status_data
+
+        # 3. Disconnect request
+        res_disconnect = client.post("/api/forex/mt5/disconnect")
+        assert res_disconnect.status_code == 200
+        disc_data = res_disconnect.json()
+        assert disc_data["status"] == "DISCONNECTED"
+        assert disc_data["is_connected"] is False
+        mock_conn.disconnect.assert_called_once()
