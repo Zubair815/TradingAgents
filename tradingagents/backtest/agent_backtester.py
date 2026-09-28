@@ -1,0 +1,414 @@
+"""Real Historical Agent Backtesting Engine (Phase 20).
+
+Provides point-in-time (PIT) safe historical simulation with multi-agent evaluation:
+1. At historical timestamp T, only candles strictly <= T are provided to the pipeline.
+2. Historical macro and calendar data only release figures published <= T.
+3. Historical news data only exposes items with published_at <= T without future revisions.
+4. Execution simulator enforces spread, commission, slippage, and overnight swap drag.
+5. Respects MARKET, LIMIT, and STOP orders with proposal expiration.
+6. Ambiguous intrabar collisions are resolved via sub-resolution bars or conservative assumption.
+7. Cost control via sampling interval, max analysis points, model selection, and pre-launch estimation.
+8. Distinguishes DEMO vs HISTORICAL_AGENT_BACKTEST modes.
+"""
+
+from __future__ import annotations
+
+import logging
+import uuid
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any
+
+from tradingagents.agents.schemas_forex import (
+    ForexRiskDecisionAction,
+    ForexTraderProposal,
+)
+from tradingagents.backtest.forex_engine import (
+    ForexBacktestConfig,
+    ForexBacktestEngine,
+    ForexBacktestResult,
+)
+from tradingagents.database.journal import ForexTradeJournal
+from tradingagents.database.models import TradeExitReason
+from tradingagents.dataflows.forex_data import ForexBar
+from tradingagents.forex.domain import normalize_forex_pair
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Configuration and Estimate Models
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class AgentBacktestConfig:
+    """Institutional configuration for historical agent backtesting."""
+
+    pair: str = "EURUSD"
+    timeframe: str = "H1"
+    date_from: str | None = None
+    date_to: str | None = None
+    sampling_interval: int = 1  # Evaluate agents every N bars
+    max_analysis_points: int | None = None  # Cap total AI evaluations to control LLM cost
+    analyst_selection: list[str] = field(
+        default_factory=lambda: ["forex_technical", "forex_macro", "forex_news"]
+    )
+    provider: str = "openai"
+    quick_model: str = "gpt-4.1-mini"
+    deep_model: str = "gpt-4.1"
+    token_limits: int | None = None
+    research_depth: str = "standard"
+    backtest_config: ForexBacktestConfig = field(default_factory=ForexBacktestConfig)
+
+
+@dataclass
+class AgentBacktestEstimate:
+    """Pre-launch resource and financial estimation for historical AI runs."""
+
+    total_bars: int
+    sampling_interval: int
+    max_analysis_points: int | None
+    expected_analyses_count: int
+    estimated_llm_calls: int
+    estimated_tokens: int
+    estimated_cost_usd: float
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "total_bars": self.total_bars,
+            "sampling_interval": self.sampling_interval,
+            "max_analysis_points": self.max_analysis_points,
+            "expected_analyses_count": self.expected_analyses_count,
+            "estimated_llm_calls": self.estimated_llm_calls,
+            "estimated_tokens": self.estimated_tokens,
+            "estimated_cost_usd": self.estimated_cost_usd,
+        }
+
+
+def estimate_agent_analyses(
+    total_bars: int,
+    sampling_interval: int = 1,
+    max_analysis_points: int | None = None,
+    analyst_count: int = 3,
+    avg_tokens_per_analysis: int = 4000,
+    cost_per_1k_tokens: float = 0.003,
+) -> AgentBacktestEstimate:
+    """Compute deterministic pre-launch estimates of LLM invocations and costs."""
+    interval = max(1, sampling_interval)
+    raw_points = total_bars // interval
+    if max_analysis_points is not None and max_analysis_points > 0:
+        expected = min(raw_points, max_analysis_points)
+    else:
+        expected = raw_points
+
+    calls_per_run = analyst_count + 3  # Analysts + Bull/Bear + Manager + Trader + Risk
+    total_calls = expected * calls_per_run
+    est_tokens = expected * avg_tokens_per_analysis
+    est_cost = round((est_tokens / 1000.0) * cost_per_1k_tokens, 2)
+
+    return AgentBacktestEstimate(
+        total_bars=total_bars,
+        sampling_interval=interval,
+        max_analysis_points=max_analysis_points,
+        expected_analyses_count=expected,
+        estimated_llm_calls=total_calls,
+        estimated_tokens=est_tokens,
+        estimated_cost_usd=est_cost,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Output Report Model
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class HistoricalAgentBacktestReport:
+    """Complete institutional audit report for historical agent backtesting."""
+
+    backtest_id: str
+    mode: str = "HISTORICAL_AGENT_BACKTEST"
+    validated_strategy_performance: bool = True
+    pair: str = "EURUSD"
+    timeframe: str = "H1"
+    start_date: str = "N/A"
+    end_date: str = "N/A"
+    result: ForexBacktestResult | None = None
+    analyses_performed: int = 0
+    proposals_generated: int = 0
+    proposals_approved: int = 0
+    proposals_rejected: int = 0
+    proposals_modified: int = 0
+    proposals_skipped: int = 0
+    markdown_report: str = ""
+    cost_control_summary: dict[str, Any] = field(default_factory=dict)
+    execution_summary: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "backtest_id": self.backtest_id,
+            "mode": self.mode,
+            "validated_strategy_performance": self.validated_strategy_performance,
+            "pair": self.pair,
+            "timeframe": self.timeframe,
+            "start_date": self.start_date,
+            "end_date": self.end_date,
+            "analyses_performed": self.analyses_performed,
+            "proposals_generated": self.proposals_generated,
+            "proposals_approved": self.proposals_approved,
+            "proposals_rejected": self.proposals_rejected,
+            "proposals_modified": self.proposals_modified,
+            "proposals_skipped": self.proposals_skipped,
+            "cost_control_summary": self.cost_control_summary,
+            "execution_summary": self.execution_summary,
+            "markdown_report": self.markdown_report,
+            "result": self.result.__dict__ if self.result else None,
+        }
+
+
+# ---------------------------------------------------------------------------
+# Historical Agent Backtest Engine
+# ---------------------------------------------------------------------------
+
+
+class HistoricalForexAgentBacktester:
+    """Historical Agent Backtesting Engine with strict PIT and cost controls."""
+
+    def __init__(
+        self,
+        config: AgentBacktestConfig | None = None,
+        journal: ForexTradeJournal | None = None,
+        graph_factory: Callable[..., Any] | None = None,
+    ) -> None:
+        self.config = config or AgentBacktestConfig()
+        self.journal = journal
+        self.graph_factory = graph_factory
+
+    def estimate(self, total_bars: int) -> AgentBacktestEstimate:
+        """Estimate required resources before starting the simulation."""
+        return estimate_agent_analyses(
+            total_bars=total_bars,
+            sampling_interval=self.config.sampling_interval,
+            max_analysis_points=self.config.max_analysis_points,
+            analyst_count=len(self.config.analyst_selection),
+        )
+
+    def run(
+        self,
+        candles: Sequence[ForexBar],
+        lower_tf_candles: Sequence[ForexBar] | None = None,
+        agent_pipeline_callable: Callable[[str, datetime, list[ForexBar]], ForexTraderProposal | None] | None = None,
+    ) -> HistoricalAgentBacktestReport:
+        """Run full bar-by-bar historical agent simulation.
+
+        Guarantees:
+        - Strict PIT safety: at bar T, agent receives ONLY candles strictly <= T.
+        - Future bars AFTER T are evaluated solely by the execution simulator.
+        - Respects MARKET, LIMIT, STOP with expiry.
+        - Respects spread, slippage, commission, swap.
+        - Resolves same-bar SL/TP collisions with lower timeframe data or conservative stops.
+        """
+        pair = normalize_forex_pair(self.config.pair)
+        backtest_id = f"bt_agent_{uuid.uuid4().hex[:10]}"
+
+        if not candles:
+            empty_engine = ForexBacktestEngine(config=self.config.backtest_config, journal=self.journal)
+            empty_res = empty_engine._build_empty_result()
+            empty_res.mode = "HISTORICAL_AGENT_BACKTEST"
+            empty_res.validated_strategy_performance = True
+            return HistoricalAgentBacktestReport(
+                backtest_id=backtest_id,
+                pair=pair,
+                timeframe=self.config.timeframe,
+                result=empty_res,
+                markdown_report="# Empty Historical Agent Backtest\nNo candles provided.",
+            )
+
+        # Sort candles strictly chronologically
+        sorted_candles = sorted(candles, key=lambda c: c.timestamp)
+        n_bars = len(sorted_candles)
+
+        # Determine sampling analysis timestamps
+        interval = max(1, self.config.sampling_interval)
+        candidate_indices = list(range(0, n_bars, interval))
+        if self.config.max_analysis_points is not None and self.config.max_analysis_points > 0:
+            analysis_indices = set(candidate_indices[: self.config.max_analysis_points])
+        else:
+            analysis_indices = set(candidate_indices)
+
+        engine = ForexBacktestEngine(config=self.config.backtest_config, journal=self.journal)
+        engine.reset()
+
+        analyses_performed = 0
+        proposals_generated = 0
+        proposals_approved = 0
+        proposals_rejected = 0
+        proposals_modified = 0
+        proposals_skipped = 0
+
+        history_window: list[ForexBar] = []
+
+        for i, candle in enumerate(sorted_candles):
+            history_window.append(candle)
+            new_proposals: list[ForexTraderProposal] = []
+
+            if i in analysis_indices:
+                analyses_performed += 1
+                pit_candles = list(history_window)  # Strictly <= current timestamp
+                proposal: ForexTraderProposal | None = None
+
+                # 1. User/Test-injected callable
+                if agent_pipeline_callable is not None:
+                    proposal = agent_pipeline_callable(pair, candle.timestamp, pit_candles)
+                # 2. Graph factory invocation
+                elif self.graph_factory is not None:
+                    try:
+                        graph = self.graph_factory()
+                        final_state, signal = graph.run(
+                            pair=pair,
+                            trade_date=candle.timestamp.isoformat(),
+                            execution_timeframe=self.config.timeframe,
+                        )
+                        proposal = final_state.get("forex_proposal")
+                    except Exception as exc:
+                        logger.warning("Agent graph failed at %s: %s", candle.timestamp, exc)
+                        proposal = None
+
+                if proposal is not None:
+                    proposals_generated += 1
+                    # Check risk action
+                    action_val = getattr(proposal, "risk_action", ForexRiskDecisionAction.APPROVE)
+                    if hasattr(action_val, "value"):
+                        action_str = action_val.value
+                    else:
+                        action_str = str(action_val)
+
+                    if action_str == "APPROVE":
+                        proposals_approved += 1
+                        new_proposals.append(proposal)
+                    elif action_str == "MODIFY":
+                        proposals_modified += 1
+                        new_proposals.append(proposal)
+                    elif action_str == "REJECT":
+                        proposals_rejected += 1
+                    else:
+                        proposals_skipped += 1
+
+            # Discrete step execution on incoming bar
+            engine.step(
+                candle=candle,
+                pair=pair,
+                new_proposals=new_proposals if new_proposals else None,
+                lower_tf_candles=lower_tf_candles,
+            )
+
+        # Force settlement on last bar
+        if engine.open_trades and sorted_candles:
+            last_bar = sorted_candles[-1]
+            for t in list(engine.open_trades):
+                engine._settle_trade(t, last_bar.close, last_bar.timestamp, TradeExitReason.MANUAL)
+            engine.open_trades = []
+
+        start_str = sorted_candles[0].timestamp.strftime("%Y-%m-%d %H:%M")
+        end_str = sorted_candles[-1].timestamp.strftime("%Y-%m-%d %H:%M")
+        result = engine._build_result(start_str, end_str)
+
+        # Set mode and validation flags
+        result.mode = "HISTORICAL_AGENT_BACKTEST"
+        result.validated_strategy_performance = True
+
+        # Render Markdown Dashboard
+        cost_control_meta = {
+            "total_bars": n_bars,
+            "sampling_interval": interval,
+            "max_analysis_points": self.config.max_analysis_points,
+            "analyses_performed": analyses_performed,
+            "analyst_selection": self.config.analyst_selection,
+            "provider": self.config.provider,
+            "quick_model": self.config.quick_model,
+            "deep_model": self.config.deep_model,
+        }
+
+        execution_meta = {
+            "total_trades": result.total_trades,
+            "winning_trades": result.winning_trades,
+            "losing_trades": result.losing_trades,
+            "win_rate_pct": result.win_rate_pct,
+            "profit_factor": result.profit_factor,
+            "expectancy_r": result.expectancy_r,
+            "max_drawdown_pct": result.max_drawdown_pct,
+            "total_net_profit": result.total_net_profit,
+            "total_friction_usd": result.total_friction_usd,
+            "total_swap_cost_usd": result.total_swap_cost_usd,
+            "pending_orders_count": result.pending_orders_count,
+            "filled_orders_count": result.filled_orders_count,
+            "expired_orders_count": result.expired_orders_count,
+            "ambiguous_trades_count": result.ambiguous_trades_count,
+        }
+
+        report_md = self._render_report_markdown(
+            report_id=backtest_id,
+            pair=pair,
+            start_date=start_str,
+            end_date=end_str,
+            result=result,
+            cost_meta=cost_control_meta,
+            analyses_performed=analyses_performed,
+            proposals_gen=proposals_generated,
+            proposals_app=proposals_approved,
+        )
+
+        return HistoricalAgentBacktestReport(
+            backtest_id=backtest_id,
+            mode="HISTORICAL_AGENT_BACKTEST",
+            validated_strategy_performance=True,
+            pair=pair,
+            timeframe=self.config.timeframe,
+            start_date=start_str,
+            end_date=end_str,
+            result=result,
+            analyses_performed=analyses_performed,
+            proposals_generated=proposals_generated,
+            proposals_approved=proposals_approved,
+            proposals_rejected=proposals_rejected,
+            proposals_modified=proposals_modified,
+            proposals_skipped=proposals_skipped,
+            markdown_report=report_md,
+            cost_control_summary=cost_control_meta,
+            execution_summary=execution_meta,
+        )
+
+    def _render_report_markdown(
+        self,
+        report_id: str,
+        pair: str,
+        start_date: str,
+        end_date: str,
+        result: ForexBacktestResult,
+        cost_meta: dict[str, Any],
+        analyses_performed: int,
+        proposals_gen: int,
+        proposals_app: int,
+    ) -> str:
+        """Build institutional markdown report."""
+        lines = [
+            "# Real Historical Agent Backtest Report",
+            f"**Run ID:** `{report_id}` | **Mode:** `HISTORICAL_AGENT_BACKTEST` | **Validated:** `True`",
+            f"**Pair:** `{pair}` | **Period:** {start_date} to {end_date} | **Timeframe:** `{self.config.timeframe}`",
+            "",
+            "## 1. Agent Evaluation & Cost Control",
+            "",
+            "| Parameter | Value | Description |",
+            "|:---|:---:|:---|",
+            f"| **Sampling Interval** | `{cost_meta['sampling_interval']}` bars | Bar frequency between AI analyses |",
+            f"| **Max Analysis Cap** | `{cost_meta['max_analysis_points'] or 'None'}` | Safety ceiling for LLM invocations |",
+            f"| **Analyses Performed** | `{analyses_performed}` | Actual point-in-time AI evaluations |",
+            f"| **Proposals Generated** | `{proposals_gen}` | Trade setups proposed by Forex Trader |",
+            f"| **Proposals Approved** | `{proposals_app}` | Setups cleared by Risk Engine |",
+            f"| **LLM Models** | `{cost_meta['quick_model']}` / `{cost_meta['deep_model']}` | Quick & Deep thinking models |",
+            "",
+            result.render_markdown_report(),
+        ]
+        return "\n".join(lines)

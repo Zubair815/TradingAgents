@@ -17,7 +17,7 @@ import math
 import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 import numpy as np
@@ -25,6 +25,7 @@ import numpy as np
 from tradingagents.agents.schemas_forex import (
     ForexAction,
     ForexTraderProposal,
+    OrderType,
 )
 from tradingagents.database.journal import ForexTradeJournal
 from tradingagents.database.models import TradeExitReason, TradeStatus
@@ -33,6 +34,7 @@ from tradingagents.forex.pips import (
     pip_size_for,
     pip_value_in_account_currency,
 )
+from tradingagents.metrics.mfe_mae import parse_utc_timestamp
 from tradingagents.risk.sizing import calculate_required_margin
 
 logger = logging.getLogger(__name__)
@@ -41,6 +43,24 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Backtest Domain Models
 # ---------------------------------------------------------------------------
+
+
+@dataclass
+class PendingOrder:
+    """Representation of an unfilled pending order (LIMIT/STOP) during backtesting."""
+
+    order_id: str
+    proposal: ForexTraderProposal
+    pair: str
+    action: ForexAction
+    order_type: OrderType
+    entry_price: float
+    stop_loss: float
+    lots: float
+    take_profit: float | None = None
+    created_time: datetime | None = None
+    valid_until: datetime | None = None
+    status: str = "PENDING"  # PENDING, FILLED, EXPIRED, CANCELLED
 
 
 @dataclass
@@ -55,6 +75,7 @@ class ForexBacktestConfig:
     commission_per_lot_usd: float = 5.0
     swap_per_day_usd: float = 0.0
     conservative_stops: bool = True  # If high/low touches both SL and TP in same bar, assume SL hit
+    allow_ambiguous: bool = False
     max_open_trades: int = 5
     max_account_risk_percent: float = 6.0
     execution_timeframe: str = "M15"
@@ -166,17 +187,25 @@ class ForexBacktestResult:
     total_spread_cost_usd: float
     total_slippage_cost_usd: float
     total_commission_cost_usd: float
-    total_friction_usd: float
+    total_swap_cost_usd: float = 0.0
+    total_friction_usd: float = 0.0
 
     # History
     trades: list[BacktestTrade] = field(default_factory=list)
     equity_curve: list[EquityPoint] = field(default_factory=list)
+    pending_orders_count: int = 0
+    filled_orders_count: int = 0
+    expired_orders_count: int = 0
+    ambiguous_trades_count: int = 0
+    mode: str = "DEMO"
+    validated_strategy_performance: bool = False
 
     def render_markdown_report(self) -> str:
         """Render a formatted institutional Markdown performance card."""
         lines: list[str] = [
             "# Institutional Forex Backtest Performance Report",
-            f"*Period: {self.start_date} to {self.end_date} | Currency: {self.config.account_currency} | Leverage: 1:{int(self.config.leverage)}*",
+            f"*Period: {self.start_date} to {self.end_date} | Mode: {self.mode} | Validated: {self.validated_strategy_performance}*",
+            f"*Currency: {self.config.account_currency} | Leverage: 1:{int(self.config.leverage)}*",
             "",
             "## 1. Executive Portfolio Performance",
             "",
@@ -208,6 +237,7 @@ class ForexBacktestResult:
             f"| **Realized Slippage Drag** | `${self.total_slippage_cost_usd:,.2f}` | `{((self.total_slippage_cost_usd / max(1.0, self.gross_profit)) * 100.0):.1f}%` |",
             f"| **Spread Drag Cost** | `${self.total_spread_cost_usd:,.2f}` | `{((self.total_spread_cost_usd / max(1.0, self.gross_profit)) * 100.0):.1f}%` |",
             f"| **Broker Commission Fees** | `${self.total_commission_cost_usd:,.2f}` | `{((self.total_commission_cost_usd / max(1.0, self.gross_profit)) * 100.0):.1f}%` |",
+            f"| **Swap Drag Cost** | `${self.total_swap_cost_usd:,.2f}` | `{((self.total_swap_cost_usd / max(1.0, self.gross_profit)) * 100.0):.1f}%` |",
             f"| **Total Execution Friction** | `${self.total_friction_usd:,.2f}` | `{((self.total_friction_usd / max(1.0, self.gross_profit)) * 100.0):.1f}%` |",
             "",
         ]
@@ -236,11 +266,18 @@ class ForexBacktestEngine:
 
         self.open_trades: list[BacktestTrade] = []
         self.closed_trades: list[BacktestTrade] = []
+        self.pending_orders: list[PendingOrder] = []
+        self.cancelled_orders: list[PendingOrder] = []
         self.equity_curve: list[EquityPoint] = []
 
         self.total_spread_drag: float = 0.0
         self.total_slippage_drag: float = 0.0
         self.total_commission_drag: float = 0.0
+        self.total_swap_drag: float = 0.0
+        self._last_swap_date: date | None = None
+        self.ambiguous_trades_count: int = 0
+        self.filled_orders_count: int = 0
+        self.expired_orders_count: int = 0
 
     def reset(self) -> None:
         """Reset internal state to initial deposit."""
@@ -249,10 +286,17 @@ class ForexBacktestEngine:
         self.peak_equity = self.config.initial_balance
         self.open_trades = []
         self.closed_trades = []
+        self.pending_orders = []
+        self.cancelled_orders = []
         self.equity_curve = []
         self.total_spread_drag = 0.0
         self.total_slippage_drag = 0.0
         self.total_commission_drag = 0.0
+        self.total_swap_drag = 0.0
+        self._last_swap_date = None
+        self.ambiguous_trades_count = 0
+        self.filled_orders_count = 0
+        self.expired_orders_count = 0
 
     def _calculate_used_margin(self) -> float:
         """Calculate total required margin across currently open positions."""
@@ -298,7 +342,12 @@ class ForexBacktestEngine:
             t.mfe_r = round(t.mfe_pips / sl_pips, 2)
             t.mae_r = round(t.mae_pips / sl_pips, 2)
 
-    def _check_and_settle_intrabar_exits(self, candle: ForexBar, pair: str) -> list[BacktestTrade]:
+    def _check_and_settle_intrabar_exits(
+        self,
+        candle: ForexBar,
+        pair: str,
+        lower_tf_candles: Sequence[ForexBar] | None = None,
+    ) -> list[BacktestTrade]:
         """Evaluate whether active positions touched stop loss or take profit during the bar."""
         pip_sz = pip_size_for(pair)
         settled_this_bar: list[BacktestTrade] = []
@@ -312,15 +361,39 @@ class ForexBacktestEngine:
                 continue
 
             exit_price: float | None = None
-            reason: TradeExitReason | None = None
+            reason: TradeExitReason | str | None = None
 
             if t.action == ForexAction.LONG:
                 hit_sl = candle.low <= t.stop_loss
                 hit_tp = t.take_profit is not None and candle.high >= t.take_profit
 
                 if hit_sl and hit_tp:
-                    # Conservative resolution assumes stop loss hit first
-                    if self.config.conservative_stops:
+                    resolved = False
+                    first_hit = None
+                    if lower_tf_candles:
+                        for sub_c in lower_tf_candles:
+                            if sub_c.timestamp >= candle.timestamp:
+                                sub_sl = sub_c.low <= t.stop_loss
+                                sub_tp = t.take_profit is not None and sub_c.high >= t.take_profit
+                                if sub_sl and not sub_tp:
+                                    first_hit = "SL"
+                                    resolved = True
+                                    break
+                                if sub_tp and not sub_sl:
+                                    first_hit = "TP"
+                                    resolved = True
+                                    break
+                    if resolved and first_hit == "TP":
+                        exit_price = t.take_profit
+                        reason = TradeExitReason.TAKE_PROFIT
+                    elif resolved and first_hit == "SL":
+                        exit_price = min(candle.open, t.stop_loss) - slip_price
+                        reason = TradeExitReason.STOP_LOSS
+                    elif self.config.allow_ambiguous:
+                        exit_price = min(candle.open, t.stop_loss)
+                        reason = TradeExitReason.AMBIGUOUS
+                        self.ambiguous_trades_count += 1
+                    elif self.config.conservative_stops:
                         exit_price = min(candle.open, t.stop_loss) - slip_price
                         reason = TradeExitReason.STOP_LOSS
                     else:
@@ -338,7 +411,32 @@ class ForexBacktestEngine:
                 hit_tp = t.take_profit is not None and candle.low <= t.take_profit
 
                 if hit_sl and hit_tp:
-                    if self.config.conservative_stops:
+                    resolved = False
+                    first_hit = None
+                    if lower_tf_candles:
+                        for sub_c in lower_tf_candles:
+                            if sub_c.timestamp >= candle.timestamp:
+                                sub_sl = sub_c.high >= t.stop_loss
+                                sub_tp = t.take_profit is not None and sub_c.low <= t.take_profit
+                                if sub_sl and not sub_tp:
+                                    first_hit = "SL"
+                                    resolved = True
+                                    break
+                                if sub_tp and not sub_sl:
+                                    first_hit = "TP"
+                                    resolved = True
+                                    break
+                    if resolved and first_hit == "TP":
+                        exit_price = t.take_profit
+                        reason = TradeExitReason.TAKE_PROFIT
+                    elif resolved and first_hit == "SL":
+                        exit_price = max(candle.open, t.stop_loss) + slip_price
+                        reason = TradeExitReason.STOP_LOSS
+                    elif self.config.allow_ambiguous:
+                        exit_price = max(candle.open, t.stop_loss)
+                        reason = TradeExitReason.AMBIGUOUS
+                        self.ambiguous_trades_count += 1
+                    elif self.config.conservative_stops:
                         exit_price = max(candle.open, t.stop_loss) + slip_price
                         reason = TradeExitReason.STOP_LOSS
                     else:
@@ -413,12 +511,156 @@ class ForexBacktestEngine:
             except Exception as e:
                 logger.debug("Failed logging trade close to journal: %s", e)
 
+    def _process_pending_orders(self, candle: ForexBar, pair: str) -> list[BacktestTrade]:
+        """Check expiry and execution triggers for pending limit/stop orders."""
+        pip_sz = pip_size_for(pair)
+        spread_price = self.config.default_spread_pips * pip_sz
+        slip_price = self.config.default_slippage_pips * pip_sz
+        newly_filled: list[BacktestTrade] = []
+        still_pending: list[PendingOrder] = []
+
+        for po in self.pending_orders:
+            if po.pair != pair:
+                still_pending.append(po)
+                continue
+
+            # Don't trigger on the exact same bar it was placed if created on this bar
+            if po.created_time == candle.timestamp:
+                still_pending.append(po)
+                continue
+
+            # Check expiration
+            if po.valid_until is not None and candle.timestamp > po.valid_until:
+                po.status = "EXPIRED"
+                self.cancelled_orders.append(po)
+                self.expired_orders_count += 1
+                continue
+
+            # Check trigger condition
+            triggered = False
+            fill_price: float = po.entry_price
+            ot_str = str(po.order_type).upper()
+
+            if po.action == ForexAction.LONG:
+                if "LIMIT" in ot_str:
+                    if candle.low <= po.entry_price:
+                        triggered = True
+                        fill_price = min(po.entry_price, candle.open) + (spread_price / 2.0) + slip_price
+                elif "STOP" in ot_str:
+                    if candle.high >= po.entry_price:
+                        triggered = True
+                        fill_price = max(po.entry_price, candle.open) + (spread_price / 2.0) + slip_price
+                else:
+                    if candle.low <= po.entry_price:
+                        triggered = True
+                        fill_price = candle.open + (spread_price / 2.0) + slip_price
+            elif po.action == ForexAction.SHORT:
+                if "LIMIT" in ot_str:
+                    if candle.high >= po.entry_price:
+                        triggered = True
+                        fill_price = max(po.entry_price, candle.open) - (spread_price / 2.0) - slip_price
+                elif "STOP" in ot_str:
+                    if candle.low <= po.entry_price:
+                        triggered = True
+                        fill_price = min(po.entry_price, candle.open) - (spread_price / 2.0) - slip_price
+                else:
+                    if candle.high >= po.entry_price:
+                        triggered = True
+                        fill_price = candle.open - (spread_price / 2.0) - slip_price
+
+            if triggered:
+                if len(self.open_trades) >= self.config.max_open_trades:
+                    still_pending.append(po)
+                    continue
+
+                free_margin = self.equity - self._calculate_used_margin()
+                req_margin = calculate_required_margin(
+                    pair=pair,
+                    lot_size=po.lots,
+                    entry_price=fill_price,
+                    leverage=self.config.leverage,
+                    account_currency=self.config.account_currency,
+                )
+                if req_margin > free_margin:
+                    still_pending.append(po)
+                    continue
+
+                spread_cost = self.config.default_spread_pips * pip_value_in_account_currency(
+                    pair, po.lots, self.config.account_currency, fill_price
+                )
+                slip_cost = self.config.default_slippage_pips * pip_value_in_account_currency(
+                    pair, po.lots, self.config.account_currency, fill_price
+                )
+                comm_cost = self.config.commission_per_lot_usd * po.lots
+
+                self.total_spread_drag += spread_cost
+                self.total_slippage_drag += slip_cost
+                self.total_commission_drag += comm_cost
+
+                po.status = "FILLED"
+                self.cancelled_orders.append(po)
+                self.filled_orders_count += 1
+
+                trade = BacktestTrade(
+                    trade_id=f"bt_{uuid.uuid4().hex[:10]}",
+                    pair=pair,
+                    action=po.action,
+                    entry_time=candle.timestamp,
+                    entry_price=round(fill_price, 5),
+                    stop_loss=round(po.stop_loss, 5),
+                    take_profit=round(po.take_profit, 5) if po.take_profit is not None else None,
+                    lots=po.lots,
+                    proposal_id=getattr(po.proposal, "proposal_id", None),
+                    setup_type=po.proposal.setup_type.value if hasattr(po.proposal.setup_type, "value") else str(po.proposal.setup_type),
+                    spread_pips=self.config.default_spread_pips,
+                    slippage_pips=self.config.default_slippage_pips,
+                    commission=comm_cost,
+                    mfe_price=fill_price,
+                    mae_price=fill_price,
+                )
+                self.open_trades.append(trade)
+                newly_filled.append(trade)
+
+                if self.journal is not None:
+                    try:
+                        self.journal.record_trade_open(
+                            trade_id=trade.trade_id,
+                            pair=trade.pair,
+                            action=trade.action,
+                            open_price=trade.entry_price,
+                            stop_loss=trade.stop_loss,
+                            lots=trade.lots,
+                            take_profit=trade.take_profit,
+                            proposal_id=trade.proposal_id,
+                            commission=trade.commission,
+                            open_time_utc=candle.timestamp.isoformat(),
+                        )
+                    except Exception as e:
+                        logger.debug("Failed logging trade open to journal: %s", e)
+            else:
+                still_pending.append(po)
+
+        self.pending_orders = still_pending
+        return newly_filled
+
+    def _apply_swap_rollover(self, candle: ForexBar) -> None:
+        """Accrue overnight swap costs when candle advances to a new calendar day."""
+        curr_date = candle.timestamp.date()
+        if self._last_swap_date is not None and curr_date > self._last_swap_date:
+            days_passed = (curr_date - self._last_swap_date).days
+            if self.config.swap_per_day_usd > 0.0 and self.open_trades:
+                for t in self.open_trades:
+                    swap_cost = self.config.swap_per_day_usd * t.lots * days_passed
+                    t.swap += swap_cost
+                    self.total_swap_drag += swap_cost
+        self._last_swap_date = curr_date
+
     def execute_proposal(
         self,
         proposal: ForexTraderProposal,
         candle: ForexBar,
     ) -> BacktestTrade | None:
-        """Validate risk constraints and execute a proposed trade at current bar price."""
+        """Validate risk constraints and execute or queue a proposed trade."""
         if proposal.action == ForexAction.NO_TRADE:
             return None
 
@@ -430,7 +672,37 @@ class ForexBacktestEngine:
         pip_sz = pip_size_for(pair)
         lots = proposal.suggested_lot_size or 0.1
 
-        # Check margin adequacy
+        stop_loss = proposal.stop_loss if proposal.stop_loss is not None else (
+            candle.open - 0.0050 if proposal.action == ForexAction.LONG else candle.open + 0.0050
+        )
+        take_profit = proposal.take_profit_1
+
+        # Check order type: if LIMIT or STOP, queue as PendingOrder
+        order_type_str = str(getattr(proposal, "order_type", "MARKET")).upper()
+        if "LIMIT" in order_type_str or "STOP" in order_type_str:
+            valid_until_dt = None
+            if getattr(proposal, "valid_until", None):
+                valid_until_dt = parse_utc_timestamp(proposal.valid_until)
+
+            target_entry = proposal.entry_price if proposal.entry_price is not None else candle.open
+            po = PendingOrder(
+                order_id=f"po_{uuid.uuid4().hex[:10]}",
+                proposal=proposal,
+                pair=pair,
+                action=proposal.action,
+                order_type=OrderType.from_str(getattr(proposal, "order_type", OrderType.MARKET)),
+                entry_price=round(target_entry, 5),
+                stop_loss=round(stop_loss, 5),
+                lots=lots,
+                take_profit=round(take_profit, 5) if take_profit is not None else None,
+                created_time=candle.timestamp,
+                valid_until=valid_until_dt,
+                status="PENDING",
+            )
+            self.pending_orders.append(po)
+            return None
+
+        # Check margin adequacy for immediate MARKET orders
         free_margin = self.equity - self._calculate_used_margin()
         req_margin = calculate_required_margin(
             pair=pair,
@@ -516,20 +788,27 @@ class ForexBacktestEngine:
         candle: ForexBar,
         pair: str,
         new_proposals: list[ForexTraderProposal] | None = None,
+        lower_tf_candles: Sequence[ForexBar] | None = None,
     ) -> None:
         """Execute a single discrete-time simulation step on a new incoming bar."""
         # 1. Update excursion extremes for open trades
         self._update_open_positions_excursions(candle, pair)
 
-        # 2. Evaluate intrabar stop loss and take profit hits
-        self._check_and_settle_intrabar_exits(candle, pair)
+        # 2. Check pending limit/stop orders for fills or expiration
+        self._process_pending_orders(candle, pair)
 
-        # 3. Process new trade proposals
+        # 3. Check and apply daily swap rollover
+        self._apply_swap_rollover(candle)
+
+        # 4. Evaluate intrabar stop loss and take profit hits
+        self._check_and_settle_intrabar_exits(candle, pair, lower_tf_candles=lower_tf_candles)
+
+        # 5. Process new trade proposals (MARKET orders fill, LIMIT/STOP queue)
         if new_proposals:
             for p in new_proposals:
                 self.execute_proposal(p, candle)
 
-        # 4. Calculate floating unrealized equity
+        # 6. Calculate floating unrealized equity
         floating_pnl = 0.0
         pip_sz = pip_size_for(pair)
         for t in self.open_trades:
@@ -569,6 +848,7 @@ class ForexBacktestEngine:
         candles: Sequence[ForexBar],
         proposals_schedule: dict[datetime, list[ForexTraderProposal]] | None = None,
         strategy_callback: Callable[[datetime, list[ForexBar]], list[ForexTraderProposal]] | None = None,
+        lower_tf_candles: Sequence[ForexBar] | None = None,
     ) -> ForexBacktestResult:
         """Run full bar-by-bar backtest over chronological candle stream."""
         self.reset()
@@ -593,7 +873,12 @@ class ForexBacktestEngine:
                 if generated:
                     proposals_to_submit.extend(generated)
 
-            self.step(candle=candle, pair=pair, new_proposals=proposals_to_submit)
+            self.step(
+                candle=candle,
+                pair=pair,
+                new_proposals=proposals_to_submit,
+                lower_tf_candles=lower_tf_candles,
+            )
 
         # Force-close any open positions on last bar for final settlement
         if self.open_trades and candles:
@@ -607,6 +892,13 @@ class ForexBacktestEngine:
         return self._build_result(start_str, end_str)
 
     def _build_empty_result(self) -> ForexBacktestResult:
+        total_friction = round(
+            self.total_spread_drag
+            + self.total_slippage_drag
+            + self.total_commission_drag
+            + self.total_swap_drag,
+            2,
+        )
         return ForexBacktestResult(
             config=self.config,
             start_date="N/A",
@@ -634,10 +926,17 @@ class ForexBacktestEngine:
             max_drawdown_pct=0.0,
             sharpe_ratio=0.0,
             sortino_ratio=0.0,
-            total_spread_cost_usd=0.0,
-            total_slippage_cost_usd=0.0,
-            total_commission_cost_usd=0.0,
-            total_friction_usd=0.0,
+            total_spread_cost_usd=round(self.total_spread_drag, 2),
+            total_slippage_cost_usd=round(self.total_slippage_drag, 2),
+            total_commission_cost_usd=round(self.total_commission_drag, 2),
+            total_swap_cost_usd=round(self.total_swap_drag, 2),
+            total_friction_usd=total_friction,
+            pending_orders_count=len(self.pending_orders) + len(self.cancelled_orders),
+            filled_orders_count=self.filled_orders_count,
+            expired_orders_count=self.expired_orders_count,
+            ambiguous_trades_count=self.ambiguous_trades_count,
+            mode="DEMO",
+            validated_strategy_performance=False,
         )
 
     def _build_result(self, start_date: str, end_date: str) -> ForexBacktestResult:
@@ -708,7 +1007,13 @@ class ForexBacktestEngine:
             sharpe = 0.0
             sortino = 0.0
 
-        total_friction = round(self.total_spread_drag + self.total_slippage_drag + self.total_commission_drag, 2)
+        total_friction = round(
+            self.total_spread_drag
+            + self.total_slippage_drag
+            + self.total_commission_drag
+            + self.total_swap_drag,
+            2,
+        )
 
         return ForexBacktestResult(
             config=self.config,
@@ -740,9 +1045,16 @@ class ForexBacktestEngine:
             total_spread_cost_usd=round(self.total_spread_drag, 2),
             total_slippage_cost_usd=round(self.total_slippage_drag, 2),
             total_commission_cost_usd=round(self.total_commission_drag, 2),
+            total_swap_cost_usd=round(self.total_swap_drag, 2),
             total_friction_usd=total_friction,
             trades=trades,
             equity_curve=self.equity_curve,
+            pending_orders_count=len(self.pending_orders) + len(self.cancelled_orders),
+            filled_orders_count=self.filled_orders_count,
+            expired_orders_count=self.expired_orders_count,
+            ambiguous_trades_count=self.ambiguous_trades_count,
+            mode="DEMO",
+            validated_strategy_performance=False,
         )
 
 

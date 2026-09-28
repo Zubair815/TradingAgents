@@ -49,6 +49,11 @@ from tradingagents.agents.schemas_forex import (
 )
 from tradingagents.analytics.manager import ForexAnalyticsManager
 from tradingagents.analytics.metrics import calculate_deep_metrics
+from tradingagents.backtest.agent_backtester import (
+    AgentBacktestConfig,
+    HistoricalForexAgentBacktester,
+    estimate_agent_analyses,
+)
 from tradingagents.backtest.forex_engine import (
     ForexBacktestConfig,
     ForexBacktestEngine,
@@ -318,6 +323,10 @@ class ForexBacktestRequest(BaseModel):
         default=False,
         description="Explicitly opt into the demonstration strategy; results are not validated strategy performance",
     )
+    mode: str | None = Field(
+        default=None,
+        description="Backtest mode: 'DEMO' or 'HISTORICAL_AGENT_BACKTEST'",
+    )
     pair: str = Field(default="EURUSD", description="Currency pair")
     timeframe: str = Field(default="M15", description="Execution timeframe")
     date_from: str | None = Field(default=None, description="Start date YYYY-MM-DD")
@@ -328,12 +337,30 @@ class ForexBacktestRequest(BaseModel):
     spread_pips: float = Field(default=1.2, ge=0)
     slippage_pips: float = Field(default=0.3, ge=0)
     commission_per_lot_usd: float = Field(default=5.0, ge=0)
+    swap_per_day_usd: float = Field(default=0.0, ge=0)
     conservative_stops: bool = Field(default=True)
     max_open_trades: int = Field(default=5, ge=1)
+    sampling_interval: int = Field(default=1, ge=1, description="Interval in bars between agent analysis runs")
+    max_analysis_points: int | None = Field(default=None, ge=1, description="Max AI evaluations to run")
+    analyst_selection: list[str] | None = Field(default=None, description="Active analysts for backtesting")
+    provider: str | None = Field(default=None, description="LLM provider: openai, google, anthropic")
+    quick_model: str | None = Field(default=None, description="Quick thinking model")
+    deep_model: str | None = Field(default=None, description="Deep reasoning model")
+    token_limits: int | None = Field(default=None, description="Max token limit per call")
+    research_depth: str = Field(default="standard", description="Research depth: standard or deep")
     candles: list[dict[str, Any]] | None = Field(
         default=None, description="Optional custom OHLCV candle records"
     )
     count: int = Field(default=300, ge=20, le=5000, description="Generated candle count for the synthetic demo")
+
+
+class ForexBacktestEstimateRequest(BaseModel):
+    pair: str = Field(default="EURUSD")
+    timeframe: str = Field(default="H1")
+    count: int = Field(default=300, ge=1)
+    sampling_interval: int = Field(default=1, ge=1)
+    max_analysis_points: int | None = Field(default=None, ge=1)
+    analyst_count: int = Field(default=3, ge=1)
 
 
 class MonteCarloRequest(BaseModel):
@@ -1457,19 +1484,37 @@ async def get_forex_status_alias(run_id: str):
 # 5. Demonstration Backtesting Endpoints
 # ---------------------------------------------------------------------------
 
+@router.post("/backtest/estimate")
+async def estimate_backtest_costs(
+    req: ForexBacktestEstimateRequest,
+    request: Request,
+):
+    """Estimate expected AI invocations and token usage before launching an agent backtest."""
+    verify_forex_auth(request)
+    estimate = estimate_agent_analyses(
+        total_bars=req.count,
+        sampling_interval=req.sampling_interval,
+        max_analysis_points=req.max_analysis_points,
+        analyst_count=req.analyst_count,
+    )
+    return estimate.to_dict()
+
+
 @router.post("/backtest/run")
 async def run_backtest(
     req: ForexBacktestRequest,
     request: Request,
 ):
-    """Run an explicitly requested, isolated demonstration backtest."""
+    """Run an explicitly requested demonstration or real historical agent backtest."""
     verify_forex_auth(request)
-    if not req.demo_mode:
+    effective_mode = "HISTORICAL_AGENT_BACKTEST" if (req.mode and req.mode.upper() == "HISTORICAL_AGENT_BACKTEST") else ("DEMO" if req.demo_mode else None)
+
+    if effective_mode != "HISTORICAL_AGENT_BACKTEST" and not req.demo_mode:
         raise HTTPException(
             status_code=503,
             detail={
                 "code": "FOREX_BACKTEST_DEMO_ONLY",
-                "message": "Production Forex backtesting is unavailable. Set demo_mode=true to run the demonstration strategy.",
+                "message": "Production Forex backtesting is unavailable. Set demo_mode=true to run the demonstration strategy or mode='HISTORICAL_AGENT_BACKTEST' for historical agent backtesting.",
             },
         )
     data_source = "user_supplied" if req.candles else "synthetic"
@@ -1522,6 +1567,65 @@ async def run_backtest(
                 curr = c
                 candle_objs.append(ForexBar(timestamp=ts, open=o, high=h, low=low_val, close=c, volume=100.0))
 
+
+        if effective_mode == "HISTORICAL_AGENT_BACKTEST":
+            bt_cfg = ForexBacktestConfig(
+                initial_balance=req.initial_balance,
+                account_currency=req.account_currency,
+                leverage=req.leverage,
+                default_spread_pips=req.spread_pips,
+                default_slippage_pips=req.slippage_pips,
+                commission_per_lot_usd=req.commission_per_lot_usd,
+                swap_per_day_usd=req.swap_per_day_usd,
+                conservative_stops=req.conservative_stops,
+                max_open_trades=req.max_open_trades,
+                execution_timeframe=req.timeframe,
+            )
+            agent_cfg = AgentBacktestConfig(
+                pair=norm_pair,
+                timeframe=req.timeframe,
+                date_from=req.date_from,
+                date_to=req.date_to,
+                sampling_interval=req.sampling_interval,
+                max_analysis_points=req.max_analysis_points,
+                analyst_selection=req.analyst_selection or ["forex_technical", "forex_macro", "forex_news"],
+                provider=req.provider or "openai",
+                quick_model=req.quick_model or "gpt-4.1-mini",
+                deep_model=req.deep_model or "gpt-4.1",
+                token_limits=req.token_limits,
+                research_depth=req.research_depth,
+                backtest_config=bt_cfg,
+            )
+
+            def graph_f():
+                return ForexTradingAgentsGraph(
+                    config={
+                        "llm_provider": agent_cfg.provider,
+                        "quick_model": agent_cfg.quick_model,
+                        "deep_model": agent_cfg.deep_model,
+                    },
+                    selected_analysts=agent_cfg.analyst_selection,
+                )
+
+            agent_backtester = HistoricalForexAgentBacktester(
+                config=agent_cfg,
+                graph_factory=graph_f,
+            )
+            report = agent_backtester.run(candles=candle_objs)
+            backtest_id = report.backtest_id
+            report_dict = report.to_dict()
+
+            _backtest_runs[backtest_id] = {
+                **report_dict,
+                "status": "completed",
+                "demo_mode": False,
+                "data_source": data_source,
+                "strategy": "historical_multi_agent",
+                "validated_strategy_performance": True,
+                "notice": "Validated historical agent backtest executed under strict point-in-time constraints.",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+            return _backtest_runs[backtest_id]
 
         config = ForexBacktestConfig(
             initial_balance=req.initial_balance,

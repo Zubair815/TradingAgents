@@ -98,6 +98,7 @@ class TradeExitReason(str, Enum):
     TIME_EXIT = "TIME_EXIT"
     NEWS_EVENT = "NEWS_EVENT"
     INVALIDATION = "INVALIDATION"
+    AMBIGUOUS = "AMBIGUOUS"
 
     @classmethod
     def from_str(cls, val: Any) -> TradeExitReason | None:
@@ -106,6 +107,8 @@ class TradeExitReason(str, Enum):
         if isinstance(val, TradeExitReason):
             return val
         s = str(val).strip().upper()
+        if "AMBIGUOUS" in s:
+            return cls.AMBIGUOUS
         for member in cls:
             if member.value == s:
                 return member

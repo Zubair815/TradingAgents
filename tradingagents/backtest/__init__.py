@@ -23,6 +23,13 @@ from pathlib import Path
 
 from tradingagents.agents.utils.memory import TradingMemoryLog
 from tradingagents.agents.utils.rating import RATING_REVIEW
+from tradingagents.backtest.agent_backtester import (
+    AgentBacktestConfig,
+    AgentBacktestEstimate,
+    HistoricalAgentBacktestReport,
+    HistoricalForexAgentBacktester,
+    estimate_agent_analyses,
+)
 from tradingagents.backtest.forex_engine import (
     BacktestTrade,
     EquityPoint,
@@ -227,4 +234,10 @@ __all__ = [
     "ForexBacktestResult",
     "ForexBacktestEngine",
     "run_forex_backtest",
+    # Historical agent backtest (Phase 20)
+    "AgentBacktestConfig",
+    "AgentBacktestEstimate",
+    "HistoricalAgentBacktestReport",
+    "HistoricalForexAgentBacktester",
+    "estimate_agent_analyses",
 ]
