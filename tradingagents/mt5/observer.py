@@ -446,7 +446,9 @@ class MT5Observer:
         self,
         date_from: datetime | None = None,
         date_to: datetime | None = None,
+        position: int | None = None,
         position_ticket: int | None = None,
+        count: int | None = None,
     ) -> list[MT5Deal]:
         """Query closed trades and executed deals from account history."""
         self._ensure_connected()
@@ -456,8 +458,10 @@ class MT5Observer:
             kwargs["date_from"] = date_from
         if date_to is not None:
             kwargs["date_to"] = date_to
-        if position_ticket is not None:
-            kwargs["position"] = position_ticket
+
+        pos = position if position is not None else position_ticket
+        if pos is not None:
+            kwargs["position"] = pos
 
         # Default to last 30 days if no range provided
         if "date_from" not in kwargs and "position" not in kwargs:
@@ -468,6 +472,9 @@ class MT5Observer:
         raw_deals = mt5.history_deals_get(**kwargs)
         if raw_deals is None:
             return []
+
+        if count is not None and count > 0 and len(raw_deals) > count:
+            raw_deals = raw_deals[-count:]
 
         entry_map = {0: "IN", 1: "OUT", 2: "INOUT", 3: "OUT_BY"}
         deals: list[MT5Deal] = []

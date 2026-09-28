@@ -372,10 +372,14 @@ class MockMT5API:
         return orders
 
     def history_deals_get(self, **kwargs) -> list[MockDealData]:
-        return [
+        deals = [
             MockDealData(ticket=7001, order=6001, position_id=5001, type=0, entry=0, profit=0.0),
             MockDealData(ticket=7002, order=6005, position_id=5001, type=1, entry=1, profit=500.0),
         ]
+        pos = kwargs.get("position")
+        if pos is not None:
+            deals = [d for d in deals if d.position_id == pos]
+        return deals
 
     def history_orders_get(self, **kwargs) -> list[MockOrderData]:
         return [
@@ -726,6 +730,21 @@ class TestMT5ObserverPositionsAndOrders:
         assert deals[1].ticket == 7002
         assert deals[1].entry == "OUT"
         assert deals[1].profit == 500.0
+
+        # Test position keyword argument
+        pos_deals = observer.get_deals(position=5001)
+        assert len(pos_deals) == 2
+        no_deals = observer.get_deals(position=9999)
+        assert len(no_deals) == 0
+
+        # Test position_ticket keyword argument (backward compatibility)
+        pos_ticket_deals = observer.get_deals(position_ticket=5001)
+        assert len(pos_ticket_deals) == 2
+
+        # Test count parameter
+        limited_deals = observer.get_deals(count=1)
+        assert len(limited_deals) == 1
+        assert limited_deals[0].ticket == 7002
 
     def test_get_orders_history(self):
         mock_api = MockMT5API()

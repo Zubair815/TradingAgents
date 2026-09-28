@@ -1018,14 +1018,16 @@ async def get_mt5_status(
     conn = mt5.connection
     status_str = conn.get_status().value if hasattr(conn, "get_status") else "DISCONNECTED"
     is_conn = conn.is_connected()
+    login_val = getattr(conn, "login", None)
     return {
         "status": status_str,
         "is_connected": is_conn,
         "connected": is_conn,
         "terminal_path": str(conn.terminal_path or ""),
         "server": str(conn.server or ""),
-        "login": conn.login,
-        "account_login": conn.login,
+        "login": login_val,
+        "account_login": login_val,
+        "masked_login": mask_account_login(login_val),
     }
 
 
@@ -1115,7 +1117,13 @@ async def get_mt5_symbol_info(
     """Fetch detailed contract specifications and pricing for a symbol."""
     try:
         info = mt5.get_symbol_info(symbol)
-        return {"symbol_info": _safe_model_dump(info)}
+        res = {"symbol_info": _safe_model_dump(info)}
+        try:
+            tick = mt5.get_current_tick(symbol)
+            res["tick"] = _safe_model_dump(tick)
+        except Exception:
+            pass
+        return res
     except MT5Error as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -1166,13 +1174,14 @@ async def get_mt5_deals(
     date_from: str | None = None,
     date_to: str | None = None,
     position: int | None = None,
+    count: int | None = None,
     mt5: MT5Observer = Depends(get_mt5_observer),
 ):
     """Query execution deals history from MT5."""
     try:
         d_from = datetime.fromisoformat(date_from) if date_from else None
         d_to = datetime.fromisoformat(date_to) if date_to else None
-        deals = mt5.get_deals(date_from=d_from, date_to=d_to, position=position)
+        deals = mt5.get_deals(date_from=d_from, date_to=d_to, position=position, count=count)
         return {"deals": [_safe_model_dump(d) for d in deals], "count": len(deals)}
     except MT5Error as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc

@@ -653,6 +653,11 @@ class TestMT5Routes:
         assert deal_res.status_code == 200
         assert deal_res.json()["count"] == 0
 
+        # Verify query parameters passed to get_deals
+        deal_filtered = client.get("/api/forex/mt5/deals?position=10101&count=5")
+        assert deal_filtered.status_code == 200
+        mock_observer.get_deals.assert_called_with(date_from=None, date_to=None, position=10101, count=5)
+
     def test_mt5_status_contract_canonical_and_dual_keys(self, client, isolated_forex_env):
         """Verify canonical MT5 status and backward compatible dual keys."""
         # 1. Disconnected

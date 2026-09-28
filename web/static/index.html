@@ -569,14 +569,71 @@
     <!-- 4. MT5 OBSERVER VIEW                                              -->
     <!-- ================================================================= -->
     <div class="view" id="view-mt5">
-      <!-- Live MT5 Snapshot -->
+      <!-- Strict Read-Only Observer Banner -->
+      <div class="warning-banner" style="margin-bottom: 1.25rem; background: rgba(0, 212, 255, 0.08); border-color: rgba(0, 212, 255, 0.35);">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color: var(--cyan); flex-shrink: 0;"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+        <div style="flex: 1; font-size: 0.82rem; line-height: 1.5;">
+          <strong style="color: var(--cyan); text-transform: uppercase; letter-spacing: 0.04em;">Read-Only Observer Active:</strong>
+          MetaTrader 5 is integrated exclusively as a telemetry and market surveillance observer. Automated live execution is strictly disabled.
+          Live ticks, open positions, pending orders, and history are observed passively without live trade dispatch capabilities. Passwords are never saved or exposed.
+        </div>
+        <span class="badge-readonly" style="font-size: 0.72rem; padding: 4px 10px;">READ-ONLY OBSERVER</span>
+      </div>
+
+      <!-- 1. Connection Controls & Terminal Diagnostics Card -->
       <div class="card" style="margin-bottom: 1.5rem;">
         <div class="card-header">
           <h2 class="card-title">
             <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
-            MetaTrader 5 Account (Read-Only Observer)
+            MetaTrader 5 Terminal Connection
           </h2>
-          <span class="badge-readonly">Strictly Passive Observation — Never Sends Live Orders</span>
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <span class="signal-badge" id="mt5ConnBadge" style="font-size: 0.75rem; padding: 3px 10px; background: var(--amber-dim); color: var(--amber);">DISCONNECTED</span>
+            <span class="badge-readonly">READ-ONLY OBSERVER</span>
+          </div>
+        </div>
+
+        <!-- Connection Inputs & Buttons -->
+        <div class="mt5-controls-row">
+          <input type="text" class="form-input" id="mt5TerminalPathInput" placeholder="Terminal Path (e.g. C:\Program Files\MetaTrader 5\terminal64.exe)" style="flex: 2; min-width: 240px; font-size: 0.82rem;">
+          <input type="text" class="form-input" id="mt5ServerInput" placeholder="Broker Server (e.g. MetaQuotes-Demo)" style="flex: 1; min-width: 160px; font-size: 0.82rem;">
+          <input type="text" class="form-input" id="mt5LoginInput" placeholder="Account Login (e.g. 12345678)" style="flex: 1; min-width: 140px; font-size: 0.82rem;">
+          <div style="display: flex; gap: 6px;">
+            <button type="button" class="btn-primary btn-sm" id="btnMT5Connect">⚡ Connect</button>
+            <button type="button" class="btn-secondary btn-sm" id="btnMT5Disconnect">🔌 Disconnect</button>
+            <button type="button" class="btn-secondary btn-sm" id="btnMT5RefreshStatus">🔄 Refresh</button>
+          </div>
+        </div>
+
+        <!-- Diagnostics Readout Bar -->
+        <div class="mt5-diagnostics-bar">
+          <div class="mt5-diag-item">
+            <span class="mt5-diag-label">Terminal Path</span>
+            <span class="mt5-diag-val" id="mt5DiagTerminalPath" title="Observed Terminal Executable">--</span>
+          </div>
+          <div class="mt5-diag-item">
+            <span class="mt5-diag-label">Broker Server</span>
+            <span class="mt5-diag-val" id="mt5DiagServer" title="Active Broker Server">--</span>
+          </div>
+          <div class="mt5-diag-item">
+            <span class="mt5-diag-label">Masked Login</span>
+            <span class="mt5-diag-val" id="mt5DiagLogin" style="color: var(--cyan);" title="Masked Account Identifier">--</span>
+          </div>
+          <div class="mt5-diag-item">
+            <span class="mt5-diag-label">Adapter Mode</span>
+            <span class="mt5-diag-val" style="color: var(--green);">Read-Only Observer</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 2. Live MT5 Account Metrics (All 8 Metrics) -->
+      <div class="card" style="margin-bottom: 1.5rem;">
+        <div class="card-header">
+          <h2 class="card-title">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M16 8h-6a2 2 0 1 0 0 4h4a2 2 0 1 1 0 4H8"/><line x1="12" y1="6" x2="12" y2="8"/><line x1="12" y1="16" x2="12" y2="18"/></svg>
+            Live Account Metrics
+          </h2>
+          <span class="badge-readonly">Observed Account Telemetry</span>
         </div>
         <div class="stat-cards" id="mt5AccountCards">
           <div class="stat-card">
@@ -595,14 +652,68 @@
             <span class="stat-sub">Unrealized position profit</span>
           </div>
           <div class="stat-card">
+            <span class="stat-label">Margin</span>
+            <span class="stat-value" id="mt5Margin">Unavailable</span>
+            <span class="stat-sub">Committed margin</span>
+          </div>
+          <div class="stat-card">
             <span class="stat-label">Free Margin</span>
             <span class="stat-value" id="mt5FreeMargin">Unavailable</span>
-            <span class="stat-sub" id="mt5Leverage">Leverage --</span>
+            <span class="stat-sub">Available free margin</span>
+          </div>
+          <div class="stat-card">
+            <span class="stat-label">Margin Level</span>
+            <span class="stat-value" id="mt5MarginLevel">Unavailable</span>
+            <span class="stat-sub">Equity / Margin ratio</span>
+          </div>
+          <div class="stat-card">
+            <span class="stat-label">Leverage</span>
+            <span class="stat-value" id="mt5Leverage">Unavailable</span>
+            <span class="stat-sub">Account leverage</span>
+          </div>
+          <div class="stat-card">
+            <span class="stat-label">Currency</span>
+            <span class="stat-value" id="mt5CurrencyVal">USD</span>
+            <span class="stat-sub">Base deposit currency</span>
           </div>
         </div>
       </div>
 
-      <!-- Active MT5 Positions -->
+      <!-- 3. Symbol Lookup & Market Quote Card -->
+      <div class="card" style="margin-bottom: 1.5rem;">
+        <div class="card-header">
+          <h2 class="card-title">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+            Symbol Lookup &amp; Market Ticks
+          </h2>
+          <span class="badge-readonly">Live Contract Quotes</span>
+        </div>
+        <div class="symbol-lookup-toolbar">
+          <input type="text" class="form-input" id="mt5SymbolInput" placeholder="Symbol (e.g. EURUSD)..." value="EURUSD" style="width: 160px; text-transform: uppercase; font-weight: 700; font-family: var(--font-mono); font-size: 0.85rem;">
+          <button type="button" class="btn-primary btn-sm" id="btnMT5LookupSymbol">🔍 Lookup Quote</button>
+          <div class="symbol-chips" id="mt5SymbolChips">
+            <button type="button" class="symbol-chip active" data-symbol="EURUSD">EURUSD</button>
+            <button type="button" class="symbol-chip" data-symbol="GBPUSD">GBPUSD</button>
+            <button type="button" class="symbol-chip" data-symbol="USDJPY">USDJPY</button>
+            <button type="button" class="symbol-chip" data-symbol="AUDUSD">AUDUSD</button>
+            <button type="button" class="symbol-chip" data-symbol="USDCHF">USDCHF</button>
+            <button type="button" class="symbol-chip" data-symbol="USDCAD">USDCAD</button>
+            <button type="button" class="symbol-chip" data-symbol="NZDUSD">NZDUSD</button>
+            <button type="button" class="symbol-chip" data-symbol="EURGBP">EURGBP</button>
+            <button type="button" class="symbol-chip" data-symbol="XAUUSD">XAUUSD</button>
+          </div>
+        </div>
+
+        <div id="mt5SymbolResultContainer">
+          <div class="empty-state" style="padding: 1.5rem;">
+            <div class="empty-state-icon">📊</div>
+            <div class="empty-state-title">Select or Search a Symbol</div>
+            <div class="empty-state-desc">Click any pair above or type a symbol to retrieve live contract specifications, bid, ask, spread, and precision digits.</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 4. Active MT5 Positions -->
       <div class="card" style="margin-bottom: 1.5rem;">
         <div class="card-header">
           <h2 class="card-title">
@@ -620,7 +731,7 @@
         </div>
       </div>
 
-      <!-- Pending Orders & Recent Deals Grid -->
+      <!-- 5. Pending Orders & Recent Deals Grid -->
       <div class="dashboard-grid">
         <div class="card">
           <div class="card-header">
