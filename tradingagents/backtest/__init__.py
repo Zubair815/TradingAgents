@@ -38,6 +38,15 @@ from tradingagents.backtest.forex_engine import (
     ForexBacktestResult,
     run_forex_backtest,
 )
+from tradingagents.backtest.walk_forward import (
+    EvaluationPeriodType,
+    ForexWalkForwardValidator,
+    PeriodPerformanceReport,
+    PeriodWindow,
+    WalkForwardSplit,
+    WalkForwardValidationReport,
+    compute_config_hash,
+)
 from tradingagents.dataflows.utils import get_current_date, safe_ticker_component
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 
