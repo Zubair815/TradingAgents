@@ -27,6 +27,12 @@
     equitiesControls: $('#equitiesControls'),
     forexPair:      $('#forexPair'),
     forexTimeframe: $('#forexTimeframe'),
+    forexContextToggles: $$('#forexContextTimeframes .analyst-toggle'),
+    forexAccountSource: $('#forexAccountSource'),
+    forexResearchDepth: $('#forexResearchDepth'),
+    forexMinRR:         $('#forexMinRR'),
+    forexMaxSpread:     $('#forexMaxSpread'),
+    forexEconomicBlackout: $('#forexEconomicBlackout'),
     accountBalance: $('#accountBalance'),
     riskPercent:    $('#riskPercent'),
     forexAnalystToggles: $$('#forexAnalystToggles .analyst-toggle'),
@@ -211,6 +217,16 @@
     DOM.forexAnalystToggles.forEach(btn => {
       btn.addEventListener('click', () => {
         if (btn.classList.contains('mandatory-stage') || btn.disabled) return;
+        btn.classList.toggle('active');
+      });
+    });
+    DOM.forexContextToggles.forEach(btn => {
+      btn.addEventListener('click', () => {
+        const activeCount = Array.from(DOM.forexContextToggles).filter(b => b.classList.contains('active')).length;
+        if (btn.classList.contains('active') && activeCount <= 1) {
+          showToast('At least one context timeframe must remain selected', 'info');
+          return;
+        }
         btn.classList.toggle('active');
       });
     });
@@ -1462,16 +1478,35 @@
       return;
     }
 
+    const contextTimeframes = [];
+    if (DOM.forexContextToggles) {
+      DOM.forexContextToggles.forEach(btn => {
+        if (btn.classList.contains('active') && btn.dataset.ctxTf) {
+          contextTimeframes.push(btn.dataset.ctxTf);
+        }
+      });
+    }
+    if (contextTimeframes.length === 0) {
+      contextTimeframes.push('H4', 'D1');
+    }
+
     const payload = {
       pair: pair,
       execution_timeframe: timeframe,
       timeframe: timeframe,
+      context_timeframes: contextTimeframes,
+      date: DOM.tradeDate ? (DOM.tradeDate.value || null) : null,
       account_balance: balance,
       risk_percent: riskPct,
       analysts: selectedAnalysts,
       provider: DOM.provider.value || null,
       quick_model: DOM.quickModel.value || null,
       deep_model: DOM.deepModel.value || null,
+      research_depth: DOM.forexResearchDepth ? DOM.forexResearchDepth.value : 'deep',
+      account_source: DOM.forexAccountSource ? DOM.forexAccountSource.value : 'mt5',
+      min_rr: DOM.forexMinRR ? parseFloat(DOM.forexMinRR.value) : 1.5,
+      max_spread_pips: DOM.forexMaxSpread ? parseFloat(DOM.forexMaxSpread.value) : 2.5,
+      economic_blackout: DOM.forexEconomicBlackout ? DOM.forexEconomicBlackout.checked : true,
     };
 
     DOM.btnRun.disabled = true;

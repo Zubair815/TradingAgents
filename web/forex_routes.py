@@ -1121,15 +1121,45 @@ def _run_forex_analysis(run_id: str, req: ForexAnalysisRequest) -> None:
             config["quick_think_llm"] = req.quick_model
         if req.deep_model:
             config["deep_think_llm"] = req.deep_model
+        if getattr(req, "research_depth", None):
+            config["research_depth"] = req.research_depth
+
+        eff_balance = float(req.account_balance)
+        eff_equity = float(req.account_balance)
+        eff_currency = getattr(req, "account_currency", "USD") or "USD"
+        eff_leverage = 100.0
+
+        if getattr(req, "account_source", "mt5") == "mt5":
+            mt5_obs = get_mt5_observer()
+            if mt5_obs and getattr(mt5_obs, "connection", None) and hasattr(mt5_obs.connection, "is_connected") and mt5_obs.connection.is_connected():
+                try:
+                    acc = mt5_obs.connection.get_account_info()
+                    if acc and getattr(acc, "balance", None):
+                        eff_balance = float(acc.balance)
+                        eff_equity = float(getattr(acc, "equity", eff_balance) or eff_balance)
+                        eff_currency = str(getattr(acc, "currency", eff_currency) or eff_currency)
+                        eff_leverage = float(getattr(acc, "leverage", 100.0) or 100.0)
+                except Exception:
+                    pass
 
         account = ForexAccountProfile(
-            balance=req.account_balance,
-            equity=req.account_balance,
+            balance=eff_balance,
+            equity=eff_equity,
+            currency=eff_currency,
+            leverage=eff_leverage,
         )
-        risk_limits = ForexRiskLimits(
-            max_risk_percent=req.risk_percent,
-            default_risk_percent=req.risk_percent,
-        )
+
+        risk_kwargs: dict[str, Any] = {
+            "max_risk_percent": req.risk_percent,
+            "default_risk_percent": req.risk_percent,
+            "enforce_news_blackout": getattr(req, "economic_blackout", True),
+        }
+        if getattr(req, "min_rr", None) is not None:
+            risk_kwargs["min_risk_reward_ratio"] = float(req.min_rr)
+        if getattr(req, "max_spread_pips", None) is not None:
+            risk_kwargs["max_spread_pips"] = float(req.max_spread_pips)
+
+        risk_limits = ForexRiskLimits(**risk_kwargs)
         journal = get_journal()
 
         analysts = tuple(req.analysts) if req.analysts else ("forex_technical", "forex_macro", "forex_news")
@@ -1377,6 +1407,11 @@ async def start_forex_analysis(
         "deep_model": req.deep_model or "",
         "account_balance": req.account_balance,
         "risk_percent": req.risk_percent,
+        "research_depth": getattr(req, "research_depth", "deep"),
+        "min_rr": getattr(req, "min_rr", None),
+        "max_spread_pips": getattr(req, "max_spread_pips", None),
+        "economic_blackout": getattr(req, "economic_blackout", True),
+        "account_source": getattr(req, "account_source", "mt5"),
         "started_at": now_iso,
         "finished_at": None,
         "error": None,

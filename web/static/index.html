@@ -293,15 +293,53 @@
                 </select>
               </div>
 
+              <!-- Timeframe Configuration: Execution & Context -->
+              <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; margin-bottom: 1rem;">
+                <div class="form-group">
+                  <label class="form-label" for="forexTimeframe">Execution Timeframe</label>
+                  <select class="form-select" id="forexTimeframe">
+                    <option value="M1">M1 (1-Minute Scalp)</option>
+                    <option value="M5">M5 (5-Minute Intraday)</option>
+                    <option value="M15">M15 (15-Minute Session)</option>
+                    <option value="H1" selected>H1 (1-Hour Swing Retest)</option>
+                    <option value="H4">H4 (4-Hour Structural Trend)</option>
+                    <option value="D1">D1 (Daily Macro Bias)</option>
+                  </select>
+                </div>
+                <div class="form-group">
+                  <label class="form-label" for="forexResearchDepth">Research Depth</label>
+                  <select class="form-select" id="forexResearchDepth">
+                    <option value="quick">Quick (Screening)</option>
+                    <option value="deep" selected>Deep (Standard)</option>
+                    <option value="comprehensive">Comprehensive</option>
+                  </select>
+                </div>
+              </div>
+
               <div class="form-group" style="margin-bottom: 1rem;">
-                <label class="form-label" for="forexTimeframe">Execution Timeframe</label>
-                <select class="form-select" id="forexTimeframe">
-                  <option value="M1">M1 (1-Minute Scalp)</option>
-                  <option value="M5">M5 (5-Minute Intraday)</option>
-                  <option value="M15">M15 (15-Minute Session)</option>
-                  <option value="H1" selected>H1 (1-Hour Swing Retest)</option>
-                  <option value="H4">H4 (4-Hour Structural Trend)</option>
-                  <option value="D1">D1 (Daily Macro Bias)</option>
+                <label class="form-label">Context Timeframes (Multi-Timeframe Bias)</label>
+                <div class="analyst-toggles" id="forexContextTimeframes">
+                  <button type="button" class="analyst-toggle active" data-ctx-tf="H4" title="4-Hour Structural Trend">
+                    <span class="dot"></span> H4
+                  </button>
+                  <button type="button" class="analyst-toggle active" data-ctx-tf="D1" title="Daily Macro Bias">
+                    <span class="dot"></span> D1
+                  </button>
+                  <button type="button" class="analyst-toggle" data-ctx-tf="W1" title="Weekly Institutional Regime">
+                    <span class="dot"></span> W1
+                  </button>
+                  <button type="button" class="analyst-toggle" data-ctx-tf="M15" title="15-Minute Tactical Pullback">
+                    <span class="dot"></span> M15
+                  </button>
+                </div>
+              </div>
+
+              <!-- Capital & Sizing Mode -->
+              <div class="form-group" style="margin-bottom: 1rem;">
+                <label class="form-label" for="forexAccountSource">Capital / Sizing Source</label>
+                <select class="form-select" id="forexAccountSource">
+                  <option value="mt5" selected>MT5 Observer (Live Account Balance)</option>
+                  <option value="manual">Manual Input ($)</option>
                 </select>
               </div>
 
@@ -314,6 +352,25 @@
                   <label class="form-label" for="riskPercent">Risk Limit (%)</label>
                   <input type="number" class="form-input" id="riskPercent" value="1.0" min="0.1" max="5.0" step="0.1">
                 </div>
+              </div>
+
+              <!-- Institutional Risk Guards -->
+              <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; margin-bottom: 1rem;">
+                <div class="form-group">
+                  <label class="form-label" for="forexMinRR">Min R:R Ratio</label>
+                  <input type="number" class="form-input" id="forexMinRR" value="1.5" min="1.0" max="10.0" step="0.5">
+                </div>
+                <div class="form-group">
+                  <label class="form-label" for="forexMaxSpread">Max Spread (pips)</label>
+                  <input type="number" class="form-input" id="forexMaxSpread" value="2.5" min="0.5" max="10.0" step="0.5">
+                </div>
+              </div>
+
+              <div class="form-group" style="margin-bottom: 1rem;">
+                <label style="display: flex; align-items: center; gap: 8px; font-size: 0.8rem; color: var(--text-secondary); cursor: pointer;">
+                  <input type="checkbox" id="forexEconomicBlackout" checked style="accent-color: var(--cyan); cursor: pointer;">
+                  <span>Enforce High-Impact Macro Blackout (±2h)</span>
+                </label>
               </div>
 
               <div class="form-group" style="margin-bottom: 1rem;">

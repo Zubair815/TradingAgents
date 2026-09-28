@@ -54,6 +54,11 @@ class AnalysisRequest(Record):
     account_currency: str = "USD"
     session: str | None = None
     requirements: tuple[str, ...] = ()
+    research_depth: str = "deep"
+    min_rr: float | None = None
+    max_spread_pips: float | None = None
+    economic_blackout: bool = True
+    account_source: str = "mt5"
 
     @model_validator(mode="before")
     @classmethod

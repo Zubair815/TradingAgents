@@ -801,6 +801,90 @@ class TestForexAnalysisRuns:
         assert client.get(f"/api/forex/analyze/{invalid_id}/report").status_code == 404
         assert client.get(f"/api/forex/analyze/{invalid_id}/status").status_code == 404
 
+    def test_start_analysis_phase26_parameters(self, client):
+        req = {
+            "pair": "EURUSD",
+            "execution_timeframe": "H1",
+            "context_timeframes": ["H4", "D1", "W1"],
+            "date": "2026-03-04",
+            "analysts": ["forex_technical", "forex_macro"],
+            "account_balance": 150000.0,
+            "risk_percent": 1.5,
+            "research_depth": "comprehensive",
+            "account_source": "manual",
+            "min_rr": 2.0,
+            "max_spread_pips": 1.8,
+            "economic_blackout": False,
+        }
+        res = client.post("/api/forex/analyze", json=req)
+        assert res.status_code == 200
+        data = res.json()
+        run_id = data["run_id"]
+        assert data["execution_timeframe"] == "H1"
+        assert data["context_timeframes"] == ["H4", "D1", "W1"]
+
+        run_entry = _forex_runs[run_id]
+        assert run_entry["research_depth"] == "comprehensive"
+        assert run_entry["min_rr"] == 2.0
+        assert run_entry["max_spread_pips"] == 1.8
+        assert run_entry["economic_blackout"] is False
+        assert run_entry["account_source"] == "manual"
+
+    def test_run_forex_analysis_applies_phase26_risk_and_live_mt5_account(self, client, isolated_forex_env):
+        _, _, mock_observer = isolated_forex_env
+        mock_conn = mock_observer.connection
+        mock_conn.is_connected.return_value = True
+        mock_conn.get_status.return_value = MT5ConnectionStatus.CONNECTED
+        mock_acc = MagicMock()
+        mock_acc.balance = 87654.0
+        mock_acc.equity = 87900.0
+        mock_acc.currency = "USD"
+        mock_acc.leverage = 100
+        mock_conn.get_account_info.return_value = mock_acc
+
+        run_id = "fx_phase26_worker_test"
+        _forex_runs[run_id] = {"status": "queued", "signal": None}
+        _forex_run_events[run_id] = []
+
+        req = ForexAnalysisRequest(
+            pair="EURUSD",
+            execution_timeframe="H1",
+            context_timeframes=["H4", "D1"],
+            account_source="mt5",
+            account_balance=50000.0,
+            risk_percent=1.2,
+            min_rr=2.2,
+            max_spread_pips=1.9,
+            economic_blackout=True,
+            research_depth="comprehensive",
+        )
+
+        proposal = ForexTraderProposal(pair="EURUSD", action=ForexAction.NO_TRADE, reasoning="No setup")
+        decision = ForexRiskDecision(
+            pair="EURUSD", decision=ForexRiskDecisionAction.APPROVE,
+            original_action=ForexAction.NO_TRADE, approved_action=ForexAction.NO_TRADE,
+            executive_rationale="Preserve capital",
+        )
+
+        with patch("web.forex_routes.ForexTradingAgentsGraph") as factory:
+            graph = factory.return_value
+            graph.stream.return_value = iter([])
+            graph.get_state.return_value = {"final_trade_decision": "NO_TRADE"}
+            graph.get_last_proposal.return_value = proposal
+            graph.get_last_risk_decision.return_value = decision
+            graph.get_last_sizing_result.return_value = None
+            graph.process_signal.return_value = "NO_TRADE"
+            graph.save_reports.return_value = None
+
+            _run_forex_analysis(run_id, req)
+
+            call_kwargs = factory.call_args[1]
+            assert call_kwargs["sizing_account"].balance == 87654.0
+            assert call_kwargs["risk_limits"].min_risk_reward_ratio == 2.2
+            assert call_kwargs["risk_limits"].max_spread_pips == 1.9
+            assert call_kwargs["risk_limits"].enforce_news_blackout is True
+            assert call_kwargs["config"]["research_depth"] == "comprehensive"
+
     def test_run_forex_analysis_worker_and_sse_events(self, client, tmp_path):
         run_id = "fx_test_worker_123"
         req = ForexAnalysisRequest(
