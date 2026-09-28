@@ -18,11 +18,13 @@ from tradingagents.learning.history_provider import (
 )
 from tradingagents.learning.manager import ForexLearningManager
 from tradingagents.learning.models import (
+    EvidenceClass,
     ForexLesson,
     ReflectionContext,
     ReflectionRating,
     RetrievedLesson,
     TradeReflection,
+    classify_evidence,
 )
 from tradingagents.learning.retriever import LessonRetriever
 from tradingagents.learning.store import ForexLessonStore
@@ -42,6 +44,8 @@ __all__ = [
     "TradeHistoryResult",
     # Models
     "ForexLesson",
+    "EvidenceClass",
+    "classify_evidence",
     "RetrievedLesson",
     "ReflectionRating",
     "TradeReflection",

@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from tradingagents.agents.schemas_forex import ForexTraderProposal
 from tradingagents.database.models import (
@@ -40,24 +40,125 @@ class ReflectionRating(str, Enum):
     CRITICAL_ERROR = "CRITICAL_ERROR"  # Hard rule breach, stop loss violation, or runaway loss
 
 
+class EvidenceClass(str, Enum):
+    """Categorization of empirical validation strength for a trading heuristic (Phase 15)."""
+
+    ANECDOTAL = "ANECDOTAL"  # Single observation (evidence_count <= 1)
+    EARLY = "EARLY"          # 2 observations
+    MODERATE = "MODERATE"    # 3 - 5 observations
+    STRONG = "STRONG"        # > 5 observations
+
+
+def classify_evidence(evidence_count: int) -> EvidenceClass:
+    """Map raw evidence counts to empirical validation classes."""
+    if evidence_count <= 1:
+        return EvidenceClass.ANECDOTAL
+    elif evidence_count == 2:
+        return EvidenceClass.EARLY
+    elif 3 <= evidence_count <= 5:
+        return EvidenceClass.MODERATE
+    else:
+        return EvidenceClass.STRONG
+
+
 class ForexLesson(BaseModel):
-    """Institutional heuristic or rule extracted from post-trade reflection."""
+    """Institutional heuristic or rule extracted from post-trade reflection (Phase 15)."""
 
     lesson_id: str = Field(default_factory=lambda: f"lsn_{uuid.uuid4().hex[:12]}")
-    trade_id: str | None = None
+    source_trade_id: str | None = None
     proposal_id: str | None = None
     pair: str
-    setup_type: str = "TREND_CONTINUATION"
-    outcome_category: str = "STANDARD_WIN"
-    rule_violated: str | None = None
+    timeframe: str | None = None
+    setup: str = "TREND_CONTINUATION"
+    direction: str | None = None
+    session: str | None = None
+    market_regime: str | None = None
+    lesson_type: str = "RISK_MANAGEMENT"
     observation: str = ""
     root_cause: str = ""
     actionable_rule: str = ""
-    confidence_score: float = Field(default=1.0, ge=0.0, le=1.0)
-    tags: list[str] = Field(default_factory=list)
-    created_at_utc: str = Field(
+    evidence_count: int = 1
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    created_at: str = Field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
+    last_validated_at: str | None = None
+    strategy_version: str = "1.0"
+    active: bool = True
+
+    # Legacy & auxiliary fields preserved for backward compatibility
+    outcome_category: str = "STANDARD_WIN"
+    rule_violated: str | None = None
+    tags: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _remap_legacy_fields(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "trade_id" in data and "source_trade_id" not in data:
+                data["source_trade_id"] = data["trade_id"]
+            elif "source_trade_id" in data and "trade_id" not in data:
+                data["trade_id"] = data["source_trade_id"]
+
+            if "setup_type" in data and "setup" not in data:
+                data["setup"] = data["setup_type"]
+            elif "setup" in data and "setup_type" not in data:
+                data["setup_type"] = data["setup"]
+
+            if "confidence_score" in data and "confidence" not in data:
+                data["confidence"] = data["confidence_score"]
+            elif "confidence" in data and "confidence_score" not in data:
+                data["confidence_score"] = data["confidence"]
+
+            if "created_at_utc" in data and "created_at" not in data:
+                data["created_at"] = data["created_at_utc"]
+            elif "created_at" in data and "created_at_utc" not in data:
+                data["created_at_utc"] = data["created_at"]
+        return data
+
+    @model_validator(mode="after")
+    def validate_overfitting_ban(self) -> ForexLesson:
+        """Prevent anecdotal evidence from establishing categorical trade prohibitions."""
+        if self.evidence_count <= 1 or self.evidence_class == EvidenceClass.ANECDOTAL:
+            forbidden = [
+                "never trade",
+                "stop trading",
+                "avoid trading forever",
+                "permanently avoid",
+            ]
+            rule_lower = (self.actionable_rule or "").lower()
+            if any(term in rule_lower for term in forbidden):
+                raise ValueError(
+                    f"Categorical ban 'NEVER trade...' is not permitted from a single trade "
+                    f"(anecdotal evidence for {self.pair} {self.setup}). "
+                    f"Systemic bans require accumulated evidence."
+                )
+        return self
+
+    @property
+    def trade_id(self) -> str | None:
+        """Backward-compatible alias for source_trade_id."""
+        return self.source_trade_id
+
+    @property
+    def setup_type(self) -> str:
+        """Backward-compatible alias for setup."""
+        return self.setup
+
+    @property
+    def confidence_score(self) -> float:
+        """Backward-compatible alias for confidence."""
+        return self.confidence
+
+    @property
+    def created_at_utc(self) -> str:
+        """Backward-compatible alias for created_at."""
+        return self.created_at
+
+    @property
+    def evidence_class(self) -> EvidenceClass:
+        """Classify empirical validation strength based on evidence_count."""
+        return classify_evidence(self.evidence_count)
 
 
 class RetrievedLesson(BaseModel):

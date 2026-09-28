@@ -923,4 +923,277 @@ def test_phase14_structured_reflection_stop_breach():
     assert "breaching intended 1.0R risk limit" in reflection.main_failure
 
 
+# ===========================================================================
+# Phase 15: Structured Forex Memory Tests
+# ===========================================================================
+
+
+def test_phase15_forex_lesson_schema_and_evidence_class():
+    """Verify ForexLesson supports all Phase 15 schema fields and evidence classes."""
+    from tradingagents.learning.models import (
+        EvidenceClass,
+        ForexLesson,
+        classify_evidence,
+    )
+
+    lesson = ForexLesson(
+        source_trade_id="trd_100",
+        proposal_id="prop_100",
+        pair="EURUSD",
+        timeframe="M15",
+        setup="TREND_CONTINUATION",
+        direction="LONG",
+        session="LONDON",
+        market_regime="TRENDING_BULLISH",
+        lesson_type="RISK_MANAGEMENT",
+        observation="Controlled pullback entry with minimal adverse excursion.",
+        root_cause="Clean market structure alignment.",
+        actionable_rule="Wait for pullback to 50% discount zone before entry.",
+        evidence_count=1,
+        confidence=0.85,
+        strategy_version="1.1",
+        active=True,
+    )
+
+    # Required Phase 15 schema fields
+    assert lesson.lesson_id.startswith("lsn_")
+    assert lesson.source_trade_id == "trd_100"
+    assert lesson.proposal_id == "prop_100"
+    assert lesson.pair == "EURUSD"
+    assert lesson.timeframe == "M15"
+    assert lesson.setup == "TREND_CONTINUATION"
+    assert lesson.direction == "LONG"
+    assert lesson.session == "LONDON"
+    assert lesson.market_regime == "TRENDING_BULLISH"
+    assert lesson.lesson_type == "RISK_MANAGEMENT"
+    assert lesson.observation != ""
+    assert lesson.root_cause != ""
+    assert lesson.actionable_rule != ""
+    assert lesson.evidence_count == 1
+    assert lesson.confidence == 0.85
+    assert lesson.created_at != ""
+    assert lesson.strategy_version == "1.1"
+    assert lesson.active is True
+
+    # Evidence classes
+    assert lesson.evidence_class == EvidenceClass.ANECDOTAL
+    assert classify_evidence(1) == EvidenceClass.ANECDOTAL
+    assert classify_evidence(2) == EvidenceClass.EARLY
+    assert classify_evidence(3) == EvidenceClass.MODERATE
+    assert classify_evidence(5) == EvidenceClass.MODERATE
+    assert classify_evidence(6) == EvidenceClass.STRONG
+
+    # Backward compatibility aliases
+    assert lesson.trade_id == "trd_100"
+    assert lesson.setup_type == "TREND_CONTINUATION"
+    assert lesson.confidence_score == 0.85
+    assert lesson.created_at_utc == lesson.created_at
+
+    # Legacy constructor compatibility
+    legacy_lesson = ForexLesson(
+        trade_id="trd_legacy",
+        pair="GBPUSD",
+        setup_type="BREAKOUT",
+        confidence_score=0.9,
+        created_at_utc="2026-09-01T12:00:00+00:00",
+        actionable_rule="Tighten stop loss on range compression.",
+    )
+    assert legacy_lesson.source_trade_id == "trd_legacy"
+    assert legacy_lesson.setup == "BREAKOUT"
+    assert legacy_lesson.confidence == 0.9
+    assert legacy_lesson.created_at == "2026-09-01T12:00:00+00:00"
+
+
+def test_phase15_anti_overfitting_ban_prevention():
+    """Verify that a single trade (anecdotal evidence) cannot create 'NEVER trade X again' rules."""
+    from tradingagents.learning.models import ForexLesson
+
+    # Single losing trade attempting to create categorical prohibition
+    with pytest.raises(ValueError, match="NEVER trade"):
+        ForexLesson(
+            source_trade_id="trd_loss_1",
+            pair="EURUSD",
+            setup="PULLBACK",
+            actionable_rule="NEVER trade EURUSD again due to sudden spread widening.",
+            evidence_count=1,
+        )
+
+    with pytest.raises(ValueError, match="NEVER trade"):
+        ForexLesson(
+            pair="USDJPY",
+            actionable_rule="Stop trading USDJPY breakouts permanently.",
+            evidence_count=1,
+        )
+
+    # Multi-observation accumulated evidence can express strong restrictions
+    strong_lesson = ForexLesson(
+        pair="EURUSD",
+        setup="PULLBACK",
+        actionable_rule="Do not trade EURUSD during Friday NFP release.",
+        evidence_count=6,
+    )
+    assert strong_lesson.evidence_count == 6
+
+
+def test_phase15_lesson_store_merge_similar_lessons(tmp_path):
+    """Verify ForexLessonStore merges similar heuristics, accumulating evidence count."""
+    from tradingagents.learning.models import EvidenceClass, ForexLesson
+    from tradingagents.learning.store import ForexLessonStore
+
+    db_path = tmp_path / "lessons_test.db"
+    store = ForexLessonStore(db_path=db_path)
+
+    lesson1 = ForexLesson(
+        source_trade_id="trd_1",
+        pair="EURUSD",
+        setup="BREAKOUT",
+        lesson_type="EXECUTION_QUALITY",
+        outcome_category="EXECUTION_SLIPPAGE",
+        observation="Observed 1.2 pip slippage during London open.",
+        actionable_rule="Use limit orders on EURUSD breakouts.",
+        confidence=0.80,
+        evidence_count=1,
+        tags=["slippage", "london"],
+    )
+    store.save_lesson(lesson1)
+    assert store.count_lessons() == 1
+
+    # Second trade observes similar execution friction on same pair & setup
+    lesson2 = ForexLesson(
+        source_trade_id="trd_2",
+        pair="EURUSD",
+        setup="BREAKOUT",
+        lesson_type="EXECUTION_QUALITY",
+        outcome_category="EXECUTION_SLIPPAGE",
+        observation="Observed 1.5 pip slippage during NY open.",
+        actionable_rule="Use limit orders on EURUSD breakouts.",
+        confidence=0.85,
+        evidence_count=1,
+        tags=["slippage", "new_york"],
+    )
+    merged = store.merge_or_save_lesson(lesson2)
+
+    # Lesson should be merged, count incremented, confidence reinforced
+    assert store.count_lessons() == 1
+    assert merged.lesson_id == lesson1.lesson_id
+    assert merged.evidence_count == 2
+    assert merged.evidence_class == EvidenceClass.EARLY
+    assert merged.confidence == pytest.approx(0.85)
+    assert "Re-observed in trade trd_2" in merged.observation
+    assert "new_york" in merged.tags
+    assert merged.last_validated_at is not None
+
+
+def test_phase15_lesson_store_weaken_contradicting_lessons(tmp_path):
+    """Verify contradicting empirical evidence weakens confidence and deactivates invalid heuristics."""
+    from tradingagents.learning.models import ForexLesson
+    from tradingagents.learning.store import ForexLessonStore
+
+    db_path = tmp_path / "lessons_weaken.db"
+    store = ForexLessonStore(db_path=db_path)
+
+    # Create a failure rule from a prior loss
+    lesson = ForexLesson(
+        source_trade_id="trd_loss_prev",
+        pair="GBPUSD",
+        setup="ASIAN_RANGE_BREAKOUT",
+        lesson_type="SETUP_FAILURE",
+        outcome_category="STANDARD_LOSS",
+        observation="Asian breakout failed into false expansion.",
+        actionable_rule="Require retest of Asian range before entering breakout.",
+        confidence=0.60,
+        evidence_count=1,
+    )
+    store.save_lesson(lesson)
+    assert store.count_lessons(active_only=True) == 1
+
+    # First contradictory success weakens lesson by 0.2
+    weakened = store.weaken_contradicting_lessons(pair="GBPUSD", setup="ASIAN_RANGE_BREAKOUT", penalty=0.2)
+    assert len(weakened) == 1
+    assert weakened[0].confidence == pytest.approx(0.40)
+    assert weakened[0].active is True
+
+    # Second contradictory success further weakens lesson below 0.3 threshold -> deactivates
+    weakened2 = store.weaken_contradicting_lessons(pair="GBPUSD", setup="ASIAN_RANGE_BREAKOUT", penalty=0.2)
+    assert len(weakened2) == 1
+    assert weakened2[0].confidence == pytest.approx(0.20)
+    assert weakened2[0].active is False
+
+    # Active count should now be 0, total count still 1
+    assert store.count_lessons(active_only=True) == 0
+    assert store.count_lessons(active_only=False) == 1
+
+
+def test_phase15_reflection_agent_generates_phase15_lessons():
+    """Verify reflection agent populates Phase 15 dimensional fields on all generated lessons."""
+    from tradingagents.database.models import ProposalRecord
+    from tradingagents.learning.agent import ForexReflectionAgent
+    from tradingagents.learning.models import ReflectionContext
+
+    trade = TradeJournalRecord(
+        trade_id="trd_agent_15",
+        proposal_id="prop_agent_15",
+        pair="USDJPY",
+        action=ForexAction.SHORT,
+        open_price=150.00,
+        close_price=150.80,
+        stop_loss=150.60,
+        lots=0.5,
+        r_multiple=-1.33,
+        status=TradeStatus.CLOSED,
+        metadata={"session": "TOKYO", "market_regime": "RANGING", "timeframe": "H1"},
+    )
+    proposal = ProposalRecord(
+        proposal_id="prop_agent_15",
+        pair="USDJPY",
+        action=ForexAction.SHORT,
+        timeframe="H1",
+        setup_type="RANGE_BOUND",
+    )
+    mfe_mae = TradeMfeMae(
+        trade_id="trd_agent_15",
+        pair="USDJPY",
+        action=ForexAction.SHORT,
+        open_price=150.00,
+        close_price=150.80,
+        stop_loss=150.60,
+        mfe_price=149.95,
+        mae_price=150.80,
+        mae_r=1.33,
+        mfe_r=0.1,
+        realized_r=-1.33,
+    )
+    outcome = TradeOutcomeResult(
+        trade_id="trd_agent_15",
+        category=TradeOutcomeCategory.RUNAWAY_LOSS,
+    )
+    context = ReflectionContext(
+        trade=trade,
+        proposal=proposal,
+        mfe_mae=mfe_mae,
+        outcome=outcome,
+        session="TOKYO",
+        setup="RANGE_BOUND",
+    )
+
+    agent = ForexReflectionAgent()
+    reflection = agent.reflect(context)
+
+    assert len(reflection.lessons) > 0
+    lesson = reflection.lessons[0]
+
+    # Verify Phase 15 fields populated
+    assert lesson.source_trade_id == "trd_agent_15"
+    assert lesson.proposal_id == "prop_agent_15"
+    assert lesson.pair == "USDJPY"
+    assert lesson.timeframe == "H1"
+    assert lesson.setup == "RANGE_BOUND"
+    assert lesson.direction == "SHORT"
+    assert lesson.session == "TOKYO"
+    assert lesson.market_regime == "RANGING"
+    assert lesson.lesson_type == "STOP_LOSS_DISCIPLINE"
+    assert "NEVER trade" not in lesson.actionable_rule
+
+
+
 

@@ -39,10 +39,30 @@ class ForexReflectionAgent:
 
         pair = trade.pair
         setup_type = "TREND_CONTINUATION"
-        if proposal is not None:
+        if context.setup:
+            setup_type = context.setup
+        elif proposal is not None:
             setup_type = getattr(proposal, "setup_type", "TREND_CONTINUATION")
             if hasattr(setup_type, "value"):
                 setup_type = setup_type.value
+
+        timeframe = (
+            getattr(proposal, "timeframe", None)
+            or (trade.metadata.get("timeframe") if trade.metadata else None)
+        )
+        if hasattr(timeframe, "value"):
+            timeframe = timeframe.value
+
+        direction = (
+            trade.action.value if hasattr(trade.action, "value") else str(trade.action)
+        )
+        session = (
+            context.session
+            or (trade.metadata.get("session") if trade.metadata else None)
+        )
+        market_regime = (
+            trade.metadata.get("market_regime") if trade.metadata else None
+        )
 
         realized_r = trade.r_multiple if trade.r_multiple is not None else (mfe_mae.realized_r if mfe_mae else 0.0)
         realized_pips = trade.pips_gained if trade.pips_gained is not None else (mfe_mae.realized_pips if mfe_mae else 0.0)
@@ -73,10 +93,15 @@ class ForexReflectionAgent:
 
             lessons.append(
                 ForexLesson(
-                    trade_id=trade.trade_id,
+                    source_trade_id=trade.trade_id,
                     proposal_id=trade.proposal_id,
                     pair=pair,
-                    setup_type=setup_type,
+                    timeframe=timeframe,
+                    setup=setup_type,
+                    direction=direction,
+                    session=session,
+                    market_regime=market_regime,
+                    lesson_type="STOP_LOSS_DISCIPLINE",
                     outcome_category=TradeOutcomeCategory.RUNAWAY_LOSS.value,
                     rule_violated="Hard Stop Loss Non-Negotiable Limit",
                     observation=f"Trade on {pair} sustained {mae_r:.2f}R adverse excursion, exceeding planned 1.0R stop.",
@@ -99,10 +124,15 @@ class ForexReflectionAgent:
 
             lessons.append(
                 ForexLesson(
-                    trade_id=trade.trade_id,
+                    source_trade_id=trade.trade_id,
                     proposal_id=trade.proposal_id,
                     pair=pair,
-                    setup_type=setup_type,
+                    timeframe=timeframe,
+                    setup=setup_type,
+                    direction=direction,
+                    session=session,
+                    market_regime=market_regime,
+                    lesson_type="PROFIT_PROTECTION",
                     outcome_category=TradeOutcomeCategory.GREEDY_EXIT.value,
                     rule_violated="Unrealized Profit Protection (Breakeven Rule)",
                     observation=f"Position reached +{mfe_r:.2f}R favorable excursion but completely reversed into {realized_r:+.2f}R.",
@@ -126,10 +156,15 @@ class ForexReflectionAgent:
 
             lessons.append(
                 ForexLesson(
-                    trade_id=trade.trade_id,
+                    source_trade_id=trade.trade_id,
                     proposal_id=trade.proposal_id,
                     pair=pair,
-                    setup_type=setup_type,
+                    timeframe=timeframe,
+                    setup=setup_type,
+                    direction=direction,
+                    session=session,
+                    market_regime=market_regime,
+                    lesson_type="RUNNER_MANAGEMENT",
                     outcome_category=TradeOutcomeCategory.PREMATURE_EXIT.value,
                     rule_violated="Runner Execution Discipline",
                     observation=f"Closed early with +{realized_r:.2f}R; price subsequently extended to +{mfe_r:.2f}R.",
@@ -152,10 +187,15 @@ class ForexReflectionAgent:
 
             lessons.append(
                 ForexLesson(
-                    trade_id=trade.trade_id,
+                    source_trade_id=trade.trade_id,
                     proposal_id=trade.proposal_id,
                     pair=pair,
-                    setup_type=setup_type,
+                    timeframe=timeframe,
+                    setup=setup_type,
+                    direction=direction,
+                    session=session,
+                    market_regime=market_regime,
+                    lesson_type="ASYMMETRIC_REWARD",
                     outcome_category=TradeOutcomeCategory.PERFECT_EXIT.value,
                     rule_violated=None,
                     observation=f"Captured {realized_r:.2f}R out of {mfe_r:.2f}R peak move on {pair}.",
@@ -176,10 +216,15 @@ class ForexReflectionAgent:
 
             lessons.append(
                 ForexLesson(
-                    trade_id=trade.trade_id,
+                    source_trade_id=trade.trade_id,
                     proposal_id=trade.proposal_id,
                     pair=pair,
-                    setup_type=setup_type,
+                    timeframe=timeframe,
+                    setup=setup_type,
+                    direction=direction,
+                    session=session,
+                    market_regime=market_regime,
+                    lesson_type="SYSTEMATIC_EXECUTION",
                     outcome_category=TradeOutcomeCategory.STANDARD_WIN.value,
                     rule_violated=None,
                     observation=f"Planned take-profit achieved on {pair} {setup_type}.",
@@ -200,10 +245,15 @@ class ForexReflectionAgent:
 
             lessons.append(
                 ForexLesson(
-                    trade_id=trade.trade_id,
+                    source_trade_id=trade.trade_id,
                     proposal_id=trade.proposal_id,
                     pair=pair,
-                    setup_type=setup_type,
+                    timeframe=timeframe,
+                    setup=setup_type,
+                    direction=direction,
+                    session=session,
+                    market_regime=market_regime,
+                    lesson_type="RISK_MANAGEMENT",
                     outcome_category=TradeOutcomeCategory.STANDARD_LOSS.value,
                     rule_violated=None,
                     observation=f"Controlled loss on {pair} {setup_type} contained at {realized_r:.2f}R.",
@@ -212,7 +262,7 @@ class ForexReflectionAgent:
                         f"Controlled loss on {pair} is acceptable variance. Do not revenge trade; maintain "
                         "consistent position sizing and wait for fresh A+ setup confirmation."
                     ),
-                    confidence_score=0.80,
+                    confidence_score=0.75,
                     tags=["standard_loss", "risk_control", "variance"],
                 )
             )
@@ -234,10 +284,15 @@ class ForexReflectionAgent:
                 tags.append("execution_slippage_drag")
                 lessons.append(
                     ForexLesson(
-                        trade_id=trade.trade_id,
+                        source_trade_id=trade.trade_id,
                         proposal_id=trade.proposal_id,
                         pair=pair,
-                        setup_type=setup_type,
+                        timeframe=timeframe,
+                        setup=setup_type,
+                        direction=direction,
+                        session=session,
+                        market_regime=market_regime,
+                        lesson_type="EXECUTION_QUALITY",
                         outcome_category="EXECUTION_SLIPPAGE",
                         rule_violated="Execution Timing & Liquidity Safeguard",
                         observation=f"Adverse fill slippage of {slip_pips:.1f} pips registered on {pair}.",

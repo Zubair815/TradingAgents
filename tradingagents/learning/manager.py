@@ -24,6 +24,7 @@ from tradingagents.learning.models import (
 from tradingagents.learning.retriever import LessonRetriever
 from tradingagents.learning.store import ForexLessonStore
 from tradingagents.metrics.mfe_mae import calculate_trade_mfe_mae, parse_utc_timestamp
+from tradingagents.metrics.models import TradeOutcomeCategory
 from tradingagents.metrics.outcome import TradeOutcomeEngine
 
 if TYPE_CHECKING:
@@ -164,9 +165,19 @@ class ForexLearningManager:
         # Execute reflection agent
         reflection = self.agent.reflect(context)
 
-        # Save extracted lessons into lesson store
+        # Save extracted lessons into lesson store (Phase 15: merge similar heuristics)
         if reflection.lessons:
-            self.store.save_lessons(reflection.lessons)
+            self.store.save_lessons(reflection.lessons, merge_similar=True)
+
+        # Weaken contradicting failure lessons if trade was a confirmed winner
+        if outcome and outcome.category in (
+            TradeOutcomeCategory.STANDARD_WIN,
+            TradeOutcomeCategory.PERFECT_EXIT,
+        ):
+            self.store.weaken_contradicting_lessons(
+                pair=trade_rec.pair,
+                setup=context.setup or "TREND_CONTINUATION",
+            )
 
         # Update SQLite trade record with reflection summary & tags
         if self.journal is not None:
