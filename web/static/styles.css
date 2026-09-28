@@ -1044,3 +1044,197 @@ body::before {
   margin-bottom: 1.25rem;
 }
 
+/* ---------- Structured Decision Report Cards (Phase 27) ---------- */
+.decision-report-container {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.decision-banner {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 1rem;
+  padding: 1.25rem 1.5rem;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+}
+
+.direction-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 1.15rem;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  padding: 6px 16px;
+  border-radius: 6px;
+  text-transform: uppercase;
+}
+.direction-tag.long {
+  background: rgba(0, 230, 118, 0.15);
+  color: var(--green);
+  border: 1px solid var(--green);
+}
+.direction-tag.short {
+  background: rgba(255, 82, 82, 0.15);
+  color: var(--red);
+  border: 1px solid var(--red);
+}
+.direction-tag.no_trade, .direction-tag.no-trade {
+  background: rgba(255, 171, 64, 0.15);
+  color: var(--amber);
+  border: 1px solid var(--amber);
+}
+.direction-tag.reject {
+  background: rgba(255, 23, 68, 0.15);
+  color: #ff1744;
+  border: 1px solid #ff1744;
+}
+
+.decision-section {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 1.25rem;
+}
+
+.decision-section-title {
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--text-bright);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 1rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.proposal-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.75rem;
+}
+
+.proposal-meta-item {
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.75rem 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.proposal-meta-label {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.proposal-meta-value {
+  font-family: var(--font-mono);
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--text-bright);
+}
+
+.proposal-meta-sub {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+}
+
+.risk-check-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 0.85rem;
+  padding: 6px 0;
+  color: var(--text-secondary);
+}
+
+.risk-check-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  font-size: 0.75rem;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+.risk-check-icon.pass {
+  background: rgba(0, 230, 118, 0.2);
+  color: var(--green);
+}
+.risk-check-icon.fail {
+  background: rgba(255, 82, 82, 0.2);
+  color: var(--red);
+}
+.risk-check-icon.warn {
+  background: rgba(255, 171, 64, 0.2);
+  color: var(--amber);
+}
+
+.research-subgrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 1rem;
+}
+
+.research-subcard {
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 1rem;
+}
+
+.research-subcard-title {
+  font-size: 0.82rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--cyan);
+  margin-bottom: 0.5rem;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.research-subcard-body {
+  font-size: 0.82rem;
+  line-height: 1.6;
+  color: var(--text-secondary);
+  max-height: 220px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+}
+
+.provenance-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.provenance-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+}
+
+

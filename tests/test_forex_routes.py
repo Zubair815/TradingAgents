@@ -1022,6 +1022,15 @@ class TestForexAnalysisRuns:
         assert rep["proposal"]["action"] == "LONG"
         assert rep["risk_decision"]["decision"] == "APPROVE"
         assert rep["sizing"]["recommended_lot_size"] == 1.5
+        assert rep["context"]["execution_timeframe"] == "M15"
+        assert rep["context"]["context_timeframes"] == ["H1", "H4", "D1"]
+        assert rep["context"]["news_risk"] == "CLEARED"
+        assert rep["research"]["technical"] == "Bullish trend on H1 and H4."
+        assert rep["research"]["macro"] == "Fed neutral, ECB dovish."
+        assert rep["research"]["news"] == "No high-impact economic news in 2 hours."
+        assert rep["research"]["manager_synthesis"] == "Consensus: Buy dips."
+        assert "historical_lessons" in rep["memory"]
+        assert "Forex Market Feed (OHLCV)" in rep["provenance"]["sources"]
 
         # Check SSE events emitted in order
         event_types = [evt["type"] for evt in _forex_run_events[run_id]]
@@ -1041,6 +1050,122 @@ class TestForexAnalysisRuns:
         assert stream_res.status_code == 200
         assert "event: complete" in stream_res.text
         assert "event: preparing_data" in stream_res.text
+
+    def test_forex_decision_report_modular_cards(self, client):
+        """Phase 27: Verify run endpoint returns all 7 modular intelligence cards & report payload."""
+        run_id = "fx_rep_test_7cards"
+        now_iso = datetime.now(timezone.utc).isoformat()
+        _forex_runs[run_id] = {
+            "run_id": run_id,
+            "pair": "GBPUSD",
+            "timeframe": "M15",
+            "execution_timeframe": "M15",
+            "context_timeframes": ["H1", "H4"],
+            "date": "2026-03-04",
+            "status": "completed",
+            "provider": "openrouter",
+            "quick_model": "deepseek-v3",
+            "deep_model": "r1",
+            "account_balance": 50000.0,
+            "risk_percent": 1.0,
+            "started_at": now_iso,
+            "finished_at": now_iso,
+            "error": None,
+            "signal": "SHORT",
+            "proposal_id": "prop_gbpusd_01",
+            "report_id": "rep_gbpusd_01",
+            "report_path": None,
+        }
+        _forex_completed_reports[run_id] = {
+            "run_id": run_id,
+            "pair": "GBPUSD",
+            "timeframe": "M15",
+            "execution_timeframe": "M15",
+            "context_timeframes": ["H1", "H4"],
+            "signal": "SHORT",
+            "proposal": {
+                "action": "SHORT",
+                "entry_price": 1.2850,
+                "entry_zone_low": 1.2845,
+                "entry_zone_high": 1.2855,
+                "stop_loss": 1.2880,
+                "take_profit_1": 1.2790,
+                "take_profit_2": 1.2740,
+                "risk_reward_ratio": 2.0,
+                "suggested_risk_percent": 1.0,
+                "suggested_lot_size": 1.2,
+                "valid_until": "2026-03-04 18:00:00 UTC",
+                "invalidation_condition": "H1 close above 1.2885",
+                "trade_rationale_summary": "London session distribution after liquidity sweep.",
+            },
+            "risk_decision": {
+                "decision": "APPROVE",
+                "max_risk_percent": 1.0,
+                "approved_lot_size": 1.2,
+                "risk_checks_passed": [
+                    "Risk:Reward verified >= 1.5R",
+                    "Stop distance within 35 pip threshold",
+                    "Economic blackout window cleared",
+                ],
+                "risk_violations": [],
+                "modifications_required": [],
+                "executive_rationale": "High-probability setup with clean invalidation.",
+            },
+            "sizing": {
+                "recommended_lot_size": 1.2,
+                "margin_required": 1200.0,
+                "units": 120000.0,
+            },
+            "context": {
+                "execution_timeframe": "M15",
+                "context_timeframes": ["H1", "H4"],
+                "session": "London Open",
+                "spread_pips": 1.2,
+                "volatility_atr": 38.0,
+                "news_risk": "CLEARED",
+            },
+            "research": {
+                "technical": "Bearish engulfing on M15 retesting broken support.",
+                "macro": "BoE dovish comments vs strong USD data.",
+                "news": "No high-impact UK news today.",
+                "bull_case": "Support holding at 1.2840.",
+                "bear_case": "Break of daily pivot with volume.",
+                "manager_synthesis": "Sell rallies below 1.2860.",
+            },
+            "memory": {
+                "historical_lessons": ["Avoid shorting into daily S1 without confirmation."],
+            },
+            "provenance": {
+                "sources": ["Forex Market Feed (OHLCV)", "Economic Calendar", "Central Bank Intelligence"],
+                "generated_at": now_iso,
+                "analysis_cutoff": "2026-03-04",
+            },
+            "report": "## Executive Decision\n\nApproved SHORT execution for GBPUSD.",
+        }
+
+        # 1. Fetch via /api/forex/runs/{run_id}
+        res = client.get(f"/api/forex/runs/{run_id}")
+        assert res.status_code == 200
+        data = res.json()
+        assert data["run"]["run_id"] == run_id
+        rep = data["report"]
+        assert rep["pair"] == "GBPUSD"
+        assert rep["signal"] == "SHORT"
+        assert rep["proposal"]["entry_price"] == 1.2850
+        assert rep["proposal"]["risk_reward_ratio"] == 2.0
+        assert rep["risk_decision"]["decision"] == "APPROVE"
+        assert len(rep["risk_decision"]["risk_checks_passed"]) == 3
+        assert rep["context"]["session"] == "London Open"
+        assert rep["research"]["technical"] == "Bearish engulfing on M15 retesting broken support."
+        assert len(rep["memory"]["historical_lessons"]) == 1
+        assert "Forex Market Feed (OHLCV)" in rep["provenance"]["sources"]
+
+        # 2. Fetch via compatibility alias /api/forex/analyze/{run_id}/report
+        alias_res = client.get(f"/api/forex/analyze/{run_id}/report")
+        assert alias_res.status_code == 200
+        alias_rep = alias_res.json()
+        assert alias_rep["run_id"] == run_id
+        assert alias_rep["context"]["execution_timeframe"] == "M15"
 
     def test_run_forex_analysis_worker_failure_emits_error(self, client):
         run_id = "fx_test_failure_456"

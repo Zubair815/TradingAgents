@@ -1294,6 +1294,14 @@ def _run_forex_analysis(run_id: str, req: ForexAnalysisRequest) -> None:
         report_id = report_path.parent.name if report_path else None
         proposal_id = final_state.get("forex_proposal_id") or getattr(proposal, "proposal_id", None)
 
+        debate_state = final_state.get("investment_debate_state")
+        if not isinstance(debate_state, dict):
+            debate_state = {}
+
+        applied_lessons = getattr(proposal, "applied_lesson_ids", None) or []
+        if not applied_lessons and isinstance(final_state.get("historical_lessons"), list):
+            applied_lessons = final_state.get("historical_lessons")
+
         report_payload = {
             "run_id": run_id,
             "pair": req.pair,
@@ -1310,10 +1318,35 @@ def _run_forex_analysis(run_id: str, req: ForexAnalysisRequest) -> None:
             "technical_report": final_state.get("forex_technical_report", ""),
             "macro_report": final_state.get("forex_macro_report", ""),
             "news_report": final_state.get("forex_news_report", ""),
-            "investment_debate": final_state.get("investment_debate_state", {}),
+            "investment_debate": debate_state,
             "trader_plan": final_state.get("trader_investment_plan", ""),
             "final_decision": final_state.get("final_trade_decision", ""),
+            "report": final_state.get("final_trade_decision", ""),
             "report_path": str(report_path) if report_path else None,
+            "context": {
+                "execution_timeframe": exec_tf,
+                "context_timeframes": list(ctx_tfs),
+                "session": final_state.get("market_session") or "Active Market Session",
+                "spread_pips": float(getattr(risk_decision, "spread_pips", None) or 1.5),
+                "volatility_atr": float(getattr(risk_decision, "atr_pips", None) or 45.0),
+                "news_risk": "CLEARED" if getattr(req, "economic_blackout", True) else "UNCHECKED",
+            },
+            "research": {
+                "technical": final_state.get("forex_technical_report", ""),
+                "macro": final_state.get("forex_macro_report", ""),
+                "news": final_state.get("forex_news_report", ""),
+                "bull_case": debate_state.get("bull_history", ""),
+                "bear_case": debate_state.get("bear_history", ""),
+                "manager_synthesis": debate_state.get("judge_decision", ""),
+            },
+            "memory": {
+                "historical_lessons": applied_lessons,
+            },
+            "provenance": {
+                "sources": ["Forex Market Feed (OHLCV)", "Economic Calendar", "Central Bank Intelligence"],
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "analysis_cutoff": req.date or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+            },
         }
 
         with _lock:

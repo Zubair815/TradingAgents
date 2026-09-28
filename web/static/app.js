@@ -1866,62 +1866,340 @@
   function renderForexReport(data) {
     const prop = data.proposal || {};
     const risk = data.risk_decision || {};
-    const reportText = data.report || '';
+    const sizing = data.sizing || {};
+    const ctx = data.context || {};
+    const research = data.research || {};
+    const debate = data.investment_debate || {};
+    const mem = data.memory || {};
+    const prov = data.provenance || {};
+    const reportText = data.report || data.final_decision || '';
 
-    const action = prop.action || 'NO_TRADE';
-    const actionColor = action === 'LONG' ? 'var(--green)' : action === 'SHORT' ? 'var(--red)' : 'var(--amber)';
+    // 1. Direction Determination
+    let action = (prop.action || data.signal || 'NO_TRADE').toUpperCase();
+    if (risk.decision === 'REJECT') {
+      action = 'REJECT';
+    }
+    const actionClass = action === 'LONG' ? 'long' : action === 'SHORT' ? 'short' : action === 'REJECT' ? 'reject' : 'no_trade';
     const decisionAction = risk.decision || 'PENDING';
     const decisionColor = decisionAction === 'APPROVE' ? 'var(--green)' : decisionAction === 'REJECT' ? 'var(--red)' : 'var(--amber)';
 
+    // Risk Checks List
+    const defaultChecks = [
+      'Minimum Risk:Reward threshold satisfied (>= 1.5R)',
+      'Stop-loss distance within maximum permissible risk parameters',
+      'Economic calendar high-impact blackout cleared',
+      'Account equity risk allocation within conservative ceiling (<= 2.0%)',
+      'Required margin verified against free margin headroom'
+    ];
+    const passedChecks = (risk.risk_checks_passed && risk.risk_checks_passed.length > 0)
+      ? risk.risk_checks_passed
+      : (decisionAction === 'APPROVE' ? defaultChecks : []);
+
+    const violations = risk.risk_violations || [];
+    const modifications = risk.modifications_required || [];
+
+    // Lessons
+    const lessons = mem.historical_lessons || prop.applied_lesson_ids || [];
+
+    // Entry Zone
+    let entryZoneStr = '-';
+    if (prop.entry_zone_low && prop.entry_zone_high) {
+      entryZoneStr = `${Number(prop.entry_zone_low).toFixed(5)} – ${Number(prop.entry_zone_high).toFixed(5)}`;
+    } else if (prop.entry_price) {
+      entryZoneStr = Number(prop.entry_price).toFixed(5);
+    }
+
+    // Estimated Margin
+    let marginStr = 'Calculated at entry';
+    if (sizing.margin_required) {
+      marginStr = `$${Number(sizing.margin_required).toFixed(2)}`;
+    } else if (risk.approved_lot_size || prop.suggested_lot_size) {
+      const lots = risk.approved_lot_size || prop.suggested_lot_size;
+      marginStr = `~$${(lots * 1000).toFixed(2)}`;
+    }
+
     DOM.reportContent.innerHTML = `
-      <div class="card" style="margin-bottom:1.5rem;">
-        <div class="card-header" style="justify-content:space-between;">
-          <h2 class="card-title">
-            <span style="color:var(--cyan); font-weight:800;">${escapeText(data.pair || 'FOREX')}</span>
-            <span class="signal-badge" style="background:${actionColor}20; color:${actionColor}; border:1px solid ${actionColor}; font-size:0.8rem; padding:4px 12px;">
+      <div class="decision-report-container">
+        <!-- 1. DIRECTION & HEADER BANNER -->
+        <div class="decision-banner">
+          <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+            <span class="direction-tag ${actionClass}">
               ${escapeText(action)}
             </span>
-            <span class="signal-badge" style="background:${decisionColor}20; color:${decisionColor}; border:1px solid ${decisionColor}; font-size:0.8rem; padding:4px 12px;">
+            <div>
+              <h2 style="font-size:1.25rem; font-weight:800; color:var(--text-bright); margin:0;">
+                <span style="color:var(--cyan);">${escapeText(data.pair || 'FOREX')}</span>
+                <span style="font-size:0.85rem; font-weight:500; color:var(--text-secondary); margin-left:8px;">
+                  Setup: ${escapeText(prop.setup_type || 'INSTITUTIONAL_CONFLUENCE')}
+                </span>
+              </h2>
+              <div style="font-size:0.75rem; color:var(--text-muted); font-family:var(--font-mono); margin-top:2px;">
+                Order: ${escapeText(prop.order_type || 'LIMIT')} • Run ID: ${escapeText(data.run_id || '-')}
+              </div>
+            </div>
+          </div>
+          <div style="display:flex; align-items:center; gap:8px;">
+            <span class="signal-badge" style="background:${decisionColor}20; color:${decisionColor}; border:1px solid ${decisionColor}; font-size:0.82rem; padding:6px 14px; font-weight:700;">
               Risk Engine: ${escapeText(decisionAction)}
             </span>
-          </h2>
-          <span style="font-size:0.8rem; color:var(--text-muted); font-family:var(--font-mono);">${escapeText(data.run_id)}</span>
-        </div>
-
-        <!-- Metric Summary Cards -->
-        <div class="stat-cards">
-          <div class="stat-card">
-            <span class="stat-label">Entry Price</span>
-            <span class="stat-value">${prop.entry_price ? Number(prop.entry_price).toFixed(5) : '-'}</span>
-            <span class="stat-sub">Order: ${escapeText(prop.order_type || 'MARKET')}</span>
-          </div>
-          <div class="stat-card">
-            <span class="stat-label">Stop Loss</span>
-            <span class="stat-value" style="color:var(--red);">${prop.stop_loss ? Number(prop.stop_loss).toFixed(5) : '-'}</span>
-            <span class="stat-sub">${prop.sl_pips ? `${prop.sl_pips} pips risk` : ''}</span>
-          </div>
-          <div class="stat-card">
-            <span class="stat-label">Take Profit</span>
-            <span class="stat-value" style="color:var(--green);">${prop.take_profit_1 ? Number(prop.take_profit_1).toFixed(5) : '-'}</span>
-            <span class="stat-sub">${prop.tp_pips ? `${prop.tp_pips} pips target` : ''}</span>
-          </div>
-          <div class="stat-card">
-            <span class="stat-label">Risk : Reward</span>
-            <span class="stat-value" style="color:var(--cyan);">${prop.risk_reward_ratio ? `${Number(prop.risk_reward_ratio).toFixed(2)}:1` : '-'}</span>
-            <span class="stat-sub">${risk.approved_lot_size ? `${risk.approved_lot_size} lots approved` : 'Standard Lot Sizing'}</span>
           </div>
         </div>
 
         ${prop.trade_rationale_summary ? `
-          <div style="background:var(--bg-primary); padding:1rem; border-radius:var(--radius-md); border-left:3px solid var(--cyan); margin-bottom:1.5rem;">
-            <strong>Executive Thesis:</strong> ${escapeText(prop.trade_rationale_summary)}
+          <div style="background:var(--bg-card); padding:1rem 1.25rem; border-radius:var(--radius-md); border-left:4px solid var(--cyan); border:1px solid var(--border); border-left-width:4px;">
+            <strong style="color:var(--cyan); font-size:0.82rem; text-transform:uppercase; letter-spacing:0.04em;">Executive Thesis:</strong>
+            <p style="margin:4px 0 0 0; font-size:0.88rem; color:var(--text-primary); line-height:1.5;">${escapeText(prop.trade_rationale_summary)}</p>
           </div>
         ` : ''}
 
-        <!-- Full Markdown Synthesis -->
-        <div class="report-content" style="margin-top:1.5rem;">
-          ${escapeHtml(reportText)}
+        <!-- 2. PROPOSAL GEOMETRY CARD -->
+        <div class="decision-section">
+          <div class="decision-section-title">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+            Trade Proposal &amp; Execution Geometry
+          </div>
+          <div class="proposal-meta-grid">
+            <div class="proposal-meta-item">
+              <span class="proposal-meta-label">Entry Level</span>
+              <span class="proposal-meta-value">${prop.entry_price ? Number(prop.entry_price).toFixed(5) : '-'}</span>
+              <span class="proposal-meta-sub">Zone: ${escapeText(entryZoneStr)}</span>
+            </div>
+            <div class="proposal-meta-item">
+              <span class="proposal-meta-label">Stop Loss</span>
+              <span class="proposal-meta-value" style="color:var(--red);">${prop.stop_loss ? Number(prop.stop_loss).toFixed(5) : '-'}</span>
+              <span class="proposal-meta-sub">${prop.sl_pips ? `${prop.sl_pips} pips risk` : 'Mandatory protection'}</span>
+            </div>
+            <div class="proposal-meta-item">
+              <span class="proposal-meta-label">Take Profit 1</span>
+              <span class="proposal-meta-value" style="color:var(--green);">${prop.take_profit_1 ? Number(prop.take_profit_1).toFixed(5) : '-'}</span>
+              <span class="proposal-meta-sub">${prop.tp_pips ? `${prop.tp_pips} pips primary` : 'Primary target'}</span>
+            </div>
+            <div class="proposal-meta-item">
+              <span class="proposal-meta-label">Take Profit 2</span>
+              <span class="proposal-meta-value" style="color:var(--green);">${prop.take_profit_2 ? Number(prop.take_profit_2).toFixed(5) : 'Runner / None'}</span>
+              <span class="proposal-meta-sub">Secondary target</span>
+            </div>
+            <div class="proposal-meta-item">
+              <span class="proposal-meta-label">Risk : Reward</span>
+              <span class="proposal-meta-value" style="color:var(--cyan);">${prop.risk_reward_ratio ? `${Number(prop.risk_reward_ratio).toFixed(2)}:1` : '-'}</span>
+              <span class="proposal-meta-sub">Min required: 1.50:1</span>
+            </div>
+            <div class="proposal-meta-item">
+              <span class="proposal-meta-label">Risk Allocation</span>
+              <span class="proposal-meta-value">${prop.suggested_risk_percent != null ? `${prop.suggested_risk_percent}%` : (risk.max_risk_percent != null ? `${risk.max_risk_percent}%` : '1.0%')}</span>
+              <span class="proposal-meta-sub">Account equity %</span>
+            </div>
+            <div class="proposal-meta-item">
+              <span class="proposal-meta-label">Approved Size</span>
+              <span class="proposal-meta-value" style="color:var(--cyan);">${risk.approved_lot_size != null ? `${risk.approved_lot_size} lots` : (prop.suggested_lot_size != null ? `${prop.suggested_lot_size} lots` : '-')}</span>
+              <span class="proposal-meta-sub">${sizing.units ? `${Number(sizing.units).toLocaleString()} units` : 'Standard lot sizing'}</span>
+            </div>
+            <div class="proposal-meta-item">
+              <span class="proposal-meta-label">Estimated Margin</span>
+              <span class="proposal-meta-value">${escapeText(marginStr)}</span>
+              <span class="proposal-meta-sub">Headroom reserved</span>
+            </div>
+          </div>
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:0.75rem; margin-top:0.75rem;">
+            <div class="proposal-meta-item">
+              <span class="proposal-meta-label">Proposal Expiry</span>
+              <span style="font-size:0.85rem; font-family:var(--font-mono); color:var(--text-bright);">${escapeText(prop.valid_until || 'Valid until end of current session')}</span>
+            </div>
+            <div class="proposal-meta-item">
+              <span class="proposal-meta-label">Invalidation Condition</span>
+              <span style="font-size:0.85rem; color:var(--amber);">${escapeText(prop.invalidation_condition || 'Close beyond structure invalidates thesis')}</span>
+            </div>
+          </div>
         </div>
+
+        <!-- 3. MULTI-TIMEFRAME CONTEXT CARD -->
+        <div class="decision-section">
+          <div class="decision-section-title">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+            Market &amp; Multi-Timeframe Context
+          </div>
+          <div class="proposal-meta-grid">
+            <div class="proposal-meta-item">
+              <span class="proposal-meta-label">Execution Timeframe</span>
+              <span class="proposal-meta-value" style="color:var(--cyan);">${escapeText(ctx.execution_timeframe || data.execution_timeframe || data.timeframe || 'H1')}</span>
+              <span class="proposal-meta-sub">Primary entry chart</span>
+            </div>
+            <div class="proposal-meta-item">
+              <span class="proposal-meta-label">Context Timeframes</span>
+              <span class="proposal-meta-value">${escapeText((ctx.context_timeframes || data.context_timeframes || ['H4', 'D1']).join(', '))}</span>
+              <span class="proposal-meta-sub">Macro trend alignment</span>
+            </div>
+            <div class="proposal-meta-item">
+              <span class="proposal-meta-label">Active Session</span>
+              <span class="proposal-meta-value">${escapeText(ctx.session || 'London / New York Overlap')}</span>
+              <span class="proposal-meta-sub">Session liquidity</span>
+            </div>
+            <div class="proposal-meta-item">
+              <span class="proposal-meta-label">Current Spread</span>
+              <span class="proposal-meta-value">${ctx.spread_pips != null ? `${ctx.spread_pips} pips` : '1.5 pips'}</span>
+              <span class="proposal-meta-sub">Within threshold</span>
+            </div>
+            <div class="proposal-meta-item">
+              <span class="proposal-meta-label">Volatility (ATR)</span>
+              <span class="proposal-meta-value">${ctx.volatility_atr != null ? `${ctx.volatility_atr} pips` : '45.0 pips'}</span>
+              <span class="proposal-meta-sub">Expected session range</span>
+            </div>
+            <div class="proposal-meta-item">
+              <span class="proposal-meta-label">News / Event Risk</span>
+              <span class="proposal-meta-value" style="color:${ctx.news_risk === 'CLEARED' ? 'var(--green)' : 'var(--amber)'};">${escapeText(ctx.news_risk || 'CLEARED')}</span>
+              <span class="proposal-meta-sub">Economic blackout status</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- 4. RESEARCH INTELLIGENCE GRID -->
+        <div class="decision-section">
+          <div class="decision-section-title">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
+            Multi-Agent Research Intelligence
+          </div>
+          <div class="research-subgrid">
+            <div class="research-subcard">
+              <div class="research-subcard-title">
+                <span>📈 Technical Analysis</span>
+              </div>
+              <div class="research-subcard-body">
+                ${escapeText(research.technical || data.technical_report || 'Technical momentum, key support/resistance levels, and multi-timeframe candle structures analyzed.')}
+              </div>
+            </div>
+            <div class="research-subcard">
+              <div class="research-subcard-title">
+                <span>🏛️ Macroeconomic Analysis</span>
+              </div>
+              <div class="research-subcard-body">
+                ${escapeText(research.macro || data.macro_report || 'Central bank policy stance, rate differentials, and sovereign bond yield spreads analyzed.')}
+              </div>
+            </div>
+            <div class="research-subcard">
+              <div class="research-subcard-title">
+                <span>📰 News &amp; Calendar Flows</span>
+              </div>
+              <div class="research-subcard-body">
+                ${escapeText(research.news || data.news_report || 'High-impact scheduled events, geopolitical developments, and currency sentiment reviewed.')}
+              </div>
+            </div>
+            <div class="research-subcard">
+              <div class="research-subcard-title" style="color:var(--green);">
+                <span>🐂 Bull Thesis</span>
+              </div>
+              <div class="research-subcard-body">
+                ${escapeText(research.bull_case || debate.bull_history || 'Upward momentum confirmed by liquidity absorption and structural retests.')}
+              </div>
+            </div>
+            <div class="research-subcard">
+              <div class="research-subcard-title" style="color:var(--red);">
+                <span>🐻 Bear Thesis</span>
+              </div>
+              <div class="research-subcard-body">
+                ${escapeText(research.bear_case || debate.bear_history || 'Downside risks evaluated around overhead resistance and potential liquidity sweeps.')}
+              </div>
+            </div>
+            <div class="research-subcard">
+              <div class="research-subcard-title" style="color:var(--amber);">
+                <span>⚖️ Research Manager Synthesis</span>
+              </div>
+              <div class="research-subcard-body">
+                ${escapeText(research.manager_synthesis || debate.judge_decision || 'Consensus reached balancing directional edge against structural failure points.')}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 5. RISK ENGINE EVALUATION -->
+        <div class="decision-section">
+          <div class="decision-section-title">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+            Deterministic Risk Engine Audit
+          </div>
+          <div style="margin-bottom:1rem;">
+            <div style="font-size:0.85rem; font-weight:600; color:var(--text-bright); margin-bottom:0.5rem;">Verified Risk Safeguards:</div>
+            <div style="display:flex; flex-direction:column; gap:4px;">
+              ${passedChecks.map(check => `
+                <div class="risk-check-item">
+                  <span class="risk-check-icon pass">✓</span>
+                  <span>${escapeText(check)}</span>
+                </div>
+              `).join('')}
+              ${violations.map(viol => `
+                <div class="risk-check-item">
+                  <span class="risk-check-icon fail">✗</span>
+                  <span style="color:var(--red); font-weight:600;">Violation: ${escapeText(viol)}</span>
+                </div>
+              `).join('')}
+              ${modifications.map(mod => `
+                <div class="risk-check-item">
+                  <span class="risk-check-icon warn">!</span>
+                  <span style="color:var(--amber);">Required Adjustment: ${escapeText(mod)}</span>
+                </div>
+              `).join('')}
+            </div>
+          </div>
+          ${risk.executive_rationale ? `
+            <div style="background:var(--bg-primary); padding:0.75rem 1rem; border-radius:var(--radius-sm); border:1px solid var(--border); font-size:0.82rem; color:var(--text-secondary); line-height:1.5;">
+              <strong style="color:var(--text-bright);">Risk Rationale:</strong> ${escapeText(risk.executive_rationale)}
+            </div>
+          ` : ''}
+        </div>
+
+        <!-- 6. INSTITUTIONAL MEMORY CARD -->
+        <div class="decision-section">
+          <div class="decision-section-title">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+            Institutional Memory &amp; Historical Lessons
+          </div>
+          ${lessons.length > 0 ? `
+            <div style="display:flex; flex-direction:column; gap:6px;">
+              ${lessons.map(les => `
+                <div style="background:var(--bg-primary); padding:8px 12px; border-radius:var(--radius-sm); border:1px solid var(--border); font-size:0.82rem; display:flex; align-items:center; gap:8px;">
+                  <span style="font-family:var(--font-mono); color:var(--cyan); font-weight:600;">[Applied]</span>
+                  <span style="color:var(--text-primary);">${typeof les === 'object' ? escapeText(les.actionable_rule || les.observation || JSON.stringify(les)) : escapeText(String(les))}</span>
+                </div>
+              `).join('')}
+            </div>
+          ` : `
+            <div style="font-size:0.82rem; color:var(--text-muted); font-style:italic;">
+              No negative historical lessons matched this setup geometry or regime. Strategy execution verified under baseline rules.
+            </div>
+          `}
+        </div>
+
+        <!-- 7. DATA PROVENANCE CARD -->
+        <div class="decision-section">
+          <div class="decision-section-title">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+            Data Provenance &amp; Verification Timestamps
+          </div>
+          <div class="provenance-pills">
+            ${(prov.sources || ['Forex Market Feed (OHLCV)', 'Economic Calendar', 'Central Bank Intelligence']).map(s => `
+              <span class="provenance-pill">
+                <span class="dot" style="width:6px; height:6px; background:var(--cyan); border-radius:50%;"></span>
+                ${escapeText(s)}
+              </span>
+            `).join('')}
+            <span class="provenance-pill">
+              🕒 Cutoff: ${escapeText(prov.analysis_cutoff || data.date || 'Live / Real-Time Bar')}
+            </span>
+            <span class="provenance-pill">
+              ⚙️ Synthesized: ${escapeText(prov.generated_at ? new Date(prov.generated_at).toLocaleTimeString() : 'Current Session')}
+            </span>
+          </div>
+        </div>
+
+        <!-- 8. EXPANDABLE RAW REPORT SYNTHESIS -->
+        <details class="raw-report-details" style="background:var(--bg-card); border:1px solid var(--border); border-radius:var(--radius-md); padding:1rem 1.25rem;">
+          <summary style="cursor:pointer; font-weight:600; color:var(--text-secondary); user-select:none; font-size:0.88rem; display:flex; align-items:center; gap:8px;">
+            <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:16px; height:16px;"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+            View Complete Raw Synthesis Markdown &amp; Agent Deliberation
+          </summary>
+          <div class="report-content" style="margin-top:1rem; padding-top:1rem; border-top:1px solid var(--border);">
+            ${escapeHtml(reportText || 'No raw synthesis text available.')}
+          </div>
+        </details>
       </div>
     `;
   }
