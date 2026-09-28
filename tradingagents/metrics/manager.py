@@ -24,6 +24,11 @@ from tradingagents.database.models import (
     TradeStatus,
 )
 from tradingagents.learning.history_provider import TradeHistoryProvider
+from tradingagents.metrics.confidence_calibration import (
+    CalibratedConfidenceResult,
+    ConfidenceCalibrationEngine,
+    ConfidenceCalibrationReport,
+)
 from tradingagents.metrics.execution import (
     ExecutionQualityAnalyzer,
 )
@@ -70,6 +75,7 @@ class ForexMetricsManager:
         self.execution_analyzer = ExecutionQualityAnalyzer(account_currency=self.account_currency)
         self.outcome_engine = TradeOutcomeEngine()
         self.proposal_evaluator = SkippedProposalEvaluator()
+        self.confidence_engine = ConfidenceCalibrationEngine()
 
     def analyze_trade(
         self,
@@ -264,6 +270,7 @@ class ForexMetricsManager:
         summary: MetricsSummary,
         title: str = "Forex MFE/MAE & Execution Quality Dashboard",
         comparative: ComparativePerformanceSummary | None = None,
+        confidence_report: ConfidenceCalibrationReport | None = None,
     ) -> str:
         """Render a formatted institutional Markdown dashboard with KPI tables."""
         lines: list[str] = [
@@ -353,6 +360,14 @@ class ForexMetricsManager:
                 f"| **User Skip Alpha** | — | `{comparative.user_skip_alpha_r:+.2f}R` | Avoided {comparative.skipped_avoided_losses} losses, missed {comparative.skipped_missed_winners} wins |",
                 "",
                 f"> **Audit Verdict:** {comparative.verdict}",
+                "",
+            ])
+
+        if confidence_report:
+            lines.extend([
+                "## 5. Model Confidence Calibration & Probabilistic Reliability",
+                "",
+                confidence_report.summary_markdown,
                 "",
             ])
 
@@ -446,3 +461,28 @@ class ForexMetricsManager:
             trades=trades,
             executions=executions,
         )
+
+    def get_confidence_calibration(
+        self,
+        pair: str | None = None,
+        min_samples: int = 10,
+        trades: Sequence[Any] | None = None,
+    ) -> ConfidenceCalibrationReport:
+        """Compute calibration report for closed trades and/or historical simulations (Phase 18)."""
+        if trades is not None:
+            trade_list = list(trades)
+        elif self.journal is not None:
+            trade_list = self.journal.list_trades(pair=pair, limit=10000)
+        else:
+            trade_list = []
+        return self.confidence_engine.compute_calibration(trades=trade_list, min_samples=min_samples)
+
+    def calibrate_proposal_confidence(
+        self,
+        raw_confidence: float,
+        pair: str | None = None,
+        report: ConfidenceCalibrationReport | None = None,
+    ) -> CalibratedConfidenceResult:
+        """Map raw model confidence score to calibrated probability or safe uncalibrated warning (Phase 18)."""
+        active_report = report or self.get_confidence_calibration(pair=pair)
+        return self.confidence_engine.calibrate_score(raw_confidence=raw_confidence, report=active_report)

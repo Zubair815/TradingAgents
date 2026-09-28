@@ -138,6 +138,7 @@ class ProposalRecord(BaseModel):
     risk_reward_ratio: float | None = None
     sl_pips: float | None = None
     tp_pips: float | None = None
+    confidence: float | None = None
     suggested_risk_percent: float | None = None
     suggested_lot_size: float | None = None
     confluence_factors: list[str] = Field(default_factory=list)
@@ -173,6 +174,7 @@ class ProposalRecord(BaseModel):
             suggested_lot_size=self.suggested_lot_size,
             confluence_factors=self.confluence_factors,
             invalidation_condition=self.invalidation_condition,
+            confidence=self.confidence,
             reasoning=self.reasoning,
             trade_rationale_summary=self.trade_rationale_summary,
         )
@@ -226,6 +228,7 @@ class ProposalRecord(BaseModel):
             suggested_lot_size=proposal.suggested_lot_size,
             confluence_factors=proposal.confluence_factors,
             invalidation_condition=proposal.invalidation_condition,
+            confidence=getattr(proposal, "confidence", None) if getattr(proposal, "confidence", None) is not None else meta.get("confidence"),
             reasoning=proposal.reasoning,
             trade_rationale_summary=proposal.trade_rationale_summary,
             status=status,
@@ -262,6 +265,7 @@ class TradeJournalRecord(BaseModel):
     net_profit: float | None = None
     pips_gained: float | None = None
     r_multiple: float | None = None
+    confidence: float | None = None
     exit_reason: TradeExitReason | None = None
     notes: str = ""
     reflection: str = ""

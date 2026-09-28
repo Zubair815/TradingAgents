@@ -163,12 +163,12 @@ class ForexTradeJournal:
                             proposal_id, created_at_utc, pair, action, order_type,
                             setup_type, timeframe, entry_price, entry_zone_low,
                             entry_zone_high, stop_loss, take_profit_1, take_profit_2,
-                            risk_reward_ratio, sl_pips, tp_pips, suggested_risk_percent,
+                            risk_reward_ratio, sl_pips, tp_pips, confidence, suggested_risk_percent,
                             suggested_lot_size, confluence_factors_json,
                             invalidation_condition, reasoning, trade_rationale_summary,
                             status, risk_decision_json, metadata_json
                         ) VALUES (
-                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                         );
                         """,
                         (
@@ -188,6 +188,7 @@ class ForexTradeJournal:
                             rec.risk_reward_ratio,
                             rec.sl_pips,
                             rec.tp_pips,
+                            rec.confidence,
                             rec.suggested_risk_percent,
                             rec.suggested_lot_size,
                             json.dumps(rec.confluence_factors),
@@ -380,10 +381,20 @@ class ForexTradeJournal:
         tags: list[str] | None = None,
         notes: str = "",
         metadata: dict[str, Any] | None = None,
+        confidence: float | None = None,
     ) -> TradeJournalRecord:
         """Record the execution and opening of a new Forex trade."""
         tid = trade_id or f"trd_{uuid.uuid4().hex[:12]}"
         now_str = open_time_utc or datetime.now(timezone.utc).isoformat()
+
+        eff_confidence = confidence
+        if eff_confidence is None and proposal_id:
+            try:
+                prop = self.get_proposal(proposal_id)
+                if prop and getattr(prop, "confidence", None) is not None:
+                    eff_confidence = prop.confidence
+            except Exception:
+                pass
 
         rec = TradeJournalRecord(
             trade_id=tid,
@@ -397,6 +408,7 @@ class ForexTradeJournal:
             take_profit=take_profit,
             lots=lots,
             commission=commission,
+            confidence=eff_confidence,
             tags=tags or [],
             notes=notes,
             metadata=metadata or {},
@@ -412,8 +424,8 @@ class ForexTradeJournal:
                         INSERT INTO trades (
                             trade_id, proposal_id, pair, action, status,
                             open_time_utc, open_price, stop_loss, take_profit,
-                            lots, commission, swap, tags_json, notes, metadata_json
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                            lots, commission, swap, confidence, tags_json, notes, metadata_json
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                         """,
                         (
                             rec.trade_id,
@@ -428,6 +440,7 @@ class ForexTradeJournal:
                             rec.lots,
                             rec.commission,
                             rec.swap,
+                            rec.confidence,
                             json.dumps(rec.tags),
                             rec.notes,
                             json.dumps(rec.metadata),
@@ -951,6 +964,7 @@ class ForexTradeJournal:
             risk_reward_ratio=row["risk_reward_ratio"],
             sl_pips=row["sl_pips"],
             tp_pips=row["tp_pips"],
+            confidence=dict(row).get("confidence"),
             suggested_risk_percent=row["suggested_risk_percent"],
             suggested_lot_size=row["suggested_lot_size"],
             confluence_factors=json.loads(row["confluence_factors_json"]),
@@ -983,6 +997,7 @@ class ForexTradeJournal:
             net_profit=row["net_profit"],
             pips_gained=row["pips_gained"],
             r_multiple=row["r_multiple"],
+            confidence=dict(row).get("confidence"),
             exit_reason=TradeExitReason.from_str(row["exit_reason"]) if row["exit_reason"] else None,
             notes=row["notes"],
             reflection=row["reflection"],
@@ -1267,3 +1282,23 @@ class ForexTradeJournal:
             finally:
                 if not self._is_memory and conn is not self._mem_conn:
                     conn.close()
+
+    # -----------------------------------------------------------------------
+    # Confidence Calibration (Phase 18)
+    # -----------------------------------------------------------------------
+
+    def get_confidence_calibration(
+        self,
+        pair: str | None = None,
+        min_samples: int = 10,
+    ) -> Any:
+        """Aggregate trade outcomes by confidence bucket and compute empirical calibration metrics (Phase 18)."""
+        from tradingagents.metrics.confidence_calibration import ConfidenceCalibrationEngine
+
+        trades = self.list_trades(pair=pair, limit=10000)
+        engine = ConfidenceCalibrationEngine(min_samples=min_samples)
+        return engine.compute_calibration(trades=trades, min_samples=min_samples)
+
+    # Aliases
+    record_trade = record_trade_open
+

@@ -80,6 +80,15 @@ def parse_forex_proposal_from_text(
             if isinstance(data, dict):
                 data.setdefault("pair", canon_pair)
                 data.setdefault("timeframe", default_timeframe)
+                if "confidence" in data and data["confidence"] is not None:
+                    try:
+                        raw_c = float(data["confidence"])
+                        if 0.0 < raw_c <= 1.0:
+                            data["confidence"] = round(raw_c * 100.0, 1)
+                        else:
+                            data["confidence"] = round(raw_c, 1)
+                    except (ValueError, TypeError):
+                        pass
                 p = ForexTraderProposal.model_validate(data)
                 if default_timeframe and p.timeframe != default_timeframe:
                     p = p.model_copy(update={"timeframe": default_timeframe})
@@ -117,6 +126,12 @@ def parse_forex_proposal_from_text(
     take_profit_1 = extract_float(r"(?:Take Profit 1|Take Profit|TP1|TP)[:*\s]+([0-9]+\.?[0-9]*)")
     take_profit_2 = extract_float(r"(?:Take Profit 2|TP2)[:*\s]+([0-9]+\.?[0-9]*)")
     risk_pct = extract_float(r"(?:Risk Percent|Risk Allocation|Risk)[:*\s]+([0-9]+\.?[0-9]*)%?")
+    confidence = extract_float(r"(?:Model Confidence|Confidence Score|Confidence)[:*\s]+([0-9]+\.?[0-9]*)%?")
+    if confidence is not None:
+        if 0.0 < confidence <= 1.0:
+            confidence = round(confidence * 100.0, 1)
+        else:
+            confidence = round(confidence, 1)
 
     # Confluences
     confluences: list[str] = []
@@ -137,6 +152,7 @@ def parse_forex_proposal_from_text(
             return ForexTraderProposal(
                 pair=canon_pair,
                 action=ForexAction.NO_TRADE,
+                confidence=confidence,
                 reasoning=f"Directional trade requested ({action.value}) but required entry or stop-loss level missing.\n\nRaw text:\n{cleaned}",
                 trade_rationale_summary="NO_TRADE: Incomplete price levels.",
             )
@@ -145,6 +161,7 @@ def parse_forex_proposal_from_text(
             return ForexTraderProposal(
                 pair=canon_pair,
                 action=ForexAction.NO_TRADE,
+                confidence=confidence,
                 reasoning=f"Inverted trade geometry: LONG requires entry ({entry_price}) > stop_loss ({stop_loss}).\n\nRaw text:\n{cleaned}",
                 trade_rationale_summary="NO_TRADE: Inverted LONG geometry.",
             )
@@ -153,6 +170,7 @@ def parse_forex_proposal_from_text(
             return ForexTraderProposal(
                 pair=canon_pair,
                 action=ForexAction.NO_TRADE,
+                confidence=confidence,
                 reasoning=f"Inverted trade geometry: SHORT requires entry ({entry_price}) < stop_loss ({stop_loss}).\n\nRaw text:\n{cleaned}",
                 trade_rationale_summary="NO_TRADE: Inverted SHORT geometry.",
             )
@@ -171,6 +189,7 @@ def parse_forex_proposal_from_text(
             suggested_risk_percent=risk_pct or 1.0,
             confluence_factors=confluences,
             invalidation_condition=inval_condition,
+            confidence=confidence,
             reasoning=cleaned,
             trade_rationale_summary=cleaned[:250].replace("\n", " ").strip(),
         )

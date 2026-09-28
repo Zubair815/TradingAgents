@@ -9,6 +9,13 @@ Exports:
 - Unified manager & institutional markdown dashboard: ``ForexMetricsManager``, ``MetricsSummary``.
 """
 
+from tradingagents.metrics.confidence_calibration import (
+    CalibratedConfidenceResult,
+    ConfidenceBucketMetrics,
+    ConfidenceCalibrationEngine,
+    ConfidenceCalibrationReport,
+    calibrate_confidence_score,
+)
 from tradingagents.metrics.execution import (
     ExecutionQualityAnalyzer,
     calculate_execution_quality_score,
@@ -61,6 +68,9 @@ __all__ = [
     "AITheoreticalMetrics",
     "UserExecutionMetrics",
     "ComparativePerformanceSummary",
+    "ConfidenceBucketMetrics",
+    "ConfidenceCalibrationReport",
+    "CalibratedConfidenceResult",
     # MFE / MAE Calculations
     "calculate_mfe_mae",
     "calculate_trade_mfe_mae",
@@ -79,4 +89,7 @@ __all__ = [
     "calculate_ai_theoretical_performance",
     "calculate_user_execution_performance",
     "compare_ai_vs_user_performance",
+    # Confidence Calibration (Phase 18)
+    "ConfidenceCalibrationEngine",
+    "calibrate_confidence_score",
 ]

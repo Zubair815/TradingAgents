@@ -275,6 +275,12 @@ class ForexTraderProposal(BaseModel):
         default_factory=list,
         description="IDs of historical lessons retrieved and incorporated into this proposal",
     )
+    confidence: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=100.0,
+        description="Original model confidence score (0.0 to 100.0 scale, e.g. 75.0 for 75%)",
+    )
 
     @field_validator(
         "entry_price",

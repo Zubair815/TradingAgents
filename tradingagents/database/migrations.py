@@ -44,6 +44,7 @@ MIGRATIONS: list[dict[str, Any]] = [
             risk_reward_ratio REAL,
             sl_pips REAL,
             tp_pips REAL,
+            confidence REAL,
             suggested_risk_percent REAL,
             suggested_lot_size REAL,
             confluence_factors_json TEXT NOT NULL DEFAULT '[]',
@@ -80,6 +81,7 @@ MIGRATIONS: list[dict[str, Any]] = [
             net_profit REAL,
             pips_gained REAL,
             r_multiple REAL,
+            confidence REAL,
             exit_reason TEXT,
             notes TEXT NOT NULL DEFAULT '',
             reflection TEXT NOT NULL DEFAULT '',
@@ -188,6 +190,14 @@ MIGRATIONS: list[dict[str, Any]] = [
         """,
     },
     {"version": 2, "description": "Versioned research runs, immutable evidence and source links", "sql": SCHEMA_V2},
+    {
+        "version": 3,
+        "description": "Add confidence column to proposals and trades for confidence calibration (Phase 18)",
+        "sql": """
+        -- Idempotently handled by migration engine helper
+        SELECT 1;
+        """,
+    },
 ]
 
 
@@ -285,10 +295,23 @@ def run_migrations(conn_or_path: sqlite3.Connection | str | Path) -> int:
                 count += 1
 
         _upgrade_trade_events_if_needed(conn)
+        _ensure_confidence_columns(conn)
         return count
     finally:
         if should_close:
             conn.close()
+
+
+def _ensure_confidence_columns(conn: sqlite3.Connection) -> None:
+    """Ensure proposals and trades tables have the confidence column (Phase 18)."""
+    for tbl in ("proposals", "trades"):
+        try:
+            cursor = conn.execute(f"PRAGMA table_info({tbl});")
+            cols = {row[1] for row in cursor.fetchall()}
+            if cols and "confidence" not in cols:
+                conn.execute(f"ALTER TABLE {tbl} ADD COLUMN confidence REAL;")
+        except Exception as exc:
+            logger.debug("Failed checking/adding confidence column to %s: %s", tbl, exc)
 
 
 def _upgrade_trade_events_if_needed(conn: sqlite3.Connection) -> None:

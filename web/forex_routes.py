@@ -1836,3 +1836,45 @@ async def get_comparative_performance(
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
+
+# ---------------------------------------------------------------------------
+# 9. Confidence Calibration Endpoints (Phase 18)
+# ---------------------------------------------------------------------------
+
+
+class CalibrateConfidenceRequest(BaseModel):
+    confidence: float = Field(ge=0.0, le=100.0, description="Raw model confidence score (0-100 scale)")
+    pair: str | None = Field(default=None, description="Optional pair to calibrate against pair-specific historical trades")
+    min_samples: int = Field(default=10, ge=1, description="Minimum samples required for calibration")
+
+
+@router.get("/metrics/confidence-calibration")
+async def get_confidence_calibration(
+    pair: str | None = None,
+    min_samples: int = Query(default=10, ge=1),
+    metrics_mgr: ForexMetricsManager = Depends(get_metrics_manager),
+):
+    """Retrieve full confidence calibration scorecard, bucket metrics, ECE, and sample warnings."""
+    report = metrics_mgr.get_confidence_calibration(pair=pair, min_samples=min_samples)
+    return {
+        "report": _safe_model_dump(report),
+        "markdown": report.summary_markdown,
+    }
+
+
+@router.post("/metrics/calibrate-confidence")
+async def calibrate_single_confidence(
+    req: CalibrateConfidenceRequest,
+    metrics_mgr: ForexMetricsManager = Depends(get_metrics_manager),
+):
+    """Calibrate a single model confidence score against empirical outcomes.
+
+    Strictly guarantees that uncalibrated confidence is never displayed as true probability.
+    """
+    result = metrics_mgr.calibrate_proposal_confidence(
+        raw_confidence=req.confidence,
+        pair=req.pair,
+    )
+    return {"calibrated_result": _safe_model_dump(result)}
+
+
