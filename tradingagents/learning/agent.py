@@ -252,7 +252,96 @@ class ForexReflectionAgent:
                 )
 
         # -------------------------------------------------------------------
-        # 3. Construct Summary & Save Lessons
+        # 3. Evaluate Structured Output Dimensions (Phase 14)
+        # -------------------------------------------------------------------
+        # Direction quality
+        if mfe_r >= 1.0 or realized_r > 0.5:
+            direction_quality = "EXCELLENT"
+        elif mfe_r >= 0.5:
+            direction_quality = "GOOD"
+        elif mfe_r <= 0.1 and mae_r >= 0.8:
+            direction_quality = "WRONG_DIRECTION"
+        else:
+            direction_quality = "FAIR"
+
+        # Thesis quality
+        if (
+            outcome_cat in (TradeOutcomeCategory.PERFECT_EXIT, TradeOutcomeCategory.STANDARD_WIN)
+            or outcome_cat == TradeOutcomeCategory.PREMATURE_EXIT
+        ):
+            thesis_quality = "EXCELLENT"
+        elif outcome_cat == TradeOutcomeCategory.STANDARD_LOSS:
+            thesis_quality = "FAIR"
+        elif outcome_cat == TradeOutcomeCategory.RUNAWAY_LOSS:
+            thesis_quality = "CRITICAL_ERROR"
+        else:
+            thesis_quality = "GOOD"
+
+        # Entry quality
+        slip = context.slippage_pips
+        if slip <= 0.0 and mae_r <= 0.3:
+            entry_quality = "EXCELLENT"
+        elif slip <= 0.5 and mae_r <= 0.6:
+            entry_quality = "GOOD"
+        elif slip > 1.0 or mae_r > 0.9:
+            entry_quality = "POOR"
+        else:
+            entry_quality = "FAIR"
+
+        # Stop quality
+        if mae_r <= 0.5:
+            stop_quality = "EXCELLENT"
+        elif mae_r <= 1.0:
+            stop_quality = "GOOD"
+        else:
+            stop_quality = "CRITICAL_ERROR"
+
+        # Target quality
+        if exit_eff >= 80.0 or outcome_cat == TradeOutcomeCategory.PERFECT_EXIT:
+            target_quality = "EXCELLENT"
+        elif outcome_cat == TradeOutcomeCategory.GREEDY_EXIT:
+            target_quality = "POOR"
+        elif realized_r > 0:
+            target_quality = "GOOD"
+        else:
+            target_quality = "FAIR"
+
+        # Execution quality
+        if slip <= 0.0:
+            execution_quality = "EXCELLENT"
+        elif slip <= 0.5:
+            execution_quality = "GOOD"
+        elif slip <= 1.0:
+            execution_quality = "FAIR"
+        else:
+            execution_quality = "POOR"
+
+        # Management quality
+        if outcome_cat == TradeOutcomeCategory.GREEDY_EXIT:
+            management_quality = "POOR"
+        elif outcome_cat == TradeOutcomeCategory.PREMATURE_EXIT:
+            management_quality = "FAIR"
+        elif (len(context.sl_changes) > 0 and realized_r >= 0) or outcome_cat in (
+            TradeOutcomeCategory.PERFECT_EXIT,
+            TradeOutcomeCategory.STANDARD_WIN,
+        ):
+            management_quality = "EXCELLENT"
+        else:
+            management_quality = "GOOD"
+
+        main_success = (
+            what_went_well[0]
+            if what_went_well
+            else "Trade executed and closed according to planned risk boundaries."
+        )
+        main_failure = (
+            what_went_wrong[0]
+            if what_went_wrong
+            else "None — execution remained strictly within planned risk parameters."
+        )
+
+        # -------------------------------------------------------------------
+        # 4. Construct Summary & Save Lessons
         # -------------------------------------------------------------------
         summary = (
             f"Trade {trade.trade_id} ({pair} {setup_type}) settled with {realized_r:+.2f}R ({realized_pips:+.1f} pips). "
@@ -263,6 +352,15 @@ class ForexReflectionAgent:
         reflection = TradeReflection(
             trade_id=trade.trade_id,
             rating=rating,
+            thesis_quality=thesis_quality,
+            direction_quality=direction_quality,
+            entry_quality=entry_quality,
+            stop_quality=stop_quality,
+            target_quality=target_quality,
+            execution_quality=execution_quality,
+            management_quality=management_quality,
+            main_success=main_success,
+            main_failure=main_failure,
             summary=summary,
             what_went_well=what_went_well,
             what_went_wrong=what_went_wrong,

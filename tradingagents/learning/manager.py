@@ -128,7 +128,25 @@ class ForexLearningManager:
             )
         outcome = TradeOutcomeEngine.classify_outcome(mfe_mae=mfe_mae, trade=trade_rec)
 
-        # Assemble full operational context
+        # Assemble full operational context (Phase 14)
+        risk_dec = None
+        if proposal_rec and getattr(proposal_rec, "risk_decision", None):
+            risk_dec = proposal_rec.risk_decision
+        elif trade_rec.metadata and "risk_decision" in trade_rec.metadata:
+            risk_dec = trade_rec.metadata["risk_decision"]
+
+        exec_qual = trade_rec.metadata.get("execution_quality") if trade_rec.metadata else None
+        sess = trade_rec.metadata.get("session") if trade_rec.metadata else None
+        setup = getattr(proposal_rec, "setup_type", None) or (trade_rec.metadata.get("setup_type") if trade_rec.metadata else "TREND_CONTINUATION")
+        if hasattr(setup, "value"):
+            setup = setup.value
+
+        news_ctx = (
+            proposal_rec.metadata.get("news_context")
+            if (proposal_rec and proposal_rec.metadata)
+            else (trade_rec.metadata.get("news_context", {}) if trade_rec.metadata else {})
+        )
+
         context = ReflectionContext(
             trade=trade_rec,
             proposal=proposal_rec,
@@ -136,6 +154,11 @@ class ForexLearningManager:
             outcome=outcome,
             executions=executions,
             events=events,
+            risk_decision=risk_dec if isinstance(risk_dec, dict) else None,
+            execution_quality=exec_qual,
+            session=sess,
+            setup=str(setup),
+            market_news_context=news_ctx if isinstance(news_ctx, dict) else {},
         )
 
         # Execute reflection agent

@@ -764,3 +764,163 @@ def test_mt5_trade_history_provider_disconnected():
     assert "MFE_MAE_UNAVAILABLE" in res.unavailable_reason
 
 
+# ===========================================================================
+# 9. Phase 14 Structured Post-Trade Reflection Tests
+# ===========================================================================
+
+
+def test_phase14_structured_reflection_dimensions():
+    """Verify reflection context delivers all Phase 14 dimensions and agent outputs structured ratings."""
+    from tradingagents.database.models import ProposalRecord
+    from tradingagents.journal.models import EventType, TradeEvent
+
+    trade = TradeJournalRecord(
+        trade_id="trd_struct_1",
+        proposal_id="prop_struct_1",
+        pair="EURUSD",
+        action=ForexAction.LONG,
+        open_price=1.0800,
+        close_price=1.0875,
+        stop_loss=1.0750,
+        lots=1.0,
+        r_multiple=1.5,
+        pips_gained=75.0,
+        commission=5.0,
+        swap=1.2,
+        status=TradeStatus.CLOSED,
+    )
+
+    prop = ProposalRecord(
+        proposal_id="prop_struct_1",
+        pair="EURUSD",
+        action=ForexAction.LONG,
+        entry_price=1.0800,
+        stop_loss=1.0750,
+        take_profit_1=1.0900,
+        risk_decision={"max_risk_pct": 1.0, "decision": "APPROVED"},
+        metadata={"news_context": {"high_impact_events": []}},
+    )
+
+    mfe_mae = TradeMfeMae(
+        trade_id="trd_struct_1",
+        pair="EURUSD",
+        action=ForexAction.LONG,
+        open_price=1.0800,
+        close_price=1.0875,
+        stop_loss=1.0750,
+        mfe_price=1.0900,
+        mae_price=1.0785,
+        mfe_r=2.0,
+        mae_r=0.3,
+        realized_r=1.5,
+        runup_efficiency_pct=75.0,
+        exit_efficiency_pct=85.0,
+    )
+
+    outcome = TradeOutcomeResult(
+        trade_id="trd_struct_1",
+        category=TradeOutcomeCategory.STANDARD_WIN,
+        efficiency_score=85.0,
+    )
+
+    events = [
+        TradeEvent(
+            event_id="evt_sl",
+            event_type=EventType.SL_CHANGED,
+            trade_id="trd_struct_1",
+            description="Moved to Breakeven",
+        ),
+        TradeEvent(
+            event_id="evt_part",
+            event_type=EventType.PARTIAL_CLOSE,
+            trade_id="trd_struct_1",
+            description="Closed 50% lots",
+        ),
+    ]
+
+    context = ReflectionContext(
+        trade=trade,
+        proposal=prop,
+        mfe_mae=mfe_mae,
+        outcome=outcome,
+        events=events,
+        risk_decision=prop.risk_decision,
+        session="LONDON",
+        setup="TREND_CONTINUATION",
+    )
+
+    # Verify context helper properties (Phase 14 requirements)
+    assert context.original_proposal is not None
+    assert context.risk_decision == {"max_risk_pct": 1.0, "decision": "APPROVED"}
+    assert len(context.event_timeline) == 2
+    assert len(context.sl_changes) == 1
+    assert len(context.partial_closes) == 1
+    assert context.commission == 5.0
+    assert context.swap == 1.2
+    assert context.realized_r == 1.5
+    assert context.mfe is not None
+    assert context.mfe.mfe_r == 2.0
+    assert context.mae == 0.0  # mae_pips default is 0.0
+
+    agent = ForexReflectionAgent()
+    reflection = agent.reflect(context)
+
+    # Verify structured dimensions (Phase 14)
+    assert reflection.thesis_quality == "EXCELLENT"
+    assert reflection.direction_quality == "EXCELLENT"
+    assert reflection.entry_quality == "EXCELLENT"
+    assert reflection.stop_quality == "EXCELLENT"
+    assert reflection.target_quality == "EXCELLENT"
+    assert reflection.management_quality == "EXCELLENT"
+    assert reflection.main_success != ""
+    assert reflection.main_failure != ""
+    assert len(reflection.lessons) > 0
+
+    # Verify metrics were NOT rewritten
+    assert context.trade.r_multiple == 1.5
+    assert context.mfe_mae.mfe_r == 2.0
+
+
+def test_phase14_structured_reflection_stop_breach():
+    """Verify structured reflection accurately diagnoses severe stop loss breaches."""
+    trade = TradeJournalRecord(
+        trade_id="trd_breach_1",
+        pair="EURUSD",
+        action=ForexAction.LONG,
+        open_price=1.0800,
+        close_price=1.0735,
+        stop_loss=1.0750,
+        lots=1.0,
+        r_multiple=-1.3,
+        status=TradeStatus.CLOSED,
+    )
+    mfe_mae = TradeMfeMae(
+        trade_id="trd_breach_1",
+        pair="EURUSD",
+        action=ForexAction.LONG,
+        open_price=1.0800,
+        close_price=1.0735,
+        stop_loss=1.0750,
+        mfe_price=1.0805,
+        mae_price=1.0735,
+        mfe_r=0.1,
+        mae_r=1.3,
+        realized_r=-1.3,
+    )
+    outcome = TradeOutcomeResult(
+        trade_id="trd_breach_1",
+        category=TradeOutcomeCategory.RUNAWAY_LOSS,
+        efficiency_score=0.0,
+    )
+
+    context = ReflectionContext(trade=trade, mfe_mae=mfe_mae, outcome=outcome)
+    agent = ForexReflectionAgent()
+    reflection = agent.reflect(context)
+
+    assert reflection.rating == ReflectionRating.CRITICAL_ERROR
+    assert reflection.stop_quality == "CRITICAL_ERROR"
+    assert reflection.thesis_quality == "CRITICAL_ERROR"
+    assert "breaching intended 1.0R risk limit" in reflection.main_failure
+
+
+

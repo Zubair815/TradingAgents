@@ -25,15 +25,17 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from tradingagents.database.journal import ForexTradeJournal
 from tradingagents.database.models import TradeExitReason, TradeStatus
 from tradingagents.learning.history_provider import MT5TradeHistoryProvider, TradeHistoryProvider
-from tradingagents.learning.manager import ForexLearningManager
 from tradingagents.metrics.execution import compare_proposal_against_execution
 from tradingagents.metrics.mfe_mae import calculate_trade_mfe_mae, parse_utc_timestamp
 from tradingagents.metrics.outcome import TradeOutcomeEngine
+
+if TYPE_CHECKING:
+    from tradingagents.learning.manager import ForexLearningManager
 
 logger = logging.getLogger(__name__)
 
@@ -79,10 +81,13 @@ class ClosedTradeProcessor:
     ) -> None:
         self.journal = journal or ForexTradeJournal()
         self.history_provider = history_provider or MT5TradeHistoryProvider()
-        self.learning_mgr = learning_mgr or ForexLearningManager(
-            journal=self.journal,
-            history_provider=self.history_provider,
-        )
+        if learning_mgr is None:
+            from tradingagents.learning.manager import ForexLearningManager
+            learning_mgr = ForexLearningManager(
+                journal=self.journal,
+                history_provider=self.history_provider,
+            )
+        self.learning_mgr = learning_mgr
         self.outcome_engine = TradeOutcomeEngine()
         self._status_map: dict[str, PostCloseProcessingStatus] = {}
         self._lock = threading.RLock()
