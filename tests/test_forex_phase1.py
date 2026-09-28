@@ -38,7 +38,7 @@ def test_upgrade_preserves_legacy_rows_and_is_idempotent(tmp_path, monkeypatch):
         assert migrations.run_migrations(path) == 1
     with sqlite3.connect(path) as conn:
         conn.execute("INSERT INTO proposals (proposal_id,created_at_utc,pair,action,order_type,setup_type,timeframe,status) VALUES ('legacy','2026-09-01T00:00:00+00:00','EURUSD','NO_TRADE','MARKET','PULLBACK','H1','PROPOSED')")
-    assert migrations.run_migrations(path) == 1
+    assert migrations.run_migrations(path) == len(migrations.MIGRATIONS) - 1
     assert migrations.run_migrations(path) == 0
     with ForexTradeJournal(path) as journal:
         old = journal.get_proposal("legacy")
@@ -51,22 +51,23 @@ def test_upgrade_preserves_legacy_rows_and_is_idempotent(tmp_path, monkeypatch):
 def test_migration_failure_rolls_back_ddl_and_version(tmp_path, monkeypatch):
     path = tmp_path / "atomic.db"
     migrations.run_migrations(path)
-    bad = {"version": 3, "description": "intentional failure", "sql":
+    cur_ver = migrations.get_current_schema_version(path)
+    bad = {"version": cur_ver + 1, "description": "intentional failure", "sql":
            "CREATE TABLE should_rollback (id TEXT);\nINSERT INTO nonexistent VALUES ('bad');\n"}
     monkeypatch.setattr(migrations, "MIGRATIONS", [*migrations.MIGRATIONS, bad])
     with pytest.raises(sqlite3.OperationalError):
         migrations.run_migrations(path)
     with sqlite3.connect(path) as conn:
         assert conn.execute("SELECT name FROM sqlite_master WHERE name='should_rollback'").fetchone() is None
-        assert migrations.get_current_schema_version(conn) == 2
+        assert migrations.get_current_schema_version(conn) == cur_ver
 
 
 def test_concurrent_migrations_are_idempotent(tmp_path):
     path = tmp_path / "concurrent.db"
     with ThreadPoolExecutor(max_workers=4) as workers:
         results = list(workers.map(lambda _: migrations.run_migrations(path), range(4)))
-    assert sum(results) == 2
-    assert migrations.get_current_schema_version(path) == 2
+    assert sum(results) == len(migrations.MIGRATIONS)
+    assert migrations.get_current_schema_version(path) == len(migrations.MIGRATIONS)
 
 
 def test_research_round_trip_survives_reopening(tmp_path):

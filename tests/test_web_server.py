@@ -353,3 +353,59 @@ class TestPipelineProgress:
         assert "bull_researcher" in emitted_nodes
         assert "trader" in emitted_nodes
         assert "portfolio_manager" in emitted_nodes
+
+
+# ---------------------------------------------------------------------------
+# Frontend Structure & 9-Tab Dashboard Tests (Phase 24)
+# ---------------------------------------------------------------------------
+@pytest.mark.unit
+class TestFrontendStructure:
+    def test_root_serves_html_with_nine_subsystem_tabs(self, client):
+        res = client.get("/")
+        assert res.status_code == 200
+        html = res.text
+
+        # Verify all 9 navigation tabs exist
+        expected_tabs = [
+            'data-view="dashboard"',
+            'data-view="analyze"',
+            'data-view="proposals"',
+            'data-view="mt5"',
+            'data-view="journal"',
+            'data-view="performance"',
+            'data-view="backtest"',
+            'data-view="learning"',
+            'data-view="settings"',
+        ]
+        for tab in expected_tabs:
+            assert tab in html, f"Missing expected tab navigation: {tab}"
+
+    def test_root_serves_all_nine_subsystem_views(self, client):
+        res = client.get("/")
+        assert res.status_code == 200
+        html = res.text
+
+        # Verify all 9 view containers exist
+        expected_views = [
+            'id="view-dashboard"',
+            'id="view-analyze"',
+            'id="view-proposals"',
+            'id="view-mt5"',
+            'id="view-journal"',
+            'id="view-performance"',
+            'id="view-backtest"',
+            'id="view-learning"',
+            'id="view-settings"',
+        ]
+        for view_id in expected_views:
+            assert view_id in html, f"Missing expected view container: {view_id}"
+
+    def test_static_assets_served(self, client):
+        css = client.get("/static/styles.css")
+        assert css.status_code == 200
+        assert "tabs-wrapper" in css.text
+
+        js = client.get("/static/app.js")
+        assert js.status_code == 200
+        assert "loadDashboardOverview" in js.text
+

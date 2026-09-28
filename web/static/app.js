@@ -66,6 +66,49 @@
     statTotalR:     $('#statTotalR'),
     statMaxDD:      $('#statMaxDD'),
     statTotalTrades: $('#statTotalTrades'),
+    // Dashboard Overview DOM
+    dashBalance:    $('#dashBalance'),
+    dashEquity:     $('#dashEquity'),
+    dashFloating:   $('#dashFloating'),
+    dashFreeMargin: $('#dashFreeMargin'),
+    dashCurrency:   $('#dashCurrency'),
+    dashLeverage:   $('#dashLeverage'),
+    dashPositionsContainer: $('#dashPositionsContainer'),
+    dashProposalsContainer: $('#dashProposalsContainer'),
+    dashWinRate:    $('#dashWinRate'),
+    dashProfitFactor: $('#dashProfitFactor'),
+    dashTotalR:     $('#dashTotalR'),
+    dashMaxDD:      $('#dashMaxDD'),
+    dashClosedTrades: $('#dashClosedTrades'),
+    dashLessonsContainer: $('#dashLessonsContainer'),
+    btnDashRefreshPositions: $('#btnDashRefreshPositions'),
+    btnDashRefreshProposals: $('#btnDashRefreshProposals'),
+    // Proposals View DOM
+    proposalsTableContainer: $('#proposalsTableContainer'),
+    proposalsPairFilter: $('#proposalsPairFilter'),
+    proposalsStatusFilter: $('#proposalsStatusFilter'),
+    btnRefreshProposals: $('#btnRefreshProposals'),
+    // MT5 View DOM
+    mt5OrdersContainer: $('#mt5OrdersContainer'),
+    mt5DealsContainer: $('#mt5DealsContainer'),
+    btnRefreshMT5Positions: $('#btnRefreshMT5Positions'),
+    // Performance View DOM
+    btnRefreshAnalytics: $('#btnRefreshAnalytics'),
+    perfBreakdownContainer: $('#perfBreakdownContainer'),
+    // Backtesting View DOM
+    btnModeBacktestReal: $('#btnModeBacktestReal'),
+    btnModeBacktestDemo: $('#btnModeBacktestDemo'),
+    backtestModeBanner:  $('#backtestModeBanner'),
+    backtestForm:        $('#backtestForm'),
+    btnLaunchBacktest:   $('#btnLaunchBacktest'),
+    btnRefreshBacktests: $('#btnRefreshBacktests'),
+    backtestRunsContainer: $('#backtestRunsContainer'),
+    // Learning View DOM
+    btnRefreshLessons:   $('#btnRefreshLessons'),
+    // Settings View DOM
+    settingProvider:     $('#settingProvider'),
+    settingQuickModel:   $('#settingQuickModel'),
+    settingDeepModel:    $('#settingDeepModel'),
   };
 
   // Pipeline Definitions
@@ -99,8 +142,7 @@
     bindEvents();
     await loadConfig();
     await loadMT5Status();
-    await loadRuns();
-    await loadHistory();
+    await loadDashboardOverview();
   }
 
   function setDefaultDate() {
@@ -110,7 +152,7 @@
 
   // ---- Event Bindings ----
   function bindEvents() {
-    // Tab switching
+    // Tab switching for 9 subsystems
     DOM.tabs.forEach(tab => {
       tab.addEventListener('click', () => {
         DOM.tabs.forEach(t => { t.classList.remove('active'); t.setAttribute('aria-selected', 'false'); });
@@ -120,17 +162,27 @@
         const viewEl = $(`#view-${tab.dataset.view}`);
         if (viewEl) viewEl.classList.add('active');
 
-        if (tab.dataset.view === 'journal') {
+        if (tab.dataset.view === 'dashboard') {
+          loadDashboardOverview();
+        } else if (tab.dataset.view === 'proposals') {
+          loadProposals();
+        } else if (tab.dataset.view === 'mt5') {
           loadMT5Status();
           loadMT5Account();
           loadMT5Positions();
+          loadMT5Orders();
+          loadMT5Deals();
+        } else if (tab.dataset.view === 'journal') {
           loadJournalTrades();
-        } else if (tab.dataset.view === 'lessons') {
-          loadLessons();
-        } else if (tab.dataset.view === 'history') {
-          loadRuns();
-          loadHistory();
+        } else if (tab.dataset.view === 'performance') {
           loadAnalyticsSummary();
+          loadPerformanceBreakdown();
+        } else if (tab.dataset.view === 'backtest') {
+          loadBacktestRuns();
+        } else if (tab.dataset.view === 'learning') {
+          loadLessons(DOM.lessonsPairFilter ? DOM.lessonsPairFilter.value : '');
+        } else if (tab.dataset.view === 'settings') {
+          populateSettingsView();
         }
       });
     });
@@ -168,6 +220,84 @@
       });
     }
 
+    if (DOM.btnDashRefreshPositions) {
+      DOM.btnDashRefreshPositions.addEventListener('click', () => {
+        loadDashboardPositions();
+        showToast('Dashboard positions refreshed', 'info');
+      });
+    }
+
+    if (DOM.btnDashRefreshProposals) {
+      DOM.btnDashRefreshProposals.addEventListener('click', () => {
+        loadDashboardProposals();
+        showToast('Dashboard proposals refreshed', 'info');
+      });
+    }
+
+    if (DOM.btnRefreshProposals) {
+      DOM.btnRefreshProposals.addEventListener('click', () => {
+        loadProposals();
+        showToast('Proposals refreshed', 'info');
+      });
+    }
+
+    if (DOM.proposalsPairFilter) {
+      DOM.proposalsPairFilter.addEventListener('change', loadProposals);
+    }
+    if (DOM.proposalsStatusFilter) {
+      DOM.proposalsStatusFilter.addEventListener('change', loadProposals);
+    }
+
+    if (DOM.btnRefreshMT5Positions) {
+      DOM.btnRefreshMT5Positions.addEventListener('click', () => {
+        loadMT5Positions();
+        loadMT5Orders();
+        loadMT5Deals();
+        showToast('MT5 observer data refreshed', 'info');
+      });
+    }
+
+    if (DOM.btnRefreshAnalytics) {
+      DOM.btnRefreshAnalytics.addEventListener('click', () => {
+        loadAnalyticsSummary();
+        loadPerformanceBreakdown();
+        showToast('Analytics refreshed', 'info');
+      });
+    }
+
+    if (DOM.btnRefreshBacktests) {
+      DOM.btnRefreshBacktests.addEventListener('click', () => {
+        loadBacktestRuns();
+        showToast('Backtest runs refreshed', 'info');
+      });
+    }
+
+    if (DOM.btnRefreshLessons) {
+      DOM.btnRefreshLessons.addEventListener('click', () => {
+        loadLessons(DOM.lessonsPairFilter ? DOM.lessonsPairFilter.value : '');
+        showToast('Lessons refreshed', 'info');
+      });
+    }
+
+    if (DOM.btnModeBacktestReal && DOM.btnModeBacktestDemo) {
+      DOM.btnModeBacktestReal.addEventListener('click', () => {
+        DOM.btnModeBacktestReal.classList.add('active');
+        DOM.btnModeBacktestDemo.classList.remove('active');
+        if (DOM.backtestModeBanner) {
+          DOM.backtestModeBanner.className = 'info-banner';
+          DOM.backtestModeBanner.innerHTML = '<span>Historical Agent Backtest: Full point-in-time multi-agent execution. Zero lookahead leakage.</span>';
+        }
+      });
+      DOM.btnModeBacktestDemo.addEventListener('click', () => {
+        DOM.btnModeBacktestDemo.classList.add('active');
+        DOM.btnModeBacktestReal.classList.remove('active');
+        if (DOM.backtestModeBanner) {
+          DOM.backtestModeBanner.className = 'warning-banner';
+          DOM.backtestModeBanner.innerHTML = '<span>Demo Mode: Fast synthetic bar simulation. Strictly illustrative.</span>';
+        }
+      });
+    }
+
     if (DOM.lessonsPairFilter) {
       DOM.lessonsPairFilter.addEventListener('change', () => {
         loadLessons(DOM.lessonsPairFilter.value);
@@ -202,6 +332,7 @@
       const res = await fetch('/api/config');
       configData = await res.json();
       populateProviders();
+      populateSettingsView();
       if (configData.auth_required && DOM.apiKeyGroup) {
         DOM.apiKeyGroup.style.display = 'block';
         // Security hardening: purge any legacy stored secrets from web storage
@@ -269,13 +400,22 @@
   }
 
   function showMT5Unavailable() {
-    if (DOM.mt5Balance) DOM.mt5Balance.textContent = 'Unavailable';
-    if (DOM.mt5Equity) DOM.mt5Equity.textContent = 'Unavailable';
+    const unav = 'Unavailable';
+    if (DOM.mt5Balance) DOM.mt5Balance.textContent = unav;
+    if (DOM.dashBalance) DOM.dashBalance.textContent = unav;
+    if (DOM.mt5Equity) DOM.mt5Equity.textContent = unav;
+    if (DOM.dashEquity) DOM.dashEquity.textContent = unav;
     if (DOM.mt5Floating) {
-      DOM.mt5Floating.textContent = 'Unavailable';
+      DOM.mt5Floating.textContent = unav;
       DOM.mt5Floating.style.color = 'var(--text-muted)';
     }
-    if (DOM.mt5FreeMargin) DOM.mt5FreeMargin.textContent = 'Unavailable';
+    if (DOM.dashFloating) {
+      DOM.dashFloating.textContent = unav;
+      DOM.dashFloating.style.color = 'var(--text-muted)';
+    }
+    if (DOM.mt5FreeMargin) DOM.mt5FreeMargin.textContent = unav;
+    if (DOM.dashFreeMargin) DOM.dashFreeMargin.textContent = unav;
+    if (DOM.dashCurrency) DOM.dashCurrency.textContent = 'Standby / Unconnected';
   }
 
   // ---- MetaTrader 5 Passive Observer ----
@@ -311,33 +451,59 @@
       if (res.ok) {
         const data = await res.json();
         const acc = data.account || data;
-        if (acc && acc.balance != null) {
-          DOM.mt5Balance.textContent = `$${Number(acc.balance).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-        } else {
-          DOM.mt5Balance.textContent = 'Unavailable';
+        const balStr = (acc && acc.balance != null)
+          ? `$${Number(acc.balance).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+          : 'Unavailable';
+        const eqStr = (acc && acc.equity != null)
+          ? `$${Number(acc.equity).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+          : 'Unavailable';
+        const freeStr = (acc && acc.margin_free != null)
+          ? `$${Number(acc.margin_free).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+          : 'Unavailable';
+
+        if (DOM.mt5Balance) DOM.mt5Balance.textContent = balStr;
+        if (DOM.dashBalance) DOM.dashBalance.textContent = balStr;
+        if (DOM.mt5Equity) DOM.mt5Equity.textContent = eqStr;
+        if (DOM.dashEquity) DOM.dashEquity.textContent = eqStr;
+        if (DOM.mt5FreeMargin) DOM.mt5FreeMargin.textContent = freeStr;
+        if (DOM.dashFreeMargin) DOM.dashFreeMargin.textContent = freeStr;
+
+        if (acc && acc.currency && DOM.dashCurrency) {
+          DOM.dashCurrency.textContent = `Currency: ${acc.currency}`;
         }
-        if (acc && acc.equity != null) {
-          DOM.mt5Equity.textContent = `$${Number(acc.equity).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-        } else {
-          DOM.mt5Equity.textContent = 'Unavailable';
+        if (acc && acc.leverage && DOM.dashLeverage) {
+          DOM.dashLeverage.textContent = `Leverage 1:${acc.leverage}`;
         }
+
         if (acc && acc.profit != null) {
           const p = Number(acc.profit);
-          DOM.mt5Floating.textContent = `${p >= 0 ? '+' : ''}$${p.toFixed(2)}`;
-          DOM.mt5Floating.style.color = p >= 0 ? 'var(--green)' : 'var(--red)';
+          const pStr = `${p >= 0 ? '+' : ''}$${p.toFixed(2)}`;
+          const pCol = p >= 0 ? 'var(--green)' : 'var(--red)';
+          if (DOM.mt5Floating) {
+            DOM.mt5Floating.textContent = pStr;
+            DOM.mt5Floating.style.color = pCol;
+          }
+          if (DOM.dashFloating) {
+            DOM.dashFloating.textContent = pStr;
+            DOM.dashFloating.style.color = pCol;
+          }
         } else {
-          DOM.mt5Floating.textContent = 'Unavailable';
-          DOM.mt5Floating.style.color = 'var(--text-muted)';
-        }
-        if (acc && acc.margin_free != null) {
-          DOM.mt5FreeMargin.textContent = `$${Number(acc.margin_free).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-        } else {
-          DOM.mt5FreeMargin.textContent = 'Unavailable';
+          if (DOM.mt5Floating) {
+            DOM.mt5Floating.textContent = 'Unavailable';
+            DOM.mt5Floating.style.color = 'var(--text-muted)';
+          }
+          if (DOM.dashFloating) {
+            DOM.dashFloating.textContent = 'Unavailable';
+            DOM.dashFloating.style.color = 'var(--text-muted)';
+          }
         }
       } else {
         showMT5Unavailable();
       }
     } catch (_) {
+      showMT5Unavailable();
+    }
+  }
       showMT5Unavailable();
     }
   }
@@ -533,6 +699,450 @@
         DOM.statMaxDD.textContent = `${Number(m.max_drawdown_pct).toFixed(1)}%`;
       }
     } catch (_) {}
+  }
+
+  // ---- Subsystem Loaders for Reorganized Dashboard ----
+  async function loadDashboardOverview() {
+    await Promise.allSettled([
+      loadMT5Account(),
+      loadDashboardPositions(),
+      loadDashboardProposals(),
+      loadDashboardAnalytics(),
+      loadDashboardLessons(),
+    ]);
+  }
+
+  async function loadDashboardPositions() {
+    if (!DOM.dashPositionsContainer) return;
+    try {
+      const res = await fetch('/api/forex/mt5/positions');
+      if (!res.ok) return;
+      const data = await res.json();
+      const positions = data.positions || [];
+      if (positions.length === 0) {
+        DOM.dashPositionsContainer.innerHTML = `
+          <div class="empty-state" style="padding: 2rem;">
+            <div class="empty-state-icon">📡</div>
+            <div class="empty-state-title">No Active Positions</div>
+            <div class="empty-state-desc">Trades executed manually in MT5 appear here automatically.</div>
+          </div>
+        `;
+        return;
+      }
+      DOM.dashPositionsContainer.innerHTML = `
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Ticket</th>
+              <th>Symbol</th>
+              <th>Type</th>
+              <th>Volume</th>
+              <th>Current Price</th>
+              <th>Profit</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${positions.map(p => {
+              const pnl = Number(p.profit || 0);
+              const pnlColor = pnl >= 0 ? 'var(--green)' : 'var(--red)';
+              const typeStr = String(p.type || '').toUpperCase();
+              const isBuy = typeStr === 'LONG' || typeStr === 'BUY' || p.type === 0;
+              return `
+                <tr>
+                  <td style="font-family:var(--font-mono); font-size:0.8rem;">#${escapeText(p.ticket)}</td>
+                  <td style="font-weight:700; color:var(--cyan);">${escapeText(p.symbol)}</td>
+                  <td><span class="signal-badge ${isBuy ? 'bullish' : 'bearish'}" style="font-size:0.7rem; padding:2px 8px;">${isBuy ? 'BUY' : 'SELL'}</span></td>
+                  <td style="font-family:var(--font-mono);">${Number(p.volume).toFixed(2)}</td>
+                  <td style="font-family:var(--font-mono);">${formatForexPrice(p.price_current, p.symbol, p.digits)}</td>
+                  <td style="font-family:var(--font-mono); font-weight:700; color:${pnlColor};">${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}</td>
+                </tr>
+              `;
+            }).join('')}
+          </tbody>
+        </table>
+      `;
+    } catch (_) {}
+  }
+
+  async function loadDashboardProposals() {
+    if (!DOM.dashProposalsContainer) return;
+    try {
+      const res = await fetch('/api/forex/proposals?limit=5');
+      if (!res.ok) return;
+      const data = await res.json();
+      const proposals = data.proposals || [];
+      if (proposals.length === 0) {
+        DOM.dashProposalsContainer.innerHTML = `
+          <div class="empty-state" style="padding: 2rem;">
+            <div class="empty-state-icon">📋</div>
+            <div class="empty-state-title">No Recent Proposals</div>
+            <div class="empty-state-desc">Proposals generated through the multi-agent pipeline will be logged here.</div>
+          </div>
+        `;
+        return;
+      }
+      DOM.dashProposalsContainer.innerHTML = `
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Pair</th>
+              <th>Action</th>
+              <th>Entry</th>
+              <th>SL</th>
+              <th>TP</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${proposals.map(p => `
+              <tr>
+                <td style="font-family:var(--font-mono); font-size:0.75rem; color:var(--text-muted);">${escapeText(p.proposal_id.slice(0, 8))}</td>
+                <td style="font-weight:700; color:var(--cyan);">${escapeText(p.pair)}</td>
+                <td><span class="signal-badge ${p.action === 'LONG' ? 'bullish' : 'bearish'}" style="font-size:0.7rem; padding:2px 8px;">${escapeText(p.action)}</span></td>
+                <td style="font-family:var(--font-mono);">${Number(p.entry_price).toFixed(5)}</td>
+                <td style="font-family:var(--font-mono);">${Number(p.stop_loss).toFixed(5)}</td>
+                <td style="font-family:var(--font-mono);">${Number(p.take_profit_1).toFixed(5)}</td>
+                <td><span class="status-cell ${escapeText(p.status)}">${escapeText(p.status)}</span></td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      `;
+    } catch (_) {}
+  }
+
+  async function loadDashboardAnalytics() {
+    try {
+      const res = await fetch('/api/forex/analytics/dashboard');
+      if (!res.ok) return;
+      const data = await res.json();
+      const m = data.metrics || {};
+      if (m.win_rate != null && DOM.dashWinRate) DOM.dashWinRate.textContent = `${(Number(m.win_rate) * 100).toFixed(1)}%`;
+      if (m.total_trades != null && DOM.dashClosedTrades) DOM.dashClosedTrades.textContent = `${m.total_trades} trades`;
+      if (m.profit_factor != null && DOM.dashProfitFactor) DOM.dashProfitFactor.textContent = Number(m.profit_factor).toFixed(2);
+      if (m.total_r_multiple != null && DOM.dashTotalR) DOM.dashTotalR.textContent = `${Number(m.total_r_multiple).toFixed(1)}R`;
+      if (m.max_drawdown_pct != null && DOM.dashMaxDD) DOM.dashMaxDD.textContent = `${Number(m.max_drawdown_pct).toFixed(1)}%`;
+    } catch (_) {}
+  }
+
+  async function loadDashboardLessons() {
+    if (!DOM.dashLessonsContainer) return;
+    try {
+      const res = await fetch('/api/forex/learning/lessons');
+      if (!res.ok) return;
+      const data = await res.json();
+      const lessons = (data.lessons || []).slice(0, 2);
+      if (lessons.length === 0) {
+        DOM.dashLessonsContainer.innerHTML = `
+          <div class="empty-state" style="padding: 2rem;">
+            <div class="empty-state-icon">🧠</div>
+            <div class="empty-state-title">No Stored Lessons</div>
+            <div class="empty-state-desc">Post-trade reflections extract prescriptive rules and store them here.</div>
+          </div>
+        `;
+        return;
+      }
+      DOM.dashLessonsContainer.innerHTML = lessons.map(l => `
+        <div class="lesson-card" style="margin-bottom: 0.75rem;">
+          <div class="lesson-header">
+            <span class="lesson-pair">${escapeText(l.pair || 'GLOBAL')}</span>
+            <span class="lesson-tag">${escapeText(l.outcome_category || 'GENERAL')}</span>
+          </div>
+          <div class="lesson-rule" style="font-size:0.8rem;">${escapeText(l.rule_violated || l.observation || 'Operational Rule')}</div>
+          <div class="lesson-action" style="padding:6px 10px; font-size:0.75rem;">
+            ${escapeText(l.actionable_rule || l.observation || 'Follow risk guidelines.')}
+          </div>
+        </div>
+      `).join('');
+    } catch (_) {}
+  }
+
+  // ---- Proposals View ----
+  async function loadProposals() {
+    if (!DOM.proposalsTableContainer) return;
+    try {
+      let url = '/api/forex/proposals?limit=100';
+      const pair = DOM.proposalsPairFilter ? DOM.proposalsPairFilter.value : '';
+      const status = DOM.proposalsStatusFilter ? DOM.proposalsStatusFilter.value : '';
+      if (pair) url += `&pair=${encodeURIComponent(pair)}`;
+      if (status) url += `&status=${encodeURIComponent(status)}`;
+
+      const res = await fetch(url);
+      if (!res.ok) return;
+      const data = await res.json();
+      const props = data.proposals || [];
+
+      if (props.length === 0) {
+        DOM.proposalsTableContainer.innerHTML = `
+          <div class="empty-state" style="padding: 2.5rem;">
+            <div class="empty-state-icon">📋</div>
+            <div class="empty-state-title">No Proposals Found</div>
+            <div class="empty-state-desc">No proposals match the current filter criteria.</div>
+          </div>
+        `;
+        return;
+      }
+
+      DOM.proposalsTableContainer.innerHTML = `
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Proposal ID</th>
+              <th>Pair</th>
+              <th>Action</th>
+              <th>Timeframe</th>
+              <th>Setup</th>
+              <th>Entry</th>
+              <th>SL</th>
+              <th>TP1</th>
+              <th>RR</th>
+              <th>Risk %</th>
+              <th>Lots</th>
+              <th>Status</th>
+              <th>Created</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${props.map(p => `
+              <tr>
+                <td style="font-family:var(--font-mono); font-size:0.75rem; color:var(--text-muted);">${escapeText(p.proposal_id)}</td>
+                <td style="font-weight:700; color:var(--cyan);">${escapeText(p.pair)}</td>
+                <td><span class="signal-badge ${p.action === 'LONG' ? 'bullish' : 'bearish'}" style="font-size:0.7rem; padding:2px 8px;">${escapeText(p.action)}</span></td>
+                <td>${escapeText(p.timeframe || '-')}</td>
+                <td style="font-size:0.75rem;">${escapeText(p.setup_type || '-')}</td>
+                <td style="font-family:var(--font-mono);">${Number(p.entry_price).toFixed(5)}</td>
+                <td style="font-family:var(--font-mono);">${Number(p.stop_loss).toFixed(5)}</td>
+                <td style="font-family:var(--font-mono);">${Number(p.take_profit_1).toFixed(5)}</td>
+                <td style="font-family:var(--font-mono);">${Number(p.risk_reward_ratio || 0).toFixed(2)}</td>
+                <td style="font-family:var(--font-mono);">${Number(p.risk_percent || 1).toFixed(1)}%</td>
+                <td style="font-family:var(--font-mono); font-weight:700;">${p.recommended_lot_size != null ? Number(p.recommended_lot_size).toFixed(2) : '-'}</td>
+                <td><span class="status-cell ${escapeText(p.status)}">${escapeText(p.status)}</span></td>
+                <td class="date-cell">${escapeText((p.created_at || '').slice(0, 19).replace('T', ' '))}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      `;
+    } catch (_) {}
+  }
+
+  // ---- MT5 Orders & Deals ----
+  async function loadMT5Orders() {
+    if (!DOM.mt5OrdersContainer) return;
+    try {
+      const res = await fetch('/api/forex/mt5/orders');
+      if (!res.ok) return;
+      const data = await res.json();
+      const orders = data.orders || [];
+      if (orders.length === 0) {
+        DOM.mt5OrdersContainer.innerHTML = `
+          <div class="empty-state" style="padding: 2rem;">
+            <div class="empty-state-icon">⏳</div>
+            <div class="empty-state-title">No Pending Orders</div>
+            <div class="empty-state-desc">Limit and stop orders on MT5 appear here.</div>
+          </div>
+        `;
+        return;
+      }
+      DOM.mt5OrdersContainer.innerHTML = `
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Ticket</th>
+              <th>Symbol</th>
+              <th>Type</th>
+              <th>Volume</th>
+              <th>Price</th>
+              <th>SL</th>
+              <th>TP</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${orders.map(o => `
+              <tr>
+                <td style="font-family:var(--font-mono); font-size:0.8rem;">#${escapeText(o.ticket)}</td>
+                <td style="font-weight:700; color:var(--cyan);">${escapeText(o.symbol)}</td>
+                <td>${escapeText(o.type_str || o.type)}</td>
+                <td style="font-family:var(--font-mono);">${Number(o.volume_initial || o.volume_current || 0).toFixed(2)}</td>
+                <td style="font-family:var(--font-mono);">${formatForexPrice(o.price_open, o.symbol)}</td>
+                <td style="font-family:var(--font-mono);">${formatForexPrice(o.sl, o.symbol)}</td>
+                <td style="font-family:var(--font-mono);">${formatForexPrice(o.tp, o.symbol)}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      `;
+    } catch (_) {}
+  }
+
+  async function loadMT5Deals() {
+    if (!DOM.mt5DealsContainer) return;
+    try {
+      const res = await fetch('/api/forex/mt5/deals');
+      if (!res.ok) return;
+      const data = await res.json();
+      const deals = data.deals || [];
+      if (deals.length === 0) {
+        DOM.mt5DealsContainer.innerHTML = `
+          <div class="empty-state" style="padding: 2rem;">
+            <div class="empty-state-icon">📜</div>
+            <div class="empty-state-title">No Recent Deals</div>
+            <div class="empty-state-desc">Closed deal transactions from MT5 history appear here.</div>
+          </div>
+        `;
+        return;
+      }
+      DOM.mt5DealsContainer.innerHTML = `
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Deal ID</th>
+              <th>Symbol</th>
+              <th>Type</th>
+              <th>Volume</th>
+              <th>Price</th>
+              <th>Profit</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${deals.slice(0, 10).map(d => {
+              const pnl = Number(d.profit || 0);
+              const pnlColor = pnl >= 0 ? 'var(--green)' : 'var(--red)';
+              return `
+                <tr>
+                  <td style="font-family:var(--font-mono); font-size:0.8rem;">#${escapeText(d.deal_id || d.ticket)}</td>
+                  <td style="font-weight:700; color:var(--cyan);">${escapeText(d.symbol)}</td>
+                  <td>${escapeText(d.type_str || d.type)}</td>
+                  <td style="font-family:var(--font-mono);">${Number(d.volume || 0).toFixed(2)}</td>
+                  <td style="font-family:var(--font-mono);">${formatForexPrice(d.price, d.symbol)}</td>
+                  <td style="font-family:var(--font-mono); font-weight:700; color:${pnlColor};">${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}</td>
+                </tr>
+              `;
+            }).join('')}
+          </tbody>
+        </table>
+      `;
+    } catch (_) {}
+  }
+
+  // ---- Performance Breakdown View ----
+  async function loadPerformanceBreakdown() {
+    if (!DOM.perfBreakdownContainer) return;
+    try {
+      const res = await fetch('/api/forex/journal/performance');
+      if (!res.ok) return;
+      const data = await res.json();
+      const byPair = data.performance?.by_pair || {};
+      const pairs = Object.keys(byPair);
+      if (pairs.length === 0) {
+        DOM.perfBreakdownContainer.innerHTML = `
+          <div class="empty-state" style="padding: 2.5rem;">
+            <div class="empty-state-icon">📊</div>
+            <div class="empty-state-title">No Performance Breakdown Yet</div>
+            <div class="empty-state-desc">Detailed metrics across pairs, timeframes, and setups will calculate automatically as trades are closed.</div>
+          </div>
+        `;
+        return;
+      }
+
+      DOM.perfBreakdownContainer.innerHTML = `
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Currency Pair</th>
+              <th>Trades</th>
+              <th>Win Rate</th>
+              <th>Profit Factor</th>
+              <th>Total R</th>
+              <th>Net P&amp;L</th>
+              <th>Avg R</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${pairs.map(p => {
+              const m = byPair[p] || {};
+              const wr = m.win_rate != null ? `${(Number(m.win_rate) * 100).toFixed(1)}%` : '-';
+              const pf = m.profit_factor != null ? Number(m.profit_factor).toFixed(2) : '-';
+              const r = m.total_r_multiple != null ? `${Number(m.total_r_multiple).toFixed(2)}R` : '-';
+              const pnl = Number(m.net_pnl || m.gross_profit || 0);
+              const pnlColor = pnl >= 0 ? 'var(--green)' : 'var(--red)';
+              const avgR = m.average_r != null ? `${Number(m.average_r).toFixed(2)}R` : '-';
+              return `
+                <tr>
+                  <td style="font-weight:700; color:var(--cyan);">${escapeText(p)}</td>
+                  <td>${escapeText(m.total_trades || 0)}</td>
+                  <td style="color:var(--green); font-weight:600;">${wr}</td>
+                  <td>${pf}</td>
+                  <td style="color:var(--cyan); font-weight:600;">${r}</td>
+                  <td style="font-weight:700; color:${pnlColor};">${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}</td>
+                  <td>${avgR}</td>
+                </tr>
+              `;
+            }).join('')}
+          </tbody>
+        </table>
+      `;
+    } catch (_) {}
+  }
+
+  // ---- Backtest Runs View ----
+  async function loadBacktestRuns() {
+    if (!DOM.backtestRunsContainer) return;
+    try {
+      const res = await fetch('/api/forex/backtest/runs');
+      if (!res.ok) return;
+      const data = await res.json();
+      const runs = data.runs || [];
+      if (runs.length === 0) {
+        DOM.backtestRunsContainer.innerHTML = `
+          <div class="empty-state" style="padding: 2.5rem;">
+            <div class="empty-state-icon">🧪</div>
+            <div class="empty-state-title">No Backtests Run Yet</div>
+            <div class="empty-state-desc">Historical agent backtests and walk-forward evaluations appear here.</div>
+          </div>
+        `;
+        return;
+      }
+      DOM.backtestRunsContainer.innerHTML = `
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Backtest ID</th>
+              <th>Mode</th>
+              <th>Pair</th>
+              <th>Timeframe</th>
+              <th>Trades</th>
+              <th>Win Rate</th>
+              <th>Status</th>
+              <th>Created</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${runs.map(r => `
+              <tr>
+                <td style="font-family:var(--font-mono); font-size:0.75rem; color:var(--text-muted);">${escapeText(r.backtest_id ? r.backtest_id.slice(0, 10) : '-')}</td>
+                <td><span class="lesson-tag" style="font-size:0.65rem;">${escapeText(r.mode || 'HISTORICAL')}</span></td>
+                <td style="font-weight:700; color:var(--cyan);">${escapeText(r.pair)}</td>
+                <td>${escapeText(r.timeframe || '-')}</td>
+                <td>${escapeText(r.trade_count || r.trades_count || 0)}</td>
+                <td style="color:var(--green); font-weight:600;">${r.win_rate != null ? (Number(r.win_rate) * 100).toFixed(1) + '%' : '-'}</td>
+                <td><span class="status-cell ${escapeText(r.status || 'completed')}">${escapeText(r.status || 'completed')}</span></td>
+                <td class="date-cell">${escapeText((r.created_at || '').slice(0, 19).replace('T', ' '))}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      `;
+    } catch (_) {}
+  }
+
+  // ---- Settings View ----
+  function populateSettingsView() {
+    if (!configData) return;
+    if (DOM.settingProvider) DOM.settingProvider.textContent = configData.provider || 'Not configured';
+    if (DOM.settingQuickModel) DOM.settingQuickModel.textContent = configData.quick_model || 'Default';
+    if (DOM.settingDeepModel) DOM.settingDeepModel.textContent = configData.deep_model || 'Default';
   }
 
   // ---- Submit Analysis ----

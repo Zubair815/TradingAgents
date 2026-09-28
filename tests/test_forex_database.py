@@ -75,24 +75,28 @@ def make_test_proposal(pair: str = "EURUSD") -> ForexTraderProposal:
 
 class TestDatabaseMigrations:
     def test_migrations_create_tables_and_track_version(self, tmp_path: Path):
+        from tradingagents.database.migrations import MIGRATIONS
+
         db_file = tmp_path / "test_migration.db"
 
-        # Initial run: applies legacy and research migrations
+        # Initial run: applies legacy, research, and subsequent migrations
         applied = run_migrations(db_file)
-        assert applied == 2
+        assert applied == len(MIGRATIONS)
 
         ver = get_current_schema_version(db_file)
-        assert ver == 2
+        assert ver == len(MIGRATIONS)
 
         # Idempotency check: running again applies 0 migrations
         applied_again = run_migrations(db_file)
         assert applied_again == 0
-        assert get_current_schema_version(db_file) == 2
+        assert get_current_schema_version(db_file) == len(MIGRATIONS)
 
     def test_in_memory_migration(self):
+        from tradingagents.database.migrations import MIGRATIONS
+
         journal = ForexTradeJournal(db_path=":memory:", auto_migrate=True)
         try:
-            assert get_current_schema_version(journal._get_connection()) == 2
+            assert get_current_schema_version(journal._get_connection()) == len(MIGRATIONS)
         finally:
             journal.close()
 

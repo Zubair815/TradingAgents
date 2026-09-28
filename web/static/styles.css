@@ -150,26 +150,38 @@ body::before {
 }
 
 /* ---------- Tabs ---------- */
+.tabs-wrapper {
+  overflow-x: auto;
+  padding-bottom: 4px;
+  margin-bottom: 1.5rem;
+  scrollbar-width: thin;
+}
+
 .tabs {
-  display: flex; gap: 4px;
+  display: inline-flex;
+  gap: 4px;
   background: var(--bg-secondary);
   border-radius: var(--radius-md);
   padding: 4px;
-  margin-bottom: 1.5rem;
   border: 1px solid var(--border);
-  width: fit-content;
+  min-width: max-content;
 }
 
 .tab {
-  padding: 10px 24px;
+  padding: 8px 16px;
   border-radius: var(--radius-sm);
   border: none;
   background: transparent;
   color: var(--text-secondary);
   font-family: var(--font-body);
-  font-size: 0.85rem; font-weight: 500;
+  font-size: 0.82rem;
+  font-weight: 500;
   cursor: pointer;
   transition: var(--transition);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
 }
 
 .tab:hover { color: var(--text-primary); background: rgba(255,255,255,0.04); }
@@ -177,6 +189,7 @@ body::before {
   color: var(--text-bright);
   background: var(--bg-tertiary);
   box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+  font-weight: 600;
 }
 
 /* ---------- View Containers ---------- */
@@ -890,4 +903,144 @@ body::before {
   .logo-badge { display: none; }
   .stat-cards { grid-template-columns: 1fr 1fr; }
   .lesson-grid { grid-template-columns: 1fr; }
+  .dashboard-grid { grid-template-columns: 1fr; }
 }
+
+/* ---------- Institutional UI Utilities ---------- */
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.5rem;
+  margin-bottom: 1.5rem;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.toolbar-group {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.btn-secondary {
+  padding: 8px 16px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-family: var(--font-body);
+  font-size: 0.82rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: var(--transition);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.btn-secondary:hover {
+  border-color: var(--border-focus);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.btn-sm {
+  padding: 6px 12px;
+  font-size: 0.75rem;
+}
+
+.warning-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: rgba(255, 171, 64, 0.08);
+  border: 1px solid rgba(255, 171, 64, 0.25);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  font-size: 0.8rem;
+  color: var(--amber);
+  margin-bottom: 1.25rem;
+}
+
+.info-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: rgba(0, 212, 255, 0.08);
+  border: 1px solid rgba(0, 212, 255, 0.25);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  font-size: 0.8rem;
+  color: var(--cyan);
+  margin-bottom: 1.25rem;
+}
+
+.badge-readonly {
+  font-size: 0.7rem;
+  color: var(--cyan);
+  background: var(--cyan-dim);
+  border: 1px solid rgba(0, 212, 255, 0.3);
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+/* Settings Sections */
+.settings-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+  gap: 1.5rem;
+}
+
+.settings-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.settings-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.settings-row:last-child {
+  border-bottom: none;
+}
+
+.settings-key {
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+}
+
+.settings-val {
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  color: var(--text-bright);
+}
+
+.backtest-mode-toggle {
+  display: flex;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 3px;
+  gap: 4px;
+  margin-bottom: 1.25rem;
+}
+
