@@ -1649,6 +1649,24 @@ async def get_analytics_dashboard(
     }
 
 
+@router.get("/analytics/performance")
+async def get_performance_report(
+    initial_capital: float = Query(default=100000.0, gt=0),
+    metrics_mgr: ForexMetricsManager = Depends(get_metrics_manager),
+    journal: ForexTradeJournal = Depends(get_journal),
+):
+    """Retrieve full deterministic performance analytics, multi-dimensional segmentation, and execution friction (Phase 19)."""
+    trades = journal.list_trades(limit=10000)
+    proposals = journal.list_proposals(limit=5000)
+    report = metrics_mgr.get_comprehensive_performance(
+        trades=trades, proposals=proposals, initial_capital=initial_capital
+    )
+    return {
+        "performance": _safe_model_dump(report),
+        "markdown": report.summary_markdown,
+    }
+
+
 @router.get("/analytics/metrics")
 async def get_deep_metrics(
     initial_capital: float = Query(default=100000.0, gt=0),

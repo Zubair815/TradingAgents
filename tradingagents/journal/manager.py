@@ -267,6 +267,20 @@ class ForexJournalManager:
         report = self.compute_performance(initial_capital=initial_capital)
         return self.analytics.render_markdown_dashboard(report)
 
+    def compute_comprehensive_performance(
+        self, initial_capital: float = 100000.0
+    ) -> Any:
+        """Compute comprehensive performance analytics including multi-dimensional segmentation (Phase 19)."""
+        from tradingagents.analytics.performance import ForexPerformanceEngine
+
+        engine = ForexPerformanceEngine(initial_capital=initial_capital)
+        trades = self.journal.list_trades(limit=10000)
+        proposals = self.journal.list_proposals(limit=5000)
+        events = self.timeline.get_events(limit=10000)
+        return engine.generate_performance_report(
+            trades=trades, proposals=proposals, events=events, initial_capital=initial_capital
+        )
+
     def close(self) -> None:
         """Clean up underlying database resources."""
         self.journal.close()

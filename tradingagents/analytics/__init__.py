@@ -28,6 +28,16 @@ from tradingagents.analytics.models import (
     TerminalWealthPercentiles,
 )
 from tradingagents.analytics.monte_carlo import MonteCarloSimulator
+from tradingagents.analytics.performance import (
+    ExecutionAnalyticsMetrics,
+    ForexPerformanceEngine,
+    ForexPerformanceReport,
+    PerformanceMetricsSummary,
+    SegmentationBreakdown,
+    detect_confidence_band,
+    detect_trade_session,
+    detect_weekday_name,
+)
 
 __all__ = [
     # Monte Carlo
@@ -52,4 +62,13 @@ __all__ = [
     "ForexAnalyticsDashboard",
     "ExecutiveAnalyticsDashboard",
     "ForexAnalyticsManager",
+    # Performance Engine (Phase 19)
+    "ForexPerformanceEngine",
+    "PerformanceMetricsSummary",
+    "ExecutionAnalyticsMetrics",
+    "SegmentationBreakdown",
+    "ForexPerformanceReport",
+    "detect_trade_session",
+    "detect_weekday_name",
+    "detect_confidence_band",
 ]

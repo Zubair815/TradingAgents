@@ -486,3 +486,25 @@ class ForexMetricsManager:
         """Map raw model confidence score to calibrated probability or safe uncalibrated warning (Phase 18)."""
         active_report = report or self.get_confidence_calibration(pair=pair)
         return self.confidence_engine.calibrate_score(raw_confidence=raw_confidence, report=active_report)
+
+    def get_comprehensive_performance(
+        self,
+        trades: Sequence[Any] | None = None,
+        proposals: Sequence[Any] | None = None,
+        events: Sequence[Any] | None = None,
+        initial_capital: float = 100000.0,
+    ) -> Any:
+        """Compute full deterministic metrics, execution analytics, and multi-dimensional segmentation (Phase 19)."""
+        from tradingagents.analytics.performance import ForexPerformanceEngine
+
+        engine = ForexPerformanceEngine(initial_capital=initial_capital)
+        trade_list = list(trades) if trades is not None else (self.journal.list_trades(limit=10000) if self.journal else [])
+        prop_list = list(proposals) if proposals is not None else (self.journal.list_proposals(limit=5000) if self.journal else [])
+        event_list = list(events) if events is not None else []
+        return engine.generate_performance_report(
+            trades=trade_list,
+            proposals=prop_list,
+            events=event_list,
+            initial_capital=initial_capital,
+        )
+
