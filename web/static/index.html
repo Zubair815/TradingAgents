@@ -78,7 +78,11 @@
             <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
             MetaTrader 5 Observer Status
           </h2>
-          <span class="badge-readonly">Strict Read-Only Observer</span>
+          <div style="display:flex; align-items:center; gap:8px;">
+            <span class="badge-readonly" id="dashServerBadge">Server: --</span>
+            <span class="badge-readonly" id="dashLoginBadge">Login: --</span>
+            <span class="badge-readonly">Strict Read-Only</span>
+          </div>
         </div>
         <div class="stat-cards">
           <div class="stat-card">
@@ -97,21 +101,21 @@
             <span class="stat-sub">Unrealized position profit</span>
           </div>
           <div class="stat-card">
-            <span class="stat-label">Free Margin</span>
-            <span class="stat-value" id="dashFreeMargin">Unavailable</span>
-            <span class="stat-sub" id="dashLeverage">Leverage --</span>
+            <span class="stat-label">Margin / Free</span>
+            <span class="stat-value" id="dashFreeMargin" style="font-size:1.15rem;">Unavailable</span>
+            <span class="stat-sub" id="dashMargin">Margin Used: $0.00</span>
           </div>
         </div>
       </div>
 
       <!-- 2-Column Snapshot Grid -->
       <div class="dashboard-grid">
-        <!-- Active Observed Positions -->
+        <!-- Active Observed Positions & Pending Orders -->
         <div class="card">
           <div class="card-header">
             <h2 class="card-title">
               <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 14 14"/></svg>
-              Active MT5 Positions
+              Active Observed Positions
             </h2>
             <button class="btn-secondary btn-sm" id="btnDashRefreshPositions">🔄 Refresh</button>
           </div>
@@ -122,14 +126,23 @@
               <div class="empty-state-desc">Trades executed manually in MT5 appear here automatically.</div>
             </div>
           </div>
+
+          <div style="margin-top: 1.25rem; border-top: 1px solid var(--border); padding-top: 1rem;">
+            <h3 style="font-size: 0.85rem; font-weight: 600; color: var(--text-secondary); margin-bottom: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em;">
+              Pending Orders
+            </h3>
+            <div id="dashOrdersContainer">
+              <div style="font-size: 0.8rem; color: var(--text-muted); padding: 0.5rem 0;">No pending limit or stop orders.</div>
+            </div>
+          </div>
         </div>
 
-        <!-- Recent Proposals & Quick Signals -->
+        <!-- Recent Proposals & Today's Result -->
         <div class="card">
           <div class="card-header">
             <h2 class="card-title">
               <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
-              Recent Decision Proposals
+              Active Decision Proposals
             </h2>
             <button class="btn-secondary btn-sm" id="btnDashRefreshProposals">🔄 Refresh</button>
           </div>
@@ -138,6 +151,26 @@
               <div class="empty-state-icon">📋</div>
               <div class="empty-state-title">No Recent Proposals</div>
               <div class="empty-state-desc">Proposals generated through the multi-agent pipeline will be logged here.</div>
+            </div>
+          </div>
+
+          <div style="margin-top: 1.25rem; border-top: 1px solid var(--border); padding-top: 1rem;" id="dashTodayResultSection">
+            <h3 style="font-size: 0.85rem; font-weight: 600; color: var(--text-secondary); margin-bottom: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em;">
+              Today's Realized Result
+            </h3>
+            <div style="display: flex; gap: 1.5rem; align-items: center; background: var(--bg-primary); padding: 10px 14px; border-radius: var(--radius-sm); border: 1px solid var(--border);">
+              <div>
+                <span style="font-size:0.75rem; color:var(--text-muted); display:block;">Closed Trades</span>
+                <span id="dashTodayTradesCount" style="font-family:var(--font-mono); font-weight:700; color:var(--text-bright);">0</span>
+              </div>
+              <div>
+                <span style="font-size:0.75rem; color:var(--text-muted); display:block;">Today's Net P&amp;L</span>
+                <span id="dashTodayPnl" style="font-family:var(--font-mono); font-weight:700; color:var(--text-bright);">$0.00</span>
+              </div>
+              <div>
+                <span style="font-size:0.75rem; color:var(--text-muted); display:block;">Today's Total R</span>
+                <span id="dashTodayR" style="font-family:var(--font-mono); font-weight:700; color:var(--cyan);">0.0R</span>
+              </div>
             </div>
           </div>
         </div>
@@ -153,11 +186,16 @@
             </h2>
           </div>
           <div id="dashPerfContainer">
+            <div class="warning-banner" id="dashSampleWarning" style="margin-bottom: 1rem; font-size: 0.75rem;">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+              <span>Sample count guard: Requires at least 30 closed trades before declaring statistical edge.</span>
+            </div>
+
             <div class="stat-cards" style="margin-bottom: 0;">
               <div class="stat-card">
-                <span class="stat-label">Win Rate</span>
-                <span class="stat-value" id="dashWinRate" style="color:var(--green);">0.0%</span>
-                <span class="stat-sub" id="dashClosedTrades">0 trades</span>
+                <span class="stat-label">Expectancy</span>
+                <span class="stat-value" id="dashExpectancy" style="color:var(--cyan);">0.00R</span>
+                <span class="stat-sub">Risk multiple expectancy</span>
               </div>
               <div class="stat-card">
                 <span class="stat-label">Profit Factor</span>
@@ -165,9 +203,9 @@
                 <span class="stat-sub">Gross Win / Loss</span>
               </div>
               <div class="stat-card">
-                <span class="stat-label">Total R</span>
-                <span class="stat-value" id="dashTotalR" style="color:var(--cyan);">0.0R</span>
-                <span class="stat-sub">Cumulative</span>
+                <span class="stat-label">Average R</span>
+                <span class="stat-value" id="dashAvgR" style="color:var(--green);">0.00R</span>
+                <span class="stat-sub">Mean R multiple</span>
               </div>
               <div class="stat-card">
                 <span class="stat-label">Max Drawdown</span>
@@ -182,14 +220,29 @@
           <div class="card-header">
             <h2 class="card-title">
               <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
-              Recent Heuristics &amp; Rules
+              Research &amp; Upcoming Macro Events
             </h2>
           </div>
-          <div id="dashLessonsContainer">
-            <div class="empty-state" style="padding: 2rem;">
-              <div class="empty-state-icon">🧠</div>
-              <div class="empty-state-title">No Stored Lessons</div>
-              <div class="empty-state-desc">Post-trade reflections extract prescriptive rules and store them here.</div>
+          <!-- Upcoming High-Impact Events -->
+          <div style="margin-bottom: 1rem;">
+            <h3 style="font-size: 0.8rem; font-weight: 600; color: var(--text-secondary); margin-bottom: 0.5rem; text-transform: uppercase; letter-spacing: 0.05em;">
+              Upcoming High-Impact Releases
+            </h3>
+            <div id="dashEventsContainer">
+              <div style="font-size: 0.8rem; color: var(--text-muted); padding: 0.5rem 0;">No high-impact releases scheduled today.</div>
+            </div>
+          </div>
+
+          <div style="border-top: 1px solid var(--border); padding-top: 1rem;">
+            <h3 style="font-size: 0.8rem; font-weight: 600; color: var(--text-secondary); margin-bottom: 0.5rem; text-transform: uppercase; letter-spacing: 0.05em;">
+              Recent Institutional Lessons
+            </h3>
+            <div id="dashLessonsContainer">
+              <div class="empty-state" style="padding: 1.5rem;">
+                <div class="empty-state-icon">🧠</div>
+                <div class="empty-state-title">No Stored Lessons</div>
+                <div class="empty-state-desc">Post-trade reflections extract prescriptive rules and store them here.</div>
+              </div>
             </div>
           </div>
         </div>

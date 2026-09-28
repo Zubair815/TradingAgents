@@ -418,6 +418,16 @@ def _normalize_proposal_dict(data: dict[str, Any]) -> dict[str, Any]:
     return d
 
 
+def mask_account_login(login: Any) -> str:
+    """Mask account login for security, showing only the first 3 characters."""
+    if not login:
+        return "Not Set"
+    s = str(login).strip()
+    if len(s) <= 3:
+        return "***"
+    return s[:3] + "*" * (len(s) - 3)
+
+
 # ---------------------------------------------------------------------------
 # 1. Journal & Trade Lifecycle Endpoints
 # ---------------------------------------------------------------------------
@@ -1735,6 +1745,163 @@ async def get_backtest(backtest_id: str):
 # ---------------------------------------------------------------------------
 # 6. Quantitative Analytics & Diagnostics Endpoints
 # ---------------------------------------------------------------------------
+
+@router.get("/dashboard/overview")
+async def get_dashboard_overview(
+    journal: ForexTradeJournal = Depends(get_journal),
+    mt5: MT5Observer = Depends(get_mt5_observer),
+    learning_mgr: ForexLearningManager = Depends(get_learning_manager),
+):
+    """Consolidated institutional dashboard overview metrics (Phase 25).
+
+    Returns real data only:
+    - MT5 connection status, masked account login, server, live balance, equity, margin, free margin, floating P/L
+    - Active observed positions and pending orders
+    - Recent proposals (last 5)
+    - Closed trades overview and today's result
+    - Research pipeline state: recent analyses and institutional lessons
+    - Performance summary: expectancy, profit factor, average R, max drawdown, with small sample warning.
+    """
+    conn = mt5.connection
+    is_conn = conn.is_connected() if hasattr(conn, "is_connected") else False
+    status_str = conn.get_status().value if hasattr(conn, "get_status") else ("CONNECTED" if is_conn else "DISCONNECTED")
+    server_str = str(getattr(conn, "server", "") or "")
+    login_raw = getattr(conn, "login", None)
+
+    masked_login = mask_account_login(login_raw)
+
+    account_info = None
+    if is_conn:
+        try:
+            acc = conn.get_account_info() if hasattr(conn, "get_account_info") else None
+            if acc:
+                account_info = {
+                    "balance": float(acc.balance or 0.0),
+                    "equity": float(acc.equity or 0.0),
+                    "margin": float(acc.margin or 0.0),
+                    "margin_free": float(acc.margin_free or 0.0),
+                    "profit": float(acc.profit or 0.0),
+                    "currency": str(acc.currency or "USD"),
+                    "leverage": int(acc.leverage or 100),
+                }
+        except Exception:
+            account_info = None
+
+    open_positions: list[dict[str, Any]] = []
+    if is_conn:
+        try:
+            positions = conn.get_positions() if hasattr(conn, "get_positions") else []
+            open_positions = [_safe_model_dump(p) for p in positions]
+        except Exception:
+            open_positions = []
+
+    pending_orders: list[dict[str, Any]] = []
+    if is_conn:
+        try:
+            orders = conn.get_orders() if hasattr(conn, "get_orders") else []
+            pending_orders = [_safe_model_dump(o) for o in orders]
+        except Exception:
+            pending_orders = []
+
+    proposals = journal.list_proposals(limit=5)
+    recent_proposals = [_safe_model_dump(p) for p in proposals]
+    active_proposals_count = len([p for p in proposals if getattr(p, "status", "") in ("PROPOSED", "APPROVED", "PENDING")])
+
+    all_trades = journal.list_trades(limit=1000)
+    recent_trades = [_safe_model_dump(t) for t in all_trades[:5]]
+
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today_trades = [
+        t for t in all_trades
+        if (getattr(t, "close_time_utc", "") or "").startswith(today_str)
+    ]
+    today_pnl = sum(float(getattr(t, "net_profit", 0.0) or getattr(t, "gross_profit", 0.0) or 0.0) for t in today_trades)
+    today_r = sum(float(getattr(t, "r_multiple", 0.0) or 0.0) for t in today_trades)
+    today_result = {
+        "trade_count": len(today_trades),
+        "net_profit": round(today_pnl, 2),
+        "total_r": round(today_r, 2),
+    }
+
+    recent_analyses = list(_forex_runs.values())[-5:]
+
+    upcoming_events: list[dict[str, Any]] = []
+    try:
+        from tradingagents.forex.calendar import EventImpact, get_calendar_events_for_pair
+        today_events = get_calendar_events_for_pair(
+            symbol="EURUSD",
+            curr_date=today_str,
+            min_impact=EventImpact.HIGH,
+        )
+        upcoming_events = [
+            {
+                "event_id": ev.event_id,
+                "currency": ev.currency,
+                "title": ev.title,
+                "impact": ev.impact.value if hasattr(ev.impact, "value") else str(ev.impact),
+                "date": ev.date,
+                "time_utc": ev.time_utc,
+                "forecast": ev.forecast,
+                "previous": ev.previous,
+            }
+            for ev in today_events[:5]
+        ]
+    except Exception:
+        upcoming_events = []
+
+    recent_lessons = [_safe_model_dump(lesson) for lesson in learning_mgr.store.list_lessons()[:3]]
+
+    from tradingagents.analytics.performance import ForexPerformanceEngine
+    closed_trades = [
+        t for t in all_trades
+        if getattr(t, "status", None) == TradeStatus.CLOSED or getattr(t, "close_time_utc", None)
+    ]
+    perf = ForexPerformanceEngine().calculate_metrics(closed_trades)
+    is_adequate = len(closed_trades) >= 30
+    sample_warning = (
+        None if is_adequate
+        else f"Sample size warning: only {len(closed_trades)} closed trade(s). At least 30 closed trades required for statistical significance."
+    )
+
+    performance_summary = {
+        "expectancy": perf.expectancy,
+        "profit_factor": perf.profit_factor,
+        "average_r": perf.average_r,
+        "max_drawdown_pct": perf.maximum_drawdown_pct,
+        "win_rate": perf.win_rate,
+        "win_rate_pct": perf.win_rate_pct,
+        "trade_count": perf.trade_count,
+        "net_profit": perf.net_profit,
+        "is_sample_size_adequate": is_adequate,
+        "sample_warning": sample_warning,
+    }
+
+    return {
+        "mt5": {
+            "connection_status": status_str,
+            "is_connected": is_conn,
+            "server": server_str,
+            "masked_login": masked_login,
+            "account": account_info,
+            "open_positions": open_positions,
+            "pending_orders": pending_orders,
+        },
+        "trading": {
+            "open_positions_count": len(open_positions),
+            "pending_orders_count": len(pending_orders),
+            "active_proposals_count": active_proposals_count,
+            "recent_proposals": recent_proposals,
+            "recent_trades": recent_trades,
+            "today_result": today_result,
+        },
+        "research": {
+            "recent_analyses": recent_analyses,
+            "upcoming_events": upcoming_events,
+            "recent_lessons": recent_lessons,
+        },
+        "performance": performance_summary,
+    }
+
 
 @router.get("/analytics/dashboard")
 async def get_analytics_dashboard(

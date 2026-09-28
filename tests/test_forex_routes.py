@@ -1568,5 +1568,114 @@ class TestCredentialSecurity:
         assert "localStorage.removeItem('tradingagents_api_key')" in content
 
 
+class TestDashboardOverview:
+    """Validate Phase 25 consolidated institutional dashboard overview."""
 
+    def test_mask_account_login(self):
+        from web.forex_routes import mask_account_login
 
+        assert mask_account_login(None) == "Not Set"
+        assert mask_account_login("") == "Not Set"
+        assert mask_account_login(123) == "***"
+        assert mask_account_login("123") == "***"
+        assert mask_account_login("12345678") == "123*****"
+        assert mask_account_login(987654321) == "987******"
+
+    def test_dashboard_overview_disconnected(self, client):
+        res = client.get("/api/forex/dashboard/overview")
+        assert res.status_code == 200
+        data = res.json()
+
+        # MT5 subsystem
+        assert "mt5" in data
+        assert data["mt5"]["connection_status"] == "DISCONNECTED"
+        assert data["mt5"]["is_connected"] is False
+        assert data["mt5"]["account"] is None
+        assert data["mt5"]["open_positions"] == []
+        assert data["mt5"]["pending_orders"] == []
+
+        # Trading subsystem
+        assert "trading" in data
+        assert data["trading"]["open_positions_count"] == 0
+        assert data["trading"]["pending_orders_count"] == 0
+        assert "today_result" in data["trading"]
+        assert data["trading"]["today_result"]["trade_count"] == 0
+
+        # Research subsystem
+        assert "research" in data
+        assert isinstance(data["research"]["recent_analyses"], list)
+        assert isinstance(data["research"]["upcoming_events"], list)
+        assert isinstance(data["research"]["recent_lessons"], list)
+
+        # Performance subsystem & Sample guard
+        assert "performance" in data
+        perf = data["performance"]
+        assert perf["trade_count"] == 0
+        assert perf["is_sample_size_adequate"] is False
+        assert "Sample size warning" in perf["sample_warning"]
+        assert "30" in perf["sample_warning"]
+
+    def test_dashboard_overview_connected_with_positions(self, client, isolated_forex_env):
+        from tradingagents.agents.schemas_forex import ForexAction
+
+        in_memory_journal, _, mock_observer = isolated_forex_env
+
+        # Setup mock MT5 observer as connected with account and position
+        mock_conn = mock_observer.connection
+        mock_conn.is_connected.return_value = True
+        mock_conn.get_status.return_value = MT5ConnectionStatus.CONNECTED
+        mock_conn.server = "Demo-Server-01"
+        mock_conn.login = 88776655
+
+        mock_acc = MagicMock()
+        mock_acc.balance = 25000.0
+        mock_acc.equity = 25450.0
+        mock_acc.margin = 350.0
+        mock_acc.margin_free = 25100.0
+        mock_acc.profit = 450.0
+        mock_acc.currency = "USD"
+        mock_acc.leverage = 200
+        mock_conn.get_account_info.return_value = mock_acc
+
+        mock_pos = MagicMock()
+        mock_pos.model_dump.return_value = {
+            "ticket": 1001,
+            "symbol": "EURUSD",
+            "type": "BUY",
+            "volume": 0.5,
+            "price_open": 1.0850,
+            "profit": 450.0,
+        }
+        mock_conn.get_positions.return_value = [mock_pos]
+        mock_conn.get_orders.return_value = []
+
+        # Add a closed trade today into journal
+        now_iso = datetime.now(timezone.utc).isoformat()
+        in_memory_journal.record_trade_open(
+            pair="EURUSD",
+            action=ForexAction.LONG,
+            open_price=1.0800,
+            stop_loss=1.0780,
+            lots=0.5,
+            trade_id="tr_today_1",
+        )
+        in_memory_journal.record_trade_close(
+            trade_id="tr_today_1",
+            close_price=1.0850,
+            close_time_utc=now_iso,
+        )
+
+        res = client.get("/api/forex/dashboard/overview")
+        assert res.status_code == 200
+        data = res.json()
+
+        assert data["mt5"]["is_connected"] is True
+        assert data["mt5"]["masked_login"] == "887*****"
+        assert data["mt5"]["server"] == "Demo-Server-01"
+        assert data["mt5"]["account"]["balance"] == 25000.0
+        assert data["mt5"]["account"]["equity"] == 25450.0
+        assert len(data["mt5"]["open_positions"]) == 1
+        assert data["trading"]["open_positions_count"] == 1
+        assert data["trading"]["today_result"]["trade_count"] == 1
+        assert data["trading"]["today_result"]["net_profit"] == 250.0
+        assert data["trading"]["today_result"]["total_r"] == 2.5

@@ -71,16 +71,27 @@
     dashEquity:     $('#dashEquity'),
     dashFloating:   $('#dashFloating'),
     dashFreeMargin: $('#dashFreeMargin'),
+    dashMargin:     $('#dashMargin'),
     dashCurrency:   $('#dashCurrency'),
     dashLeverage:   $('#dashLeverage'),
+    dashServerBadge:$('#dashServerBadge'),
+    dashLoginBadge: $('#dashLoginBadge'),
     dashPositionsContainer: $('#dashPositionsContainer'),
+    dashOrdersContainer:    $('#dashOrdersContainer'),
     dashProposalsContainer: $('#dashProposalsContainer'),
+    dashTodayTradesCount:   $('#dashTodayTradesCount'),
+    dashTodayPnl:           $('#dashTodayPnl'),
+    dashTodayR:             $('#dashTodayR'),
     dashWinRate:    $('#dashWinRate'),
     dashProfitFactor: $('#dashProfitFactor'),
     dashTotalR:     $('#dashTotalR'),
     dashMaxDD:      $('#dashMaxDD'),
+    dashExpectancy: $('#dashExpectancy'),
+    dashAvgR:       $('#dashAvgR'),
+    dashSampleWarning: $('#dashSampleWarning'),
     dashClosedTrades: $('#dashClosedTrades'),
     dashLessonsContainer: $('#dashLessonsContainer'),
+    dashEventsContainer:  $('#dashEventsContainer'),
     btnDashRefreshPositions: $('#btnDashRefreshPositions'),
     btnDashRefreshProposals: $('#btnDashRefreshProposals'),
     // Proposals View DOM
@@ -222,14 +233,14 @@
 
     if (DOM.btnDashRefreshPositions) {
       DOM.btnDashRefreshPositions.addEventListener('click', () => {
-        loadDashboardPositions();
+        loadDashboardOverview();
         showToast('Dashboard positions refreshed', 'info');
       });
     }
 
     if (DOM.btnDashRefreshProposals) {
       DOM.btnDashRefreshProposals.addEventListener('click', () => {
-        loadDashboardProposals();
+        loadDashboardOverview();
         showToast('Dashboard proposals refreshed', 'info');
       });
     }
@@ -504,9 +515,6 @@
       showMT5Unavailable();
     }
   }
-      showMT5Unavailable();
-    }
-  }
 
   async function loadMT5Positions() {
     try {
@@ -701,15 +709,291 @@
     } catch (_) {}
   }
 
-  // ---- Subsystem Loaders for Reorganized Dashboard ----
+  // ---- Subsystem Loaders for Reorganized Dashboard (Phase 25) ----
   async function loadDashboardOverview() {
-    await Promise.allSettled([
-      loadMT5Account(),
-      loadDashboardPositions(),
-      loadDashboardProposals(),
-      loadDashboardAnalytics(),
-      loadDashboardLessons(),
-    ]);
+    try {
+      const res = await fetch('/api/forex/dashboard/overview');
+      if (!res.ok) {
+        await Promise.allSettled([
+          loadMT5Account(),
+          loadDashboardPositions(),
+          loadDashboardProposals(),
+          loadDashboardAnalytics(),
+          loadDashboardLessons(),
+        ]);
+        return;
+      }
+      const data = await res.json();
+      renderDashboardOverview(data);
+    } catch (_) {
+      showMT5Unavailable();
+    }
+  }
+
+  function renderDashboardOverview(data) {
+    if (!data) return;
+
+    // 1. MT5 Observer Account State
+    const mt5 = data.mt5 || {};
+    const acc = mt5.account;
+    const isConn = mt5.is_connected === true;
+
+    if (DOM.dashServerBadge) {
+      DOM.dashServerBadge.textContent = `Server: ${mt5.server || 'None'}`;
+    }
+    if (DOM.dashLoginBadge) {
+      DOM.dashLoginBadge.textContent = `Account: ${mt5.masked_login || 'Not Set'}`;
+    }
+
+    if (isConn && acc) {
+      const balStr = (acc.balance != null)
+        ? `$${Number(acc.balance).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+        : 'Unavailable';
+      const eqStr = (acc.equity != null)
+        ? `$${Number(acc.equity).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+        : 'Unavailable';
+      const freeStr = (acc.margin_free != null)
+        ? `$${Number(acc.margin_free).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+        : 'Unavailable';
+      const marginStr = (acc.margin != null)
+        ? `Margin Used: $${Number(acc.margin).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+        : 'Margin Used: $0.00';
+
+      if (DOM.dashBalance) DOM.dashBalance.textContent = balStr;
+      if (DOM.dashEquity) DOM.dashEquity.textContent = eqStr;
+      if (DOM.dashFreeMargin) DOM.dashFreeMargin.textContent = freeStr;
+      if (DOM.dashMargin) DOM.dashMargin.textContent = marginStr;
+
+      if (acc.currency && DOM.dashCurrency) {
+        DOM.dashCurrency.textContent = `Currency: ${acc.currency}`;
+      }
+      if (acc.leverage && DOM.dashLeverage) {
+        DOM.dashLeverage.textContent = `Leverage 1:${acc.leverage}`;
+      }
+
+      if (acc.profit != null) {
+        const p = Number(acc.profit);
+        const pStr = `${p >= 0 ? '+' : ''}$${p.toFixed(2)}`;
+        const pCol = p >= 0 ? 'var(--green)' : 'var(--red)';
+        if (DOM.dashFloating) {
+          DOM.dashFloating.textContent = pStr;
+          DOM.dashFloating.style.color = pCol;
+        }
+      }
+    } else {
+      showMT5Unavailable();
+      if (DOM.dashMargin) DOM.dashMargin.textContent = 'Margin Used: $0.00';
+    }
+
+    // 2. Open Positions
+    if (DOM.dashPositionsContainer) {
+      const positions = mt5.open_positions || [];
+      if (positions.length === 0) {
+        DOM.dashPositionsContainer.innerHTML = `
+          <div class="empty-state" style="padding: 1.5rem;">
+            <div class="empty-state-icon">📡</div>
+            <div class="empty-state-title">No Active Positions</div>
+            <div class="empty-state-desc">Trades executed manually in MT5 appear here automatically.</div>
+          </div>
+        `;
+      } else {
+        DOM.dashPositionsContainer.innerHTML = `
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Ticket</th>
+                <th>Symbol</th>
+                <th>Type</th>
+                <th>Volume</th>
+                <th>Current Price</th>
+                <th>Profit</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${positions.map(p => {
+                const pnl = Number(p.profit || 0);
+                const pnlColor = pnl >= 0 ? 'var(--green)' : 'var(--red)';
+                const typeStr = String(p.type || '').toUpperCase();
+                const isBuy = typeStr === 'LONG' || typeStr === 'BUY' || p.type === 0;
+                return `
+                  <tr>
+                    <td style="font-family:var(--font-mono); font-size:0.8rem;">#${escapeText(p.ticket)}</td>
+                    <td style="font-weight:700; color:var(--cyan);">${escapeText(p.symbol)}</td>
+                    <td><span class="signal-badge ${isBuy ? 'bullish' : 'bearish'}" style="font-size:0.7rem; padding:2px 8px;">${isBuy ? 'BUY' : 'SELL'}</span></td>
+                    <td style="font-family:var(--font-mono);">${Number(p.volume).toFixed(2)}</td>
+                    <td style="font-family:var(--font-mono);">${formatForexPrice(p.price_current, p.symbol, p.digits)}</td>
+                    <td style="font-family:var(--font-mono); font-weight:700; color:${pnlColor};">${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}</td>
+                  </tr>
+                `;
+              }).join('')}
+            </tbody>
+          </table>
+        `;
+      }
+    }
+
+    // 3. Pending Orders
+    if (DOM.dashOrdersContainer) {
+      const orders = mt5.pending_orders || [];
+      if (orders.length === 0) {
+        DOM.dashOrdersContainer.innerHTML = `
+          <div style="font-size: 0.8rem; color: var(--text-muted); padding: 0.5rem 0;">No pending limit or stop orders.</div>
+        `;
+      } else {
+        DOM.dashOrdersContainer.innerHTML = `
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Ticket</th>
+                <th>Symbol</th>
+                <th>Type</th>
+                <th>Volume</th>
+                <th>Order Price</th>
+                <th>SL</th>
+                <th>TP</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${orders.map(o => `
+                <tr>
+                  <td style="font-family:var(--font-mono); font-size:0.8rem;">#${escapeText(o.ticket)}</td>
+                  <td style="font-weight:700; color:var(--cyan);">${escapeText(o.symbol)}</td>
+                  <td><span class="lesson-tag" style="font-size:0.7rem;">${escapeText(o.type_str || o.type)}</span></td>
+                  <td style="font-family:var(--font-mono);">${Number(o.volume_current || o.volume_initial || 0).toFixed(2)}</td>
+                  <td style="font-family:var(--font-mono);">${formatForexPrice(o.price_open, o.symbol, o.digits)}</td>
+                  <td style="font-family:var(--font-mono);">${formatForexPrice(o.sl, o.symbol, o.digits)}</td>
+                  <td style="font-family:var(--font-mono);">${formatForexPrice(o.tp, o.symbol, o.digits)}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        `;
+      }
+    }
+
+    // 4. Proposals & Today's Result
+    const trading = data.trading || {};
+    if (DOM.dashProposalsContainer) {
+      const proposals = trading.recent_proposals || [];
+      if (proposals.length === 0) {
+        DOM.dashProposalsContainer.innerHTML = `
+          <div class="empty-state" style="padding: 1.5rem;">
+            <div class="empty-state-icon">📋</div>
+            <div class="empty-state-title">No Recent Proposals</div>
+            <div class="empty-state-desc">Proposals generated through the multi-agent pipeline will be logged here.</div>
+          </div>
+        `;
+      } else {
+        DOM.dashProposalsContainer.innerHTML = `
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Pair</th>
+                <th>Action</th>
+                <th>Entry</th>
+                <th>SL</th>
+                <th>TP</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${proposals.map(p => `
+                <tr>
+                  <td style="font-family:var(--font-mono); font-size:0.75rem; color:var(--text-muted);">${escapeText(String(p.proposal_id || '').slice(0, 8))}</td>
+                  <td style="font-weight:700; color:var(--cyan);">${escapeText(p.pair)}</td>
+                  <td><span class="signal-badge ${p.action === 'LONG' ? 'bullish' : 'bearish'}" style="font-size:0.7rem; padding:2px 8px;">${escapeText(p.action)}</span></td>
+                  <td style="font-family:var(--font-mono);">${Number(p.entry_price || 0).toFixed(5)}</td>
+                  <td style="font-family:var(--font-mono);">${Number(p.stop_loss || 0).toFixed(5)}</td>
+                  <td style="font-family:var(--font-mono);">${Number(p.take_profit_1 || 0).toFixed(5)}</td>
+                  <td><span class="status-cell ${escapeText(p.status)}">${escapeText(p.status)}</span></td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        `;
+      }
+    }
+
+    const todayRes = trading.today_result || {};
+    if (DOM.dashTodayTradesCount) DOM.dashTodayTradesCount.textContent = todayRes.trade_count != null ? todayRes.trade_count : 0;
+    if (DOM.dashTodayPnl) {
+      const pnl = Number(todayRes.net_profit || 0);
+      DOM.dashTodayPnl.textContent = `${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}`;
+      DOM.dashTodayPnl.style.color = pnl >= 0 ? 'var(--green)' : 'var(--red)';
+    }
+    if (DOM.dashTodayR) {
+      const r = Number(todayRes.total_r || 0);
+      DOM.dashTodayR.textContent = `${r >= 0 ? '+' : ''}${r.toFixed(2)}R`;
+      DOM.dashTodayR.style.color = r >= 0 ? 'var(--cyan)' : 'var(--red)';
+    }
+
+    // 5. Performance Metrics & Sample Guard
+    const perf = data.performance || {};
+    if (DOM.dashExpectancy) DOM.dashExpectancy.textContent = `${Number(perf.expectancy || 0).toFixed(2)}R`;
+    if (DOM.dashProfitFactor) DOM.dashProfitFactor.textContent = Number(perf.profit_factor || 0).toFixed(2);
+    if (DOM.dashAvgR) DOM.dashAvgR.textContent = `${Number(perf.average_r || 0).toFixed(2)}R`;
+    if (DOM.dashMaxDD) DOM.dashMaxDD.textContent = `${Number(perf.max_drawdown_pct || 0).toFixed(1)}%`;
+
+    if (DOM.dashSampleWarning) {
+      if (perf.is_sample_size_adequate === false && perf.sample_warning) {
+        DOM.dashSampleWarning.style.display = 'flex';
+        const span = DOM.dashSampleWarning.querySelector('span');
+        if (span) span.textContent = perf.sample_warning;
+      } else {
+        DOM.dashSampleWarning.style.display = 'none';
+      }
+    }
+
+    // 6. Macro Events
+    const research = data.research || {};
+    if (DOM.dashEventsContainer) {
+      const events = research.upcoming_events || [];
+      if (events.length === 0) {
+        DOM.dashEventsContainer.innerHTML = `
+          <div style="font-size: 0.8rem; color: var(--text-muted); padding: 0.5rem 0;">No high-impact releases scheduled today.</div>
+        `;
+      } else {
+        DOM.dashEventsContainer.innerHTML = events.map(ev => `
+          <div style="display: flex; justify-content: space-between; align-items: center; padding: 6px 10px; background: var(--bg-primary); border-radius: var(--radius-sm); border: 1px solid var(--border); margin-bottom: 6px; font-size: 0.8rem;">
+            <div>
+              <span class="signal-badge bearish" style="font-size: 0.65rem; padding: 1px 6px; margin-right: 6px;">${escapeText(ev.currency)}</span>
+              <strong>${escapeText(ev.title)}</strong>
+            </div>
+            <div style="font-family: var(--font-mono); color: var(--text-secondary); font-size: 0.75rem;">
+              ${escapeText(ev.time_utc || '')} | F: ${escapeText(ev.forecast || '-')} | P: ${escapeText(ev.previous || '-')}
+            </div>
+          </div>
+        `).join('');
+      }
+    }
+
+    // 7. Recent Lessons
+    if (DOM.dashLessonsContainer) {
+      const lessons = research.recent_lessons || [];
+      if (lessons.length === 0) {
+        DOM.dashLessonsContainer.innerHTML = `
+          <div class="empty-state" style="padding: 1.5rem;">
+            <div class="empty-state-icon">🧠</div>
+            <div class="empty-state-title">No Stored Lessons</div>
+            <div class="empty-state-desc">Post-trade reflections extract prescriptive rules and store them here.</div>
+          </div>
+        `;
+      } else {
+        DOM.dashLessonsContainer.innerHTML = lessons.map(l => `
+          <div class="lesson-card" style="margin-bottom: 0.75rem;">
+            <div class="lesson-header">
+              <span class="lesson-pair">${escapeText(l.pair || 'GLOBAL')}</span>
+              <span class="lesson-tag">${escapeText(l.outcome_category || 'GENERAL')}</span>
+            </div>
+            <div class="lesson-rule" style="font-size:0.8rem;">${escapeText(l.rule_violated || l.observation || 'Operational Rule')}</div>
+            <div class="lesson-action" style="padding:6px 10px; font-size:0.75rem;">
+              ${escapeText(l.actionable_rule || l.observation || 'Follow risk guidelines.')}
+            </div>
+          </div>
+        `).join('');
+      }
+    }
   }
 
   async function loadDashboardPositions() {
