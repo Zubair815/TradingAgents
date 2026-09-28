@@ -1195,5 +1195,136 @@ def test_phase15_reflection_agent_generates_phase15_lessons():
     assert "NEVER trade" not in lesson.actionable_rule
 
 
+# ===========================================================================
+# Phase 16: Contextual Memory Retrieval Tests
+# ===========================================================================
+
+
+def test_phase16_contextual_retrieval_and_filtering(tmp_path):
+    """Verify EURUSD M15 London Pullback lesson retrieves for future EURUSD M15 Pullback
+
+    and does NOT automatically inject into unrelated USDJPY H4 Breakout.
+    """
+    from tradingagents.learning.models import ForexLesson
+    from tradingagents.learning.retriever import LessonRetriever
+    from tradingagents.learning.store import ForexLessonStore
+
+    db_file = tmp_path / "phase16_retrieval.db"
+    store = ForexLessonStore(db_path=db_file)
+
+    # Store EURUSD M15 London Pullback lesson
+    lesson = ForexLesson(
+        lesson_id="lsn_eurusd_m15_pullback",
+        source_trade_id="trd_pullback_1",
+        pair="EURUSD",
+        timeframe="M15",
+        setup="PULLBACK",
+        direction="LONG",
+        session="LONDON",
+        market_regime="TRENDING_BULLISH",
+        actionable_rule="Wait for discount zone retest on M15 London pullbacks before executing long.",
+        confidence=0.85,
+        evidence_count=2,
+    )
+    store.save_lesson(lesson)
+
+    retriever = LessonRetriever(store=store)
+
+    # 1. Query for relevant future EURUSD M15 Pullback
+    relevant_results = retriever.retrieve_lessons(
+        pair="EURUSD",
+        timeframe="M15",
+        setup_type="PULLBACK",
+        session="LONDON",
+        limit=5,
+        min_relevance=0.35,
+    )
+    assert len(relevant_results) == 1
+    top = relevant_results[0]
+    assert top.lesson.lesson_id == "lsn_eurusd_m15_pullback"
+    assert top.relevance_score >= 0.50
+    assert any("Exact pair match" in r for r in top.match_reasons)
+    assert any("Timeframe match" in r for r in top.match_reasons)
+    assert any("Setup strategy match" in r for r in top.match_reasons)
+
+    prompt_text = retriever.format_lessons_for_prompt(relevant_results)
+    assert "lsn_eurusd_m15_pullback" in prompt_text
+    assert "EURUSD M15" in prompt_text
+
+    # 2. Query for unrelated USDJPY H4 Breakout
+    unrelated_results = retriever.retrieve_lessons(
+        pair="USDJPY",
+        timeframe="H4",
+        setup_type="BREAKOUT",
+        session="TOKYO",
+        limit=5,
+        min_relevance=0.35,
+    )
+    # Must NOT automatically inject into unrelated USDJPY H4 Breakout
+    assert len(unrelated_results) == 0
+    assert retriever.format_lessons_for_prompt(unrelated_results) == ""
+
+
+def test_phase16_small_subset_constraint(tmp_path):
+    """Verify retriever only retrieves a small relevant subset (3-10 lessons) and does not dump entire DB."""
+    from tradingagents.learning.models import ForexLesson
+    from tradingagents.learning.retriever import LessonRetriever
+    from tradingagents.learning.store import ForexLessonStore
+
+    db_file = tmp_path / "phase16_subset.db"
+    store = ForexLessonStore(db_path=db_file)
+
+    # Seed 25 lessons into DB
+    for i in range(25):
+        store.save_lesson(
+            ForexLesson(
+                lesson_id=f"lsn_{i:02d}",
+                pair="EURUSD",
+                timeframe="M15",
+                setup="PULLBACK",
+                actionable_rule=f"Directive rule #{i}",
+                confidence=0.80,
+            )
+        )
+    assert store.count_lessons() == 25
+
+    retriever = LessonRetriever(store=store)
+    # Request default limit (5)
+    subset = retriever.retrieve_lessons(pair="EURUSD", timeframe="M15", setup_type="PULLBACK")
+    assert len(subset) == 5
+    assert len(subset) <= 10
+
+    # Request upper bounded limit
+    subset_max = retriever.retrieve_lessons(pair="EURUSD", timeframe="M15", setup_type="PULLBACK", limit=20)
+    assert len(subset_max) == 10  # Clamped to max 10 to protect LLM context window
+
+
+def test_phase16_report_applied_lesson_ids():
+    """Verify applied lesson IDs are tracked in proposal model and rendered in markdown."""
+    from tradingagents.agents.schemas_forex import (
+        ForexAction,
+        ForexTraderProposal,
+        render_forex_trader_proposal,
+    )
+
+    prop = ForexTraderProposal(
+        pair="EURUSD",
+        action=ForexAction.LONG,
+        entry_price=1.0850,
+        stop_loss=1.0800,
+        take_profit_1=1.0950,
+        reasoning="Bullish market structure alignment.",
+        applied_lesson_ids=["lsn_eurusd_m15_pullback", "lsn_slippage_safeguard"],
+    )
+
+    assert prop.applied_lesson_ids == ["lsn_eurusd_m15_pullback", "lsn_slippage_safeguard"]
+
+    rendered = render_forex_trader_proposal(prop)
+    assert "Applied Historical Lessons" in rendered
+    assert "lsn_eurusd_m15_pullback" in rendered
+    assert "lsn_slippage_safeguard" in rendered
+
+
+
 
 

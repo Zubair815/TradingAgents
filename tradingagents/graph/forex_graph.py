@@ -651,14 +651,40 @@ class ForexTradingAgentsGraph:
             ctx_tfs = get_default_context_timeframes(exec_tf)
         ctx_tf_strs = [t.value for t in ctx_tfs]
 
+        # Retrieve relevant contextual memory (Phase 16)
+        past_ctx = ""
+        applied_lesson_ids: list[str] = []
+        learning_mgr = getattr(self, "learning_manager", None)
+        if learning_mgr is None and self.journal is not None:
+            try:
+                from tradingagents.learning.manager import ForexLearningManager
+                learning_mgr = ForexLearningManager(journal=self.journal)
+                self.learning_manager = learning_mgr
+            except Exception:
+                learning_mgr = None
+
+        if learning_mgr is not None and hasattr(learning_mgr, "retriever"):
+            try:
+                retrieved = learning_mgr.retriever.retrieve_lessons(
+                    pair=canon_pair,
+                    timeframe=exec_tf_str,
+                    limit=5,
+                    min_relevance=0.35,
+                )
+                applied_lesson_ids = [item.lesson.lesson_id for item in retrieved]
+                past_ctx = learning_mgr.retriever.format_lessons_for_prompt(retrieved)
+            except Exception as exc:
+                logger.warning("Failed retrieving contextual lessons for %s: %s", canon_pair, exc)
+
         init_state = self.propagator.create_initial_state(
             company_name=canon_pair,
             trade_date=t_date,
             asset_type="forex",
-            past_context="",
+            past_context=past_ctx,
             instrument_context=f"Instrument: {canon_pair} ({exec_tf_str}) | Context: {', '.join(ctx_tf_strs)} | Date: {t_date}",
             portfolio_context=portfolio.render(canon_pair) if portfolio is not None else "",
         )
+        init_state["applied_lesson_ids"] = applied_lesson_ids
         init_state["forex_as_of_utc"] = cutoff.isoformat()
         init_state["forex_execution_timeframe"] = exec_tf_str
         init_state["forex_context_timeframes"] = ctx_tf_strs

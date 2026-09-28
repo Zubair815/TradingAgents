@@ -20,13 +20,15 @@ def create_research_manager(llm):
     def research_manager_node(state) -> dict:
         instrument_context = get_instrument_context_from_state(state)
         history = state["investment_debate_state"].get("history", "")
+        past_context = (state.get("past_context") or "").strip()
+        past_section = f"\n\n---\n\n### Historical Lessons & Directives\n{past_context}" if past_context else ""
 
         investment_debate_state = state["investment_debate_state"]
 
         prompt = f"""As the Research Manager and debate facilitator, your role is to critically evaluate this round of debate and deliver a clear, actionable investment plan for the trader.
 
 {instrument_context}
-
+{past_section}
 ---
 
 **Rating Scale** (use exactly one):
@@ -70,9 +72,12 @@ Write these sections, in this order, starting with the recommendation on its own
             "count": investment_debate_state["count"],
         }
 
-        return {
+        ret = {
             "investment_debate_state": new_investment_debate_state,
             "investment_plan": investment_plan,
         }
+        if state.get("applied_lesson_ids"):
+            ret["applied_lesson_ids"] = state["applied_lesson_ids"]
+        return ret
 
     return research_manager_node

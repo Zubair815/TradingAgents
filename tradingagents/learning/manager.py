@@ -205,18 +205,27 @@ class ForexLearningManager:
     def retrieve_guidance_for_proposal(
         self,
         pair: str,
+        timeframe: str | None = None,
         setup_type: str | None = None,
+        direction: str | None = None,
+        session: str | None = None,
+        market_regime: str | None = None,
         action: str | None = None,
         tags: list[str] | None = None,
-        limit: int = 3,
+        limit: int = 5,
+        min_relevance: float = 0.35,
     ) -> str:
         """Retrieve historical lessons and format into an LLM prompt guidance block."""
         retrieved = self.retriever.retrieve_lessons(
             pair=pair,
+            timeframe=timeframe,
             setup_type=setup_type,
-            action=action,
+            direction=direction or action,
+            session=session,
+            market_regime=market_regime,
             tags=tags,
             limit=limit,
+            min_relevance=min_relevance,
         )
         return self.retriever.format_lessons_for_prompt(retrieved)
 

@@ -1736,15 +1736,28 @@ async def reflect_on_trade(
 @router.get("/learning/retrieve")
 async def retrieve_lessons(
     pair: str = Query(..., description="Target currency pair"),
+    timeframe: str | None = Query(default=None),
     setup_type: str | None = Query(default=None),
+    direction: str | None = Query(default=None),
+    session: str | None = Query(default=None),
+    market_regime: str | None = Query(default=None),
     limit: int = Query(default=5, ge=1, le=20),
     learning_mgr: ForexLearningManager = Depends(get_learning_manager),
 ):
     """Retrieve ranked contextually relevant heuristics for prompt injection."""
-    retrieved = learning_mgr.retriever.retrieve_lessons(pair=pair, setup_type=setup_type, limit=limit)
+    retrieved = learning_mgr.retriever.retrieve_lessons(
+        pair=pair,
+        timeframe=timeframe,
+        setup_type=setup_type,
+        direction=direction,
+        session=session,
+        market_regime=market_regime,
+        limit=limit,
+    )
     markdown_prompt = learning_mgr.retriever.format_lessons_for_prompt(retrieved)
     return {
         "lessons": [_safe_model_dump(r) for r in retrieved],
+        "applied_lesson_ids": [r.lesson.lesson_id for r in retrieved],
         "markdown_prompt": markdown_prompt,
         "count": len(retrieved),
     }

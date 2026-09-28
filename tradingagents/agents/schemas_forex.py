@@ -271,6 +271,10 @@ class ForexTraderProposal(BaseModel):
         default=None,
         description="ISO timestamp UTC until which the trade proposal is valid before expiring",
     )
+    applied_lesson_ids: list[str] = Field(
+        default_factory=list,
+        description="IDs of historical lessons retrieved and incorporated into this proposal",
+    )
 
     @field_validator(
         "entry_price",
@@ -572,6 +576,13 @@ def render_forex_trader_proposal(proposal: ForexTraderProposal) -> str:
         ])
         for c in proposal.confluence_factors:
             lines.append(f"- ✅ {c}")
+
+    if proposal.applied_lesson_ids:
+        lines.extend([
+            "",
+            "### Applied Historical Lessons",
+            f"- **Applied Lesson IDs:** {', '.join(proposal.applied_lesson_ids)}",
+        ])
 
     lines.extend([
         "",

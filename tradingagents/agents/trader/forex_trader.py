@@ -276,6 +276,10 @@ def create_forex_trader(llm: Any):
         if proposal is not None and selected_tf and proposal.timeframe != selected_tf:
             proposal = proposal.model_copy(update={"timeframe": selected_tf})
 
+        applied_ids = state.get("applied_lesson_ids") or []
+        if proposal is not None and applied_ids and not proposal.applied_lesson_ids:
+            proposal = proposal.model_copy(update={"applied_lesson_ids": list(applied_ids)})
+
         # Render institutional markdown proposal
         rendered_plan = render_forex_trader_proposal(proposal)
 
@@ -283,6 +287,7 @@ def create_forex_trader(llm: Any):
             "messages": [AIMessage(content=rendered_plan)],
             "trader_investment_plan": rendered_plan,
             "forex_proposal": proposal.model_dump(),
+            "applied_lesson_ids": proposal.applied_lesson_ids,
             "sender": name,
         }
 
