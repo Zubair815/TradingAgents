@@ -388,13 +388,32 @@ class ForexTradeJournal:
         now_str = open_time_utc or datetime.now(timezone.utc).isoformat()
 
         eff_confidence = confidence
-        if eff_confidence is None and proposal_id:
+        ver_meta: dict[str, Any] = {}
+        if proposal_id:
             try:
                 prop = self.get_proposal(proposal_id)
-                if prop and getattr(prop, "confidence", None) is not None:
-                    eff_confidence = prop.confidence
+                if prop:
+                    if eff_confidence is None and getattr(prop, "confidence", None) is not None:
+                        eff_confidence = prop.confidence
+                    for k in (
+                        "provider", "quick_model", "deep_model", "strategy_version",
+                        "system_version", "prompt_version", "prompt_hash", "analysts",
+                        "temperature", "reasoning_effort", "max_tokens",
+                    ):
+                        val = getattr(prop, k, None)
+                        if val is not None:
+                            ver_meta[k] = val
+                    if getattr(prop, "metadata", None) and isinstance(prop.metadata, dict):
+                        for k, v in prop.metadata.get("version_metadata", {}).items():
+                            ver_meta.setdefault(k, v)
             except Exception:
                 pass
+
+        trade_meta = dict(metadata or {})
+        for k, v in ver_meta.items():
+            trade_meta.setdefault(k, v)
+        if ver_meta:
+            trade_meta.setdefault("version_metadata", ver_meta)
 
         rec = TradeJournalRecord(
             trade_id=tid,
@@ -411,7 +430,7 @@ class ForexTradeJournal:
             confidence=eff_confidence,
             tags=tags or [],
             notes=notes,
-            metadata=metadata or {},
+            metadata=trade_meta,
         )
 
         with self._lock:
@@ -945,8 +964,19 @@ class ForexTradeJournal:
 
     @staticmethod
     def _row_to_proposal_record(row: sqlite3.Row) -> ProposalRecord:
+        payload = json.loads(row["payload_json"]) if row["payload_json"] else {}
+        meta = json.loads(row["metadata_json"]) if row["metadata_json"] else {}
+        ver = meta.get("version_metadata") or {}
+
+        def _v(k: str, default: Any = None) -> Any:
+            if k in payload and payload[k] is not None:
+                return payload[k]
+            if k in ver and ver[k] is not None:
+                return ver[k]
+            return meta.get(k, default)
+
         return ProposalRecord(
-            proposal_payload=json.loads(row["payload_json"]) if row["payload_json"] else None,
+            proposal_payload=payload if payload else None,
             run_id=row["run_id"], snapshot_id=row["snapshot_id"], version_id=row["version_id"],
             proposal_id=row["proposal_id"],
             created_at_utc=row["created_at_utc"],
@@ -973,7 +1003,19 @@ class ForexTradeJournal:
             trade_rationale_summary=row["trade_rationale_summary"],
             status=ProposalStatus.from_str(row["status"]),
             risk_decision=json.loads(row["risk_decision_json"]) if row["risk_decision_json"] else None,
-            metadata=json.loads(row["metadata_json"]),
+            metadata=meta,
+            provider=_v("provider"),
+            quick_model=_v("quick_model"),
+            deep_model=_v("deep_model"),
+            temperature=_v("temperature"),
+            reasoning_effort=_v("reasoning_effort"),
+            max_tokens=_v("max_tokens"),
+            analysts=list(_v("analysts", []) or []),
+            prompt_version=_v("prompt_version"),
+            prompt_hash=_v("prompt_hash"),
+            strategy_version=_v("strategy_version", "1.0.0") or "1.0.0",
+            system_version=_v("system_version", "1.0.0") or "1.0.0",
+            data_source_metadata=dict(_v("data_source_metadata", {}) or {}),
         )
 
     @staticmethod

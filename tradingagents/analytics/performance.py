@@ -99,6 +99,7 @@ class SegmentationBreakdown(BaseModel):
     by_provider: dict[str, PerformanceMetricsSummary] = Field(default_factory=dict)
     by_prompt_version: dict[str, PerformanceMetricsSummary] = Field(default_factory=dict)
     by_strategy_version: dict[str, PerformanceMetricsSummary] = Field(default_factory=dict)
+    by_system_version: dict[str, PerformanceMetricsSummary] = Field(default_factory=dict)
     by_confidence_band: dict[str, PerformanceMetricsSummary] = Field(default_factory=dict)
 
 
@@ -484,8 +485,16 @@ class ForexPerformanceEngine:
             val = getattr(t, name, None)
             if val is None and hasattr(t, "metadata") and isinstance(t.metadata, dict):
                 val = t.metadata.get(name)
+                if val is None and isinstance(t.metadata.get("version_metadata"), dict):
+                    val = t.metadata["version_metadata"].get(name)
+            if val is None and hasattr(t, "proposal") and t.proposal:
+                val = getattr(t.proposal, name, None)
             if val is None and isinstance(t, dict):
-                val = t.get(name) or (t.get("metadata", {}).get(name) if isinstance(t.get("metadata"), dict) else None)
+                val = t.get(name)
+                if val is None and isinstance(t.get("metadata"), dict):
+                    val = t["metadata"].get(name)
+                    if val is None and isinstance(t["metadata"].get("version_metadata"), dict):
+                        val = t["metadata"]["version_metadata"].get(name)
             if hasattr(val, "value"):
                 val = val.value
             return str(val) if val is not None else default
@@ -562,29 +571,53 @@ class ForexPerformanceEngine:
             slice_trades = [t for t in trades if _get_field(t, "news_condition", "CLEAN_CALENDAR") == nc]
             breakdown.by_news_condition[nc] = self.calculate_metrics(slice_trades)
 
-        # 9. By Model
-        models = {_get_field(t, "model_name", "DEFAULT_MODEL") for t in trades}
+        # 9. By Model (Phase 23)
+        def _get_model(t: Any) -> str:
+            m = _get_field(t, "quick_model", "")
+            if not m or m == "UNKNOWN":
+                m = _get_field(t, "model_name", "")
+            return m or "DEFAULT_MODEL"
+
+        models = {_get_model(t) for t in trades}
         for m in sorted(models):
-            slice_trades = [t for t in trades if _get_field(t, "model_name", "DEFAULT_MODEL") == m]
+            slice_trades = [t for t in trades if _get_model(t) == m]
             breakdown.by_model[m] = self.calculate_metrics(slice_trades)
 
-        # 10. By Provider
+        # 10. By Provider (Phase 23)
         providers = {_get_field(t, "provider", "DEFAULT_PROVIDER") for t in trades}
         for prv in sorted(providers):
             slice_trades = [t for t in trades if _get_field(t, "provider", "DEFAULT_PROVIDER") == prv]
             breakdown.by_provider[prv] = self.calculate_metrics(slice_trades)
 
-        # 11. By Prompt Version / Hash
-        prompts = {_get_field(t, "prompt_hash", "DEFAULT_PROMPT") for t in trades}
+        # 11. By Prompt Version / Hash (Phase 23)
+        def _get_prompt(t: Any) -> str:
+            p = _get_field(t, "prompt_version", "")
+            if not p or p == "UNKNOWN":
+                p = _get_field(t, "prompt_hash", "")
+            return p or "DEFAULT_PROMPT"
+
+        prompts = {_get_prompt(t) for t in trades}
         for pmp in sorted(prompts):
-            slice_trades = [t for t in trades if _get_field(t, "prompt_hash", "DEFAULT_PROMPT") == pmp]
+            slice_trades = [t for t in trades if _get_prompt(t) == pmp]
             breakdown.by_prompt_version[pmp] = self.calculate_metrics(slice_trades)
 
-        # 12. By Strategy Version
-        strategies = {_get_field(t, "version_id", "V1") for t in trades}
+        # 12. By Strategy Version (Phase 23)
+        def _get_strategy(t: Any) -> str:
+            s = _get_field(t, "strategy_version", "")
+            if not s or s == "UNKNOWN":
+                s = _get_field(t, "version_id", "")
+            return s or "V1"
+
+        strategies = {_get_strategy(t) for t in trades}
         for strat in sorted(strategies):
-            slice_trades = [t for t in trades if _get_field(t, "version_id", "V1") == strat]
+            slice_trades = [t for t in trades if _get_strategy(t) == strat]
             breakdown.by_strategy_version[strat] = self.calculate_metrics(slice_trades)
+
+        # 13. By System Version (Phase 23)
+        system_versions = {_get_field(t, "system_version", "1.0.0") for t in trades}
+        for sys_ver in sorted(system_versions):
+            slice_trades = [t for t in trades if _get_field(t, "system_version", "1.0.0") == sys_ver]
+            breakdown.by_system_version[sys_ver] = self.calculate_metrics(slice_trades)
 
         # 13. By Confidence Band (Phase 18 Integration)
         confidence_bands = ["50-60", "60-70", "70-80", "80-90", "90-100", "<50"]

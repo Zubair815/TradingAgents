@@ -28,6 +28,22 @@ from tradingagents.forex.pips import pip_size_for
 logger = logging.getLogger(__name__)
 
 
+def sanitize_secrets(data: Any) -> Any:
+    """Recursively scrub credentials, passwords, and API keys from data structures."""
+    if isinstance(data, dict):
+        clean: dict[str, Any] = {}
+        blocked = ("key", "secret", "token", "password", "auth", "credential", "private")
+        for k, v in data.items():
+            k_lower = str(k).lower()
+            if any(b in k_lower for b in blocked):
+                continue
+            clean[k] = sanitize_secrets(v)
+        return clean
+    if isinstance(data, list):
+        return [sanitize_secrets(item) for item in data]
+    return data
+
+
 # ---------------------------------------------------------------------------
 # Enums
 # ---------------------------------------------------------------------------
@@ -281,6 +297,63 @@ class ForexTraderProposal(BaseModel):
         le=100.0,
         description="Original model confidence score (0.0 to 100.0 scale, e.g. 75.0 for 75%)",
     )
+    # Phase 23: Model / Prompt / Strategy Versioning
+    provider: str | None = Field(
+        default=None,
+        description="LLM provider name, e.g. openai, anthropic, google",
+    )
+    quick_model: str | None = Field(
+        default=None,
+        description="Model name utilized for rapid tactical evaluations",
+    )
+    deep_model: str | None = Field(
+        default=None,
+        description="Model name utilized for deep synthesis and manager oversight",
+    )
+    temperature: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=2.0,
+        description="Sampling temperature utilized during proposal generation",
+    )
+    reasoning_effort: str | None = Field(
+        default=None,
+        description="Reasoning effort tier, e.g. low, medium, high",
+    )
+    max_tokens: int | None = Field(
+        default=None,
+        ge=1,
+        description="Maximum generation token ceiling configured",
+    )
+    analysts: list[str] = Field(
+        default_factory=list,
+        description="Active analyst agent selection contributing to this proposal",
+    )
+    prompt_version: str | None = Field(
+        default=None,
+        description="Version identifier for the Forex Trader system prompt",
+    )
+    prompt_hash: str | None = Field(
+        default=None,
+        description="Deterministic cryptographic hash of prompt instructions",
+    )
+    strategy_version: str = Field(
+        default="1.0.0",
+        description="Semantic version of active trading strategy and guardrails",
+    )
+    system_version: str = Field(
+        default="1.0.0",
+        description="Core architecture version",
+    )
+    data_source_metadata: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Auditable metadata regarding data providers and release timestamps without credentials",
+    )
+
+    @field_validator("data_source_metadata", mode="before")
+    @classmethod
+    def _sanitize_data_source_metadata(cls, v: Any) -> dict[str, Any]:
+        return sanitize_secrets(v) if isinstance(v, dict) else {}
 
     @field_validator(
         "entry_price",

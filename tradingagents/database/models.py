@@ -23,6 +23,7 @@ from tradingagents.agents.schemas_forex import (
     ForexTraderProposal,
     OrderType,
     SetupType,
+    sanitize_secrets,
 )
 
 logger = logging.getLogger(__name__)
@@ -156,11 +157,35 @@ class ProposalRecord(BaseModel):
     snapshot_id: str | None = None
     version_id: str | None = None
     proposal_payload: dict[str, Any] | None = None
+    # Phase 23: Model / Prompt / Strategy Versioning
+    provider: str | None = None
+    quick_model: str | None = None
+    deep_model: str | None = None
+    temperature: float | None = None
+    reasoning_effort: str | None = None
+    max_tokens: int | None = None
+    analysts: list[str] = Field(default_factory=list)
+    prompt_version: str | None = None
+    prompt_hash: str | None = None
+    strategy_version: str = "1.0.0"
+    system_version: str = "1.0.0"
+    data_source_metadata: dict[str, Any] = Field(default_factory=dict)
 
     def to_forex_trader_proposal(self) -> ForexTraderProposal:
         """Construct domain ForexTraderProposal from database record."""
         if self.proposal_payload is not None:
-            return ForexTraderProposal.model_validate(self.proposal_payload)
+            p = ForexTraderProposal.model_validate(self.proposal_payload)
+            updates: dict[str, Any] = {}
+            for f in (
+                "provider", "quick_model", "deep_model", "temperature",
+                "reasoning_effort", "max_tokens", "analysts", "prompt_version",
+                "prompt_hash", "strategy_version", "system_version", "data_source_metadata"
+            ):
+                if getattr(p, f, None) is None and getattr(self, f, None) is not None:
+                    updates[f] = getattr(self, f)
+            if updates:
+                p = p.model_copy(update=updates)
+            return p
         return ForexTraderProposal(
             pair=self.pair,
             action=self.action,
@@ -180,6 +205,18 @@ class ProposalRecord(BaseModel):
             confidence=self.confidence,
             reasoning=self.reasoning,
             trade_rationale_summary=self.trade_rationale_summary,
+            provider=self.provider,
+            quick_model=self.quick_model,
+            deep_model=self.deep_model,
+            temperature=self.temperature,
+            reasoning_effort=self.reasoning_effort,
+            max_tokens=self.max_tokens,
+            analysts=list(self.analysts),
+            prompt_version=self.prompt_version,
+            prompt_hash=self.prompt_hash,
+            strategy_version=self.strategy_version,
+            system_version=self.system_version,
+            data_source_metadata=dict(self.data_source_metadata),
         )
 
     @property
@@ -206,9 +243,30 @@ class ProposalRecord(BaseModel):
         elif isinstance(risk_decision, dict):
             rd_dict = risk_decision
 
-        meta = dict(metadata or {})
+        meta = sanitize_secrets(dict(metadata or {}))
+        clean_ds = sanitize_secrets(getattr(proposal, "data_source_metadata", {}) or {})
         if getattr(proposal, "valid_until", None) and "valid_until_utc" not in meta:
             meta["valid_until_utc"] = str(proposal.valid_until)
+
+        # Store versioning in metadata for forward compatibility
+        ver_meta = {
+            "provider": getattr(proposal, "provider", None),
+            "quick_model": getattr(proposal, "quick_model", None),
+            "deep_model": getattr(proposal, "deep_model", None),
+            "temperature": getattr(proposal, "temperature", None),
+            "reasoning_effort": getattr(proposal, "reasoning_effort", None),
+            "max_tokens": getattr(proposal, "max_tokens", None),
+            "analysts": list(getattr(proposal, "analysts", []) or []),
+            "prompt_version": getattr(proposal, "prompt_version", None),
+            "prompt_hash": getattr(proposal, "prompt_hash", None),
+            "strategy_version": getattr(proposal, "strategy_version", "1.0.0") or "1.0.0",
+            "system_version": getattr(proposal, "system_version", "1.0.0") or "1.0.0",
+            "data_source_metadata": clean_ds,
+        }
+        meta.setdefault("version_metadata", ver_meta)
+        for vk, vv in ver_meta.items():
+            if vv is not None and vk not in meta:
+                meta[vk] = vv
 
         return cls(
             proposal_id=pid,
@@ -237,6 +295,18 @@ class ProposalRecord(BaseModel):
             status=status,
             risk_decision=rd_dict,
             metadata=meta,
+            provider=getattr(proposal, "provider", None),
+            quick_model=getattr(proposal, "quick_model", None),
+            deep_model=getattr(proposal, "deep_model", None),
+            temperature=getattr(proposal, "temperature", None),
+            reasoning_effort=getattr(proposal, "reasoning_effort", None),
+            max_tokens=getattr(proposal, "max_tokens", None),
+            analysts=list(getattr(proposal, "analysts", []) or []),
+            prompt_version=getattr(proposal, "prompt_version", None),
+            prompt_hash=getattr(proposal, "prompt_hash", None),
+            strategy_version=getattr(proposal, "strategy_version", "1.0.0") or "1.0.0",
+            system_version=getattr(proposal, "system_version", "1.0.0") or "1.0.0",
+            data_source_metadata=clean_ds,
         )
 
 
