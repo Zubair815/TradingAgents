@@ -16,13 +16,16 @@ import logging
 import threading
 from collections.abc import Callable
 from datetime import datetime, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from tradingagents.agents.schemas_forex import ForexAction
 from tradingagents.database.models import (
     TradeExitReason,
     TradeStatus,
 )
+
+if TYPE_CHECKING:
+    from tradingagents.journal.post_close import ClosedTradeProcessor
 from tradingagents.journal.manager import ForexJournalManager
 from tradingagents.journal.models import EventType
 from tradingagents.mt5.errors import MT5Error
@@ -42,6 +45,7 @@ class MT5ObservationService:
         poll_interval_seconds: float = 5.0,
         auto_reconcile: bool = True,
         on_event_callback: Callable[[str, dict[str, Any]], None] | None = None,
+        post_close_processor: ClosedTradeProcessor | None = None,
     ) -> None:
         self.observer = observer
         self.journal_mgr = journal_mgr
@@ -49,6 +53,18 @@ class MT5ObservationService:
         self.poll_interval = max(0.1, float(poll_interval_seconds))
         self.auto_reconcile = auto_reconcile
         self.on_event_callback = on_event_callback
+
+        if post_close_processor is not None:
+            self.post_close_processor = post_close_processor
+        else:
+            from tradingagents.journal.post_close import ClosedTradeProcessor
+            from tradingagents.learning.history_provider import MT5TradeHistoryProvider
+
+            hist_prov = MT5TradeHistoryProvider(observer=self.observer)
+            self.post_close_processor = ClosedTradeProcessor(
+                journal=self.journal,
+                history_provider=hist_prov,
+            )
 
         self._lock = threading.RLock()
         self._stop_event = threading.Event()
@@ -197,6 +213,9 @@ class MT5ObservationService:
                             "volume": pos.volume,
                             "open_price": pos.price_open,
                         })
+                elif ticket not in self._known_positions and ticket in self._trade_position_map:
+                    # Pre-mapped position from database reconstruction
+                    self._known_positions[ticket] = pos
                 elif ticket in self._known_positions:
                     # Existing position: check for SL, TP, or Volume changes
                     prev_pos = self._known_positions[ticket]
@@ -312,6 +331,12 @@ class MT5ObservationService:
                         swap=exit_swap,
                         actor="MT5Observer",
                     )
+                    # Automatically trigger closed-trade pipeline (Phase 13)
+                    if self.post_close_processor is not None:
+                        try:
+                            self.post_close_processor.process_closed_trade(trade_id=trade_id)
+                        except Exception as proc_err:
+                            logger.error("Error in automated post-close pipeline for trade %s: %s", trade_id, proc_err)
 
                 events_detected.append({
                     "type": "POSITION_CLOSED",

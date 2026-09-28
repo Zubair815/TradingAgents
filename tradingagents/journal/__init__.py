@@ -30,6 +30,11 @@ from tradingagents.journal.models import (
     SetupMetrics,
     TradeEvent,
 )
+from tradingagents.journal.post_close import (
+    ClosedTradeProcessor,
+    PostCloseProcessingStatus,
+    PostCloseResult,
+)
 from tradingagents.journal.timeline import EventTimeline
 
 __all__ = [
@@ -50,6 +55,10 @@ __all__ = [
     "MatchConfidence",
     "MatchResult",
     "ReconciliationStatus",
+    # Closed Trade Pipeline (Phase 13)
+    "ClosedTradeProcessor",
+    "PostCloseProcessingStatus",
+    "PostCloseResult",
     # Analytics
     "PostTradeAnalytics",
     "PerformanceReport",

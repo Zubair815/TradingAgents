@@ -620,6 +620,39 @@ class ForexTradeJournal:
                 if should_close:
                     conn.close()
 
+    def update_trade_metadata(
+        self,
+        trade_id: str,
+        metadata: dict[str, Any],
+    ) -> bool:
+        """Update or merge metadata JSON on an existing trade record."""
+        with self._lock:
+            conn = self._get_connection()
+            should_close = conn != self._mem_conn
+            try:
+                with conn:
+                    cursor = conn.execute(
+                        "SELECT metadata_json FROM trades WHERE trade_id = ?;",
+                        (trade_id,),
+                    )
+                    row = cursor.fetchone()
+                    if not row:
+                        return False
+                    existing = (
+                        json.loads(row[0])
+                        if (row[0] and isinstance(row[0], str))
+                        else {}
+                    )
+                    existing.update(metadata)
+                    conn.execute(
+                        "UPDATE trades SET metadata_json = ? WHERE trade_id = ?;",
+                        (json.dumps(existing), trade_id),
+                    )
+                return True
+            finally:
+                if should_close:
+                    conn.close()
+
     # -----------------------------------------------------------------------
     # Order Execution Fills
     # -----------------------------------------------------------------------
