@@ -40,8 +40,7 @@ def test_dashboard_browser_smoke():
             server.should_exit = True
             thread.join(timeout=10)
 
-    with live_server():
-        with sync_playwright() as p:
+    with live_server(), sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
             try:
                 page = browser.new_page()

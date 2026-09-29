@@ -3,16 +3,16 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from unittest.mock import MagicMock
 
+import pytest
 from fastapi.testclient import TestClient
 
-from web.server import app
-import pytest
 from tradingagents.database.journal import ForexTradeJournal
 from tradingagents.journal.manager import ForexJournalManager
-from unittest.mock import MagicMock
 from tradingagents.mt5.observer import MT5Observer
 from web.forex_routes import reset_forex_state, set_forex_dependencies
+from web.server import app
 
 
 @pytest.fixture()

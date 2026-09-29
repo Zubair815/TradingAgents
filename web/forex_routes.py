@@ -60,16 +60,16 @@ from tradingagents.backtest.forex_engine import (
     ForexBacktestEngine,
 )
 from tradingagents.backtest.walk_forward import ForexWalkForwardValidator
-from tradingagents.dataflows.config import (
-    get_config as get_runtime_config,
-    reset_runtime_settings,
-    save_runtime_settings,
-)
 from tradingagents.database.journal import ForexTradeJournal
 from tradingagents.database.models import (
     ProposalStatus,
     TradeExitReason,
     TradeStatus,
+)
+from tradingagents.dataflows.config import (
+    get_config as get_runtime_config,
+    reset_runtime_settings,
+    save_runtime_settings,
 )
 from tradingagents.dataflows.forex_data import ForexBar
 from tradingagents.dataflows.forex_quality import DataInsufficientError
@@ -2122,7 +2122,7 @@ async def run_walk_forward(
                 ))
             provenance = {"source": "user_supplied"}
         else:
-            from tradingagents.backtest.historical_data import load_historical_candles, HistoricalDataUnavailable
+            from tradingagents.backtest.historical_data import load_historical_candles
             candle_objs, provenance = load_historical_candles(norm_pair, req.timeframe, req.date_from, req.date_to)
 
         validator = ForexWalkForwardValidator(
