@@ -44,6 +44,7 @@ MESSAGES = {
     "FOREX_BACKTEST_DEMO_ONLY": "Demo mode must be explicitly enabled.",
     "INVALID_BACKTEST_MODE": "The backtest mode is invalid.",
     "HISTORICAL_ANALYSIS_FAILED": "Historical analysis could not be completed.",
+    "WALK_FORWARD_FAILED": "Walk-forward validation could not be completed.",
 }
 
 

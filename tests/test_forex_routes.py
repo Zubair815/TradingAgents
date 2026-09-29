@@ -12,6 +12,7 @@ Validates:
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
@@ -27,6 +28,7 @@ from tradingagents.agents.schemas_forex import (
     SetupType,
 )
 from tradingagents.database.journal import ForexTradeJournal
+from tradingagents.dataflows import config as config_module
 from tradingagents.journal.manager import ForexJournalManager
 from tradingagents.mt5.errors import MT5DataError
 from tradingagents.mt5.models import (
@@ -82,6 +84,104 @@ def client():
     c = TestClient(app)
     c.get("/")
     return c
+
+
+@pytest.fixture
+def isolated_runtime_settings(monkeypatch, tmp_path):
+    settings_path = tmp_path / "runtime_settings.json"
+    monkeypatch.setattr(config_module, "_RUNTIME_CONFIG_PATH", settings_path)
+    config_module.reset_runtime_settings()
+    yield settings_path
+    config_module.reset_runtime_settings()
+
+
+class TestRuntimeSettingsRoutes:
+    def test_settings_persist_reset_and_never_return_secrets(
+        self, client, isolated_runtime_settings, monkeypatch
+    ):
+        monkeypatch.setenv("OPENAI_API_KEY", "SENTINEL_SECRET")
+        response = client.patch("/api/forex/settings", json={
+            "forex_default_pair": "gbp/usd",
+            "forex_default_risk_percent": 1.4,
+            "forex_min_rr": 2.1,
+        })
+        assert response.status_code == 200
+        assert response.json()["settings"]["forex_default_pair"] == "GBPUSD"
+        assert "SENTINEL_SECRET" not in response.text
+        assert json.loads(isolated_runtime_settings.read_text())["forex_min_rr"] == 2.1
+
+        fetched = client.get("/api/forex/settings")
+        assert fetched.status_code == 200
+        assert fetched.json()["execution_policy"] == "manual_only"
+        assert fetched.json()["secret_status"]["llm_provider_secrets"] == "Configured"
+        assert "SENTINEL_SECRET" not in fetched.text
+
+        reset = client.post("/api/forex/settings/reset")
+        assert reset.status_code == 200
+        assert reset.json()["settings"]["forex_default_pair"] == "EURUSD"
+        assert not isolated_runtime_settings.exists()
+
+    @pytest.mark.parametrize("payload", [
+        {"auto_order": True},
+        {"mt5_password": "secret"},
+        {"api_key": "secret"},
+        {"forex_default_risk_percent": 0},
+    ])
+    def test_settings_reject_unknown_secret_and_invalid_fields(
+        self, client, isolated_runtime_settings, payload
+    ):
+        response = client.patch("/api/forex/settings", json=payload)
+        assert response.status_code == 400
+        assert not isolated_runtime_settings.exists()
+
+    def test_partial_invalid_settings_update_preserves_previous_file(
+        self, client, isolated_runtime_settings
+    ):
+        assert client.patch("/api/forex/settings", json={
+            "forex_default_risk_percent": 1.3,
+        }).status_code == 200
+        before = isolated_runtime_settings.read_text(encoding="utf-8")
+        response = client.patch("/api/forex/settings", json={
+            "forex_default_risk_percent": 2.0,
+            "mt5_poll_interval_seconds": 0.01,
+        })
+        assert response.status_code == 400
+        assert isolated_runtime_settings.read_text(encoding="utf-8") == before
+
+    def test_poll_interval_change_reports_restart_for_existing_runtime(
+        self, client, isolated_runtime_settings
+    ):
+        with patch("web.forex_routes._forex_runtime", object()):
+            response = client.patch("/api/forex/settings", json={
+                "mt5_poll_interval_seconds": 2.5,
+            })
+        assert response.status_code == 200
+        assert response.json()["restart_required"] is True
+
+    def test_analysis_uses_settings_only_when_request_values_are_omitted(
+        self, isolated_runtime_settings
+    ):
+        config_module.save_runtime_settings({
+            "forex_default_pair": "GBPUSD",
+            "forex_default_execution_timeframe": "M15",
+            "forex_default_context_timeframes": ["H1", "H4"],
+            "forex_default_risk_percent": 1.7,
+            "forex_min_rr": 2.2,
+            "forex_max_spread_pips": 2.4,
+        })
+        defaults = ForexAnalysisRequest()
+        explicit = ForexAnalysisRequest(pair="EURUSD", timeframe="H1", risk_percent=0.8, min_rr=1.8)
+
+        assert defaults.pair == "GBPUSD"
+        assert defaults.execution_timeframe == "M15"
+        assert defaults.context_timeframes == ("H1", "H4")
+        assert defaults.risk_percent == 1.7
+        assert defaults.min_rr == 2.2
+        assert defaults.max_spread_pips == 2.4
+        assert explicit.pair == "EURUSD"
+        assert explicit.execution_timeframe == "H1"
+        assert explicit.risk_percent == 0.8
+        assert explicit.min_rr == 1.8
 
 
 # ---------------------------------------------------------------------------
@@ -1414,9 +1514,13 @@ class TestForexBacktestRoutes:
         list_res = client.get("/api/forex/backtest/runs")
         assert list_res.status_code == 200
         assert list_res.json()["count"] >= 1
-        listed = next(run for run in list_res.json()["backtests"] if run["backtest_id"] == bt_id)
-        for key in ("demo_mode", "data_source", "strategy", "validated_strategy_performance", "notice"):
-            assert listed[key] == data[key]
+        assert "backtests" not in list_res.json()
+        listed = next(run for run in list_res.json()["runs"] if run["backtest_id"] == bt_id)
+        assert listed["mode"] == "DEMO"
+        assert listed["data_source"] == data["data_source"]
+        assert listed["validated_strategy_performance"] is False
+        assert listed["notice"] == data["notice"]
+        assert listed["total_trades"] == result["total_trades"]
 
     def test_run_backtest_with_custom_candles(self, client, isolated_forex_env):
         # 20 custom candles

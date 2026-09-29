@@ -12,6 +12,7 @@
   let currentAssetMode = 'forex'; // 'forex' or 'equities'
   let activePipelineType = 'forex';
   let inMemoryApiKey = '';
+  let settingsData = null;
 
   let sessionKey = '';
   let sessionReady = null;
@@ -97,11 +98,11 @@
     btnRefreshJournal: $('#btnRefreshJournal'),
     lessonsContainer: $('#lessonsContainer'),
     lessonsPairFilter: $('#lessonsPairFilter'),
-    statWinRate:    $('#statWinRate'),
-    statProfitFactor: $('#statProfitFactor'),
-    statTotalR:     $('#statTotalR'),
-    statMaxDD:      $('#statMaxDD'),
-    statTotalTrades: $('#statTotalTrades'),
+    lessonsSetupFilter: $('#lessonsSetupFilter'),
+    lessonsDirectionFilter: $('#lessonsDirectionFilter'),
+    lessonsTimeframeFilter: $('#lessonsTimeframeFilter'),
+    lessonsEvidenceFilter: $('#lessonsEvidenceFilter'),
+    lessonsStatusFilter: $('#lessonsStatusFilter'),
     // Dashboard Overview DOM
     dashBalance:    $('#dashBalance'),
     dashEquity:     $('#dashEquity'),
@@ -163,13 +164,26 @@
     // Performance View DOM
     btnRefreshAnalytics: $('#btnRefreshAnalytics'),
     btnRunCalibration: $('#btnRunCalibration'),
-    calibrationContainer: $('#calibrationContainer'),
+    performanceOverallContainer: $('#performanceOverallContainer'),
+    performanceExecutionContainer: $('#performanceExecutionContainer'),
+    performanceChartsContainer: $('#performanceChartsContainer'),
+    confidenceCalibrationContainer: $('#confidenceCalibrationContainer'),
+    performanceSegmentSelect: $('#performanceSegmentSelect'),
+    sampleSizeWarning: $('#sampleSizeWarning'),
     perfBreakdownContainer: $('#perfBreakdownContainer'),
     // Backtesting View DOM
     btnModeBacktestReal: $('#btnModeBacktestReal'),
     btnModeBacktestDemo: $('#btnModeBacktestDemo'),
     backtestModeBanner:  $('#backtestModeBanner'),
     backtestForm:        $('#backtestForm'),
+    btPair:              $('#btPair'),
+    btStartDate:         $('#btStartDate'),
+    btEndDate:           $('#btEndDate'),
+    btTimeframe:         $('#btTimeframe'),
+    btCapital:           $('#btCapital'),
+    btMaxPoints:         $('#btMaxPoints'),
+    btSpread:            $('#btSpread'),
+    backtestEstimate:    $('#backtestEstimate'),
     btnLaunchBacktest:   $('#btnLaunchBacktest'),
     btnRefreshBacktests: $('#btnRefreshBacktests'),
     btnRunWalkForward: $('#btnRunWalkForward'),
@@ -270,14 +284,13 @@
         } else if (tab.dataset.view === 'journal') {
           loadJournalTrades();
         } else if (tab.dataset.view === 'performance') {
-          loadAnalyticsSummary();
-          loadPerformanceBreakdown();
+          loadPerformanceInterface();
         } else if (tab.dataset.view === 'backtest') {
           loadBacktestRuns();
         } else if (tab.dataset.view === 'learning') {
-          loadLessons(DOM.lessonsPairFilter ? DOM.lessonsPairFilter.value : '');
+          loadLessons();
         } else if (tab.dataset.view === 'settings') {
-          populateSettingsView();
+          loadRuntimeSettings();
         }
       });
     });
@@ -315,6 +328,10 @@
     DOM.reportOverlay.addEventListener('click', (e) => {
       if (e.target === DOM.reportOverlay) closeReportModal();
     });
+    DOM.reportContent.addEventListener('click', event => {
+      const button = event.target.closest('[data-applied-lesson-id]');
+      if (button) openAppliedLesson(button.dataset.appliedLessonId);
+    });
 
     const tradeDetail = JournalUI.createController({ request: apiFetch, document });
     DOM.journalTableContainer.addEventListener('click', event => {
@@ -325,8 +342,17 @@
     // Allow opening a trade detail from lesson cards (delegated)
     if (DOM.lessonsContainer) {
       DOM.lessonsContainer.addEventListener('click', event => {
-        const btn = event.target.closest('[data-trade-id]');
-        if (btn) tradeDetail.loadTradeDetail(btn.dataset.tradeId, btn);
+        const tradeButton = event.target.closest('[data-trade-id]');
+        if (tradeButton && tradeButton.dataset.tradeId) {
+          const journalTab = document.querySelector('.tab[data-view="journal"]');
+          if (journalTab) journalTab.click();
+          tradeDetail.loadTradeDetail(tradeButton.dataset.tradeId, tradeButton);
+          return;
+        }
+        const proposalButton = event.target.closest('[data-proposal-id]');
+        if (proposalButton && proposalButton.dataset.proposalId) {
+          showProposalDetailModal(proposalButton.dataset.proposalId);
+        }
       });
     }
 
@@ -433,31 +459,19 @@
 
     if (DOM.btnRefreshAnalytics) {
       DOM.btnRefreshAnalytics.addEventListener('click', () => {
-        loadAnalyticsSummary();
-        loadPerformanceBreakdown();
+        loadPerformanceInterface();
         showToast('Analytics refreshed', 'info');
       });
     }
 
+    if (DOM.performanceSegmentSelect) {
+      DOM.performanceSegmentSelect.addEventListener('change', () => renderPerformanceSegmentation());
+    }
+
     if (DOM.btnRunCalibration) {
-      DOM.btnRunCalibration.addEventListener('click', async () => {
-        try {
-          const res = await apiFetch('/api/forex/analytics/calibration');
-          if (!res.ok) {
-            showToast('Calibration failed', 'error');
-            return;
-          }
-          const data = await res.json();
-          const c = data.calibration || {};
-          const markdown = c.summary_markdown || '';
-          const container = DOM.calibrationContainer || document.getElementById('calibrationContainer');
-          if (container) {
-            container.innerHTML = markdown ? `<div class="card" style="padding:10px"><div style="white-space:pre-wrap; font-family:monospace; font-size:0.85rem;">${escapeText(markdown)}</div></div>` : '<div class="info-banner">No calibration data returned.</div>';
-          }
-          showToast('Calibration complete', 'info');
-        } catch (e) {
-          showToast('Calibration error', 'error');
-        }
+      DOM.btnRunCalibration.addEventListener('click', () => {
+        loadPerformanceInterface();
+        showToast('Confidence calibration refreshed', 'info');
       });
     }
 
@@ -506,14 +520,7 @@
             throw new Error(apiErrorMessage(err, 'Ablation failed'));
           }
           const data = await res.json();
-          // Render simple summary
-          const container = DOM.backtestRunsContainer;
-          container.innerHTML = `
-            <div class="card">
-              <div class="card-header"><h3 class="card-title">Ablation Study: ${escapeText(pair)}</h3></div>
-              <div style="padding:12px"><pre style="white-space:pre-wrap; font-family:monospace; font-size:0.85rem;">${escapeText(JSON.stringify(data.ablation_study, null, 2))}</pre></div>
-            </div>
-          `;
+          renderAblationStudy(data.ablation_study || {});
           showToast('Ablation study complete', 'success');
         } catch (e) {
           showToast(e.message || 'Ablation failed', 'error');
@@ -542,7 +549,7 @@
 
     if (DOM.btnRefreshLessons) {
       DOM.btnRefreshLessons.addEventListener('click', () => {
-        loadLessons(DOM.lessonsPairFilter ? DOM.lessonsPairFilter.value : '');
+        loadLessons();
         showToast('Lessons refreshed', 'info');
       });
     }
@@ -566,11 +573,9 @@
       });
     }
 
-    if (DOM.lessonsPairFilter) {
-      DOM.lessonsPairFilter.addEventListener('change', () => {
-        loadLessons(DOM.lessonsPairFilter.value);
-      });
-    }
+    [DOM.lessonsPairFilter, DOM.lessonsSetupFilter, DOM.lessonsDirectionFilter,
+      DOM.lessonsTimeframeFilter, DOM.lessonsEvidenceFilter, DOM.lessonsStatusFilter]
+      .filter(Boolean).forEach(control => control.addEventListener('change', loadLessons));
 
     if (DOM.apiKey) {
       DOM.apiKey.addEventListener('input', () => {
@@ -606,6 +611,7 @@
     try {
       const res = await apiFetch('/api/config');
       configData = await res.json();
+      await loadRuntimeSettings({ quiet: true });
       populateProviders();
       populateSettingsView();
       // Purge legacy secrets even when API-key mode is no longer enabled.
@@ -622,6 +628,27 @@
       DOM.serverDot.style.background = 'var(--red)';
       DOM.serverStatus.textContent = 'Disconnected';
       showToast('Failed to connect to server', 'error');
+    }
+  }
+
+  async function loadRuntimeSettings({ quiet = false } = {}) {
+    try {
+      const res = await apiFetch('/api/forex/settings');
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(apiErrorMessage(data, 'Settings load failed'));
+      settingsData = data;
+      if (configData) {
+        configData.runtime_settings = data.settings || {};
+        configData.secret_status = data.secret_status || configData.secret_status;
+      }
+      populateSettingsView();
+      return data;
+    } catch (error) {
+      if (!quiet && DOM.settingsStatus) {
+        DOM.settingsStatus.textContent = error.message || 'Settings load failed';
+        DOM.settingsStatus.className = 'settings-status error';
+      }
+      return null;
     }
   }
 
@@ -912,13 +939,28 @@
     }
   }
 
-  async function loadLessons(pairFilter = '') {
+  let lessonListGeneration = 0;
+  function evidenceClass(count) {
+    const n = Number(count || 0);
+    return n <= 1 ? 'ANECDOTAL' : n === 2 ? 'EARLY' : n <= 5 ? 'MODERATE' : 'STRONG';
+  }
+
+  async function loadLessons() {
+    const current = ++lessonListGeneration;
+    DOM.lessonsContainer.innerHTML = '<p class="journal-state" role="status">Loading lessons…</p>';
     try {
-      let url = '/api/forex/learning/lessons';
-      if (pairFilter) url += `?pair=${encodeURIComponent(pairFilter)}`;
+      const params = new URLSearchParams();
+      if (DOM.lessonsPairFilter?.value) params.set('pair', DOM.lessonsPairFilter.value);
+      if (DOM.lessonsSetupFilter?.value.trim()) params.set('setup_type', DOM.lessonsSetupFilter.value.trim());
+      if (DOM.lessonsDirectionFilter?.value) params.set('direction', DOM.lessonsDirectionFilter.value);
+      if (DOM.lessonsTimeframeFilter?.value.trim()) params.set('timeframe', DOM.lessonsTimeframeFilter.value.trim());
+      if (DOM.lessonsEvidenceFilter?.value) params.set('min_evidence_count', DOM.lessonsEvidenceFilter.value);
+      if (DOM.lessonsStatusFilter?.value) params.set('active', DOM.lessonsStatusFilter.value);
+      const url = `/api/forex/learning/lessons${params.size ? `?${params}` : ''}`;
       const res = await apiFetch(url);
-      if (!res.ok) return;
       const data = await res.json();
+      if (current !== lessonListGeneration) return;
+      if (!res.ok) throw new Error(apiErrorMessage(data, 'Lessons could not be loaded.'));
       const lessons = data.lessons || [];
 
       if (lessons.length === 0) {
@@ -940,46 +982,52 @@
                 <span class="lesson-pair">${escapeText(l.pair || 'GLOBAL')}</span>
                 <span class="lesson-tag">${escapeText(l.outcome_category || 'GENERAL')}</span>
               </div>
-              <div class="lesson-rule">${escapeText(l.rule_violated || l.observation || 'Operational Rule')}</div>
+              <div class="lesson-rule">${escapeText(l.actionable_rule || 'No actionable rule stored.')}</div>
               <div class="lesson-action">
-                <strong>Directive:</strong> ${escapeText(l.actionable_rule || l.observation || 'Follow established parameters.')}
+                <strong>Observation:</strong> ${escapeText(l.observation || 'Unavailable')}
               </div>
-              <div style="font-size:0.75rem; color:var(--text-muted); display:flex; justify-content:space-between;">
-                <span>Setup: ${escapeText(l.setup_type || 'ALL')}</span>
-                <span>Confidence: ${(Number(l.confidence_score || l.confidence || 0.9) * 100).toFixed(0)}%</span>
+              <div style="font-size:0.75rem; color:var(--text-muted); display:flex; gap:12px; flex-wrap:wrap;">
+                <span>Setup: ${escapeText(l.setup || 'Unavailable')}</span>
+                <span>Timeframe: ${escapeText(l.timeframe || 'Unavailable')}</span>
+                <span>Direction: ${escapeText(l.direction || 'Unavailable')}</span>
+                <span>Evidence: ${escapeText(l.evidence_count ?? 0)} (${evidenceClass(l.evidence_count)})</span>
+                <span>Evidence weight: ${l.confidence == null ? 'Unavailable' : `${(Number(l.confidence) * 100).toFixed(0)}%`}</span>
+                <span>Status: ${l.active === false ? 'RETIRED' : 'ACTIVE'}</span>
               </div>
+              <details style="margin-top:8px;"><summary>Lesson details</summary>
+                <p><strong>Root cause:</strong> ${escapeText(l.root_cause || 'Unavailable')}</p>
+                <p><strong>Type / outcome:</strong> ${escapeText(l.lesson_type || 'Unavailable')} / ${escapeText(l.outcome_category || 'Unavailable')}</p>
+                <p><strong>Session / regime:</strong> ${escapeText(l.session || 'Unavailable')} / ${escapeText(l.market_regime || 'Unavailable')}</p>
+                <p><strong>Strategy version:</strong> ${escapeText(l.strategy_version || 'Unavailable')}</p>
+                <p><strong>Created / validated:</strong> ${escapeText(l.created_at || 'Unavailable')} / ${escapeText(l.last_validated_at || 'Unavailable')}</p>
+                <p><strong>Tags:</strong> ${escapeText((l.tags || []).join(', ') || 'None')}</p>
+              </details>
               <div style="margin-top:8px; display:flex; gap:8px;">
-                <button class="btn-secondary btn-sm" data-trade-id="${escapeText(l.source_trade_id || l.trade_id || '')}">View Source Trade</button>
+                ${l.source_trade_id ? `<button class="btn-secondary btn-sm" data-trade-id="${escapeText(l.source_trade_id)}">View Source Trade</button>` : '<span class="stat-sub">Source trade unavailable: no stored ID.</span>'}
+                ${l.proposal_id ? `<button class="btn-secondary btn-sm" data-proposal-id="${escapeText(l.proposal_id)}">View Source Proposal</button>` : '<span class="stat-sub">Source proposal unavailable: no stored ID.</span>'}
               </div>
             </div>
           `).join('')}
         </div>`;
-    } catch (_) {}
+    } catch (error) {
+      if (current === lessonListGeneration) DOM.lessonsContainer.innerHTML =
+        `<p class="journal-state" role="alert">${escapeText(error.message || 'Network error loading lessons.')} Use Refresh to retry.</p>`;
+    }
   }
 
-  async function loadAnalyticsSummary() {
+  async function openAppliedLesson(lessonId) {
+    DOM.reportModalTitle.textContent = 'Applied Lesson Trace';
+    DOM.reportModalBody.innerHTML = '<p class="journal-state" role="status">Loading stored lesson…</p>';
+    DOM.reportOverlay.classList.add('active');
     try {
-      const res = await apiFetch('/api/forex/analytics/dashboard');
-      if (!res.ok) return;
-      const data = await res.json();
-      const m = data.metrics || {};
-
-      if (m.win_rate != null) {
-        DOM.statWinRate.textContent = `${(Number(m.win_rate) * 100).toFixed(1)}%`;
-      }
-      if (m.total_trades != null) {
-        DOM.statTotalTrades.textContent = `${m.total_trades} closed trades`;
-      }
-      if (m.profit_factor != null) {
-        DOM.statProfitFactor.textContent = Number(m.profit_factor).toFixed(2);
-      }
-      if (m.total_r_multiple != null) {
-        DOM.statTotalR.textContent = `${Number(m.total_r_multiple).toFixed(1)}R`;
-      }
-      if (m.max_drawdown_pct != null) {
-        DOM.statMaxDD.textContent = `${Number(m.max_drawdown_pct).toFixed(1)}%`;
-      }
-    } catch (_) {}
+      const response = await apiFetch(`/api/forex/learning/lessons/${encodeURIComponent(lessonId)}`);
+      const data = await response.json();
+      if (!response.ok) throw new Error(apiErrorMessage(data, 'Stored lesson could not be loaded.'));
+      const lesson = data.lesson || {}, sources = data.sources || {};
+      DOM.reportModalBody.innerHTML = `<div class="lesson-card"><div class="lesson-header"><span class="lesson-pair">${escapeText(lesson.pair || 'GLOBAL')}</span><span class="lesson-tag">${escapeText(lesson.lesson_type || 'LESSON')}</span></div><h3>${escapeText(lesson.actionable_rule || 'No actionable rule stored.')}</h3><p><strong>Observation:</strong> ${escapeText(lesson.observation || 'Unavailable')}</p><p><strong>Root cause:</strong> ${escapeText(lesson.root_cause || 'Unavailable')}</p><p><strong>Evidence:</strong> ${escapeText(lesson.evidence_count ?? 0)} (${evidenceClass(lesson.evidence_count)})</p><p><strong>Source trade:</strong> ${escapeText(sources.trade?.id || 'Unavailable')} — ${sources.trade?.available ? 'available' : 'missing'}</p><p><strong>Source proposal:</strong> ${escapeText(sources.proposal?.id || 'Unavailable')} — ${sources.proposal?.available ? 'available' : 'missing'}</p></div>`;
+    } catch (error) {
+      DOM.reportModalBody.innerHTML = `<p class="journal-state" role="alert">${escapeText(error.message || 'Lesson detail unavailable.')}</p>`;
+    }
   }
 
   // ---- Subsystem Loaders for Reorganized Dashboard (Phase 25) ----
@@ -2081,64 +2129,89 @@
     `;
   }
 
-  // ---- Performance Breakdown View ----
-  async function loadPerformanceBreakdown() {
-    if (!DOM.perfBreakdownContainer) return;
+  // ---- Performance Analytics View ----
+  let performanceRequestGeneration = 0;
+  let performanceData = null;
+  function availableNumber(value, suffix = '', digits = 2) {
+    return value == null || !Number.isFinite(Number(value)) ? 'Unavailable' : `${Number(value).toFixed(digits)}${suffix}`;
+  }
+  function money(value) {
+    return value == null || !Number.isFinite(Number(value)) ? 'Unavailable' : `${Number(value) < 0 ? '-' : ''}$${Math.abs(Number(value)).toFixed(2)}`;
+  }
+  function metricGrid(entries) {
+    return `<div class="stat-cards">${entries.map(([label, value, note = '']) => `<div class="stat-card"><span class="stat-label">${escapeText(label)}</span><span class="stat-value">${escapeText(value)}</span><span class="stat-sub">${escapeText(note)}</span></div>`).join('')}</div>`;
+  }
+  function lineChart(title, points, suffix = '') {
+    const values = (points || []).map(point => Number(point.value)).filter(Number.isFinite);
+    if (!values.length) return `<div class="card"><strong>${escapeText(title)}</strong><p class="stat-sub">Unavailable — no stored source values.</p></div>`;
+    const min = Math.min(...values), max = Math.max(...values), span = max - min || 1;
+    const coords = values.map((value, index) => `${values.length === 1 ? 50 : (index / (values.length - 1)) * 100},${36 - ((value - min) / span) * 32}`).join(' ');
+    return `<div class="card"><strong>${escapeText(title)}</strong><svg viewBox="0 0 100 40" role="img" aria-label="${escapeText(title)}" style="width:100%;height:130px;"><polyline points="${coords}" fill="none" stroke="var(--cyan)" stroke-width="1.5" vector-effect="non-scaling-stroke"/></svg><p class="stat-sub">${values.length} observed points · latest ${escapeText(availableNumber(values.at(-1), suffix))}</p></div>`;
+  }
+  function distributionChart(title, points, suffix = '') {
+    const values = (points || []).map(point => Number(point.value)).filter(Number.isFinite);
+    if (!values.length) return `<div class="card"><strong>${escapeText(title)}</strong><p class="stat-sub">Unavailable — no stored source values.</p></div>`;
+    const maxAbs = Math.max(...values.map(Math.abs), 1);
+    return `<div class="card"><strong>${escapeText(title)}</strong><div style="display:flex;align-items:end;gap:3px;height:110px;">${values.slice(-60).map(value => `<span title="${escapeText(availableNumber(value, suffix))}" style="flex:1;min-width:2px;height:${Math.max(2, Math.abs(value) / maxAbs * 100)}%;background:${value < 0 ? 'var(--red)' : 'var(--green)'};"></span>`).join('')}</div><p class="stat-sub">${values.length} observed values</p></div>`;
+  }
+  function renderPerformanceSegmentation() {
+    if (!performanceData) return;
+    const key = DOM.performanceSegmentSelect?.value || 'by_pair';
+    const segment = performanceData.performance?.segmentation?.[key] || {};
+    const rows = Object.entries(segment);
+    if (!rows.length) {
+      DOM.perfBreakdownContainer.innerHTML = '<div class="empty-state"><div class="empty-state-title">No observations for this segment</div><div class="empty-state-desc">This dimension is unavailable until matching closed trades contain the required metadata.</div></div>';
+      return;
+    }
+    DOM.perfBreakdownContainer.innerHTML = `<table class="data-table"><thead><tr><th>Segment</th><th>Trades</th><th>W / L / BE</th><th>Win Rate</th><th>Avg R</th><th>Expectancy</th><th>Profit Factor</th><th>Net P&amp;L</th><th>Max DD</th></tr></thead><tbody>${rows.map(([name, m]) => `<tr><td>${escapeText(name)}</td><td>${escapeText(m.trade_count ?? 0)}</td><td>${escapeText(`${m.wins ?? 0} / ${m.losses ?? 0} / ${m.breakeven ?? 0}`)}</td><td>${escapeText(availableNumber(m.win_rate_pct, '%', 1))}</td><td>${escapeText(availableNumber(m.average_r, 'R'))}</td><td>${escapeText(availableNumber(m.expectancy, 'R'))}</td><td>${escapeText(availableNumber(m.profit_factor))}</td><td>${escapeText(money(m.net_profit))}</td><td>${escapeText(money(m.maximum_drawdown))}</td></tr>`).join('')}</tbody></table>`;
+  }
+  function renderConfidenceCalibration(report) {
+    if (!report || !report.buckets) return '<p class="journal-state">Unavailable — calibration backend returned no report.</p>';
+    const rows = Object.values(report.buckets);
+    if (!rows.some(row => Number(row.trade_count) > 0)) return '<div class="empty-state"><div class="empty-state-title">Not enough calibration observations</div><div class="empty-state-desc">No closed trades currently contain model-confidence evidence.</div></div>';
+    return `<p class="stat-sub">ECE: ${escapeText(availableNumber(report.expected_calibration_error, '', 4))} · Brier score: ${escapeText(availableNumber(report.brier_score, '', 4))}</p><table class="data-table"><thead><tr><th>Raw model confidence band</th><th>N</th><th>Observed win rate</th><th>Calibration gap</th><th>Avg R</th><th>Expectancy</th><th>Status</th></tr></thead><tbody>${rows.map(row => { const midpoint = (Number(row.lower_bound) + Number(row.upper_bound)) / 2; const gap = Number(row.trade_count) ? Math.abs(midpoint - Number(row.win_rate_pct)) : null; return `<tr><td>${escapeText(row.bucket_label)}</td><td>${escapeText(row.trade_count)}</td><td>${escapeText(Number(row.trade_count) ? availableNumber(row.win_rate_pct, '%', 1) : 'Unavailable')}</td><td>${escapeText(gap == null ? 'Unavailable' : availableNumber(gap, ' pp', 1))}</td><td>${escapeText(Number(row.trade_count) ? availableNumber(row.average_r, 'R') : 'Unavailable')}</td><td>${escapeText(Number(row.trade_count) ? availableNumber(row.expectancy, 'R') : 'Unavailable')}</td><td>${escapeText(row.is_calibrated ? 'CALIBRATED' : (row.trade_count ? 'SMALL SAMPLE' : 'EMPTY'))}</td></tr>`; }).join('')}</tbody></table>${(report.warnings || []).map(warning => `<p class="warning-banner">${escapeText(warning)}</p>`).join('')}`;
+  }
+  async function loadPerformanceInterface() {
+    const current = ++performanceRequestGeneration;
+    [DOM.performanceOverallContainer, DOM.performanceExecutionContainer, DOM.performanceChartsContainer, DOM.perfBreakdownContainer, DOM.confidenceCalibrationContainer].filter(Boolean).forEach(container => { container.innerHTML = '<p class="journal-state" role="status">Loading analytics…</p>'; });
     try {
-      const res = await apiFetch('/api/forex/journal/performance');
-      if (!res.ok) return;
-      const data = await res.json();
-      const byPair = data.performance?.by_pair || {};
-      const pairs = Object.keys(byPair);
-      if (pairs.length === 0) {
-        DOM.perfBreakdownContainer.innerHTML = `
-          <div class="empty-state" style="padding: 2.5rem;">
-            <div class="empty-state-icon">📊</div>
-            <div class="empty-state-title">No Performance Breakdown Yet</div>
-            <div class="empty-state-desc">Detailed metrics across pairs, timeframes, and setups will calculate automatically as trades are closed.</div>
-          </div>
-        `;
-        return;
-      }
-
-      DOM.perfBreakdownContainer.innerHTML = `
-        <table class="data-table">
-          <thead>
-            <tr>
-              <th>Currency Pair</th>
-              <th>Trades</th>
-              <th>Win Rate</th>
-              <th>Profit Factor</th>
-              <th>Total R</th>
-              <th>Net P&amp;L</th>
-              <th>Avg R</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${pairs.map(p => {
-              const m = byPair[p] || {};
-              const wr = m.win_rate != null ? `${(Number(m.win_rate) * 100).toFixed(1)}%` : '-';
-              const pf = m.profit_factor != null ? Number(m.profit_factor).toFixed(2) : '-';
-              const r = m.total_r_multiple != null ? `${Number(m.total_r_multiple).toFixed(2)}R` : '-';
-              const pnl = Number(m.net_pnl || m.gross_profit || 0);
-              const pnlColor = pnl >= 0 ? 'var(--green)' : 'var(--red)';
-              const avgR = m.average_r != null ? `${Number(m.average_r).toFixed(2)}R` : '-';
-              return `
-                <tr>
-                  <td style="font-weight:700; color:var(--cyan);">${escapeText(p)}</td>
-                  <td>${escapeText(m.total_trades || 0)}</td>
-                  <td style="color:var(--green); font-weight:600;">${wr}</td>
-                  <td>${pf}</td>
-                  <td style="color:var(--cyan); font-weight:600;">${r}</td>
-                  <td style="font-weight:700; color:${pnlColor};">${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}</td>
-                  <td>${avgR}</td>
-                </tr>
-              `;
-            }).join('')}
-          </tbody>
-        </table>
-      `;
-    } catch (_) {}
+      const [performanceResponse, calibrationResponse] = await Promise.all([
+        apiFetch('/api/forex/analytics/performance'),
+        apiFetch('/api/forex/metrics/confidence-calibration'),
+      ]);
+      const [data, calibration] = await Promise.all([performanceResponse.json(), calibrationResponse.json()]);
+      if (current !== performanceRequestGeneration) return;
+      if (!performanceResponse.ok) throw new Error(apiErrorMessage(data, 'Performance analytics could not be loaded.'));
+      if (!calibrationResponse.ok) throw new Error(apiErrorMessage(calibration, 'Confidence calibration could not be loaded.'));
+      performanceData = data;
+      const m = data.performance?.overall || {};
+      DOM.sampleSizeWarning.style.display = Number(m.trade_count || 0) < 30 ? '' : 'none';
+      DOM.performanceOverallContainer.innerHTML = metricGrid([
+        ['Total trades', String(m.trade_count ?? 0), `${m.wins ?? 0} wins · ${m.losses ?? 0} losses · ${m.breakeven ?? 0} breakeven`],
+        ['Win rate', availableNumber(m.win_rate_pct, '%', 1)], ['Average winner', money(m.average_winner), availableNumber(m.average_winner_r, 'R')],
+        ['Average loser', money(m.average_loser), availableNumber(m.average_loser_r, 'R')], ['Average / median R', `${availableNumber(m.average_r, 'R')} / ${availableNumber(m.median_r, 'R')}`],
+        ['Expectancy', availableNumber(m.expectancy, 'R'), money(m.expectancy_cash)], ['Profit factor', availableNumber(m.profit_factor)],
+        ['Gross profit / loss', `${money(m.gross_profit)} / ${money(m.gross_loss)}`], ['Net P&L', money(m.net_profit)],
+        ['Maximum drawdown', money(m.maximum_drawdown), availableNumber(m.maximum_drawdown_pct, '%')], ['Win / loss streak', `${m.win_streak ?? 0} / ${m.loss_streak ?? 0}`],
+        ['Average holding duration', m.holding_duration_formatted || 'Unavailable'], ['Average MFE', availableNumber(m.average_mfe_r, 'R'), availableNumber(m.average_mfe_pips, ' pips')],
+        ['Average MAE', availableNumber(m.average_mae_r, 'R'), availableNumber(m.average_mae_pips, ' pips')],
+      ]);
+      const e = data.performance?.execution || {}, f = data.execution_friction || {};
+      DOM.performanceExecutionContainer.innerHTML = metricGrid([
+        ['Mean entry deviation', availableNumber(e.entry_deviation_pips, ' pips')], ['Max entry deviation', availableNumber(e.max_entry_deviation_pips, ' pips')],
+        ['SL / TP changes', `${e.sl_changes_count ?? 0} / ${e.tp_changes_count ?? 0}`], ['Manual exits', String(e.manual_exits_count ?? 0), availableNumber(e.manual_exits_pct, '%', 1)],
+        ['Partial closes', String(e.partial_close_count ?? 0), `${availableNumber(e.partial_close_volume, ' lots')} · ${availableNumber(e.partial_close_avg_captured_r, 'R')}`],
+        ['Execution friction', money(f.total_execution_friction_usd), `${f.total_executions_analyzed ?? 0} fills · quality ${availableNumber(f.average_execution_quality_score, '/100', 1)}`],
+      ]);
+      const s = data.series || {};
+      DOM.performanceChartsContainer.innerHTML = `<div class="dashboard-grid">${lineChart('Cumulative R', s.cumulative_r, 'R')}${lineChart('Equity', s.equity, '')}${lineChart('Drawdown', s.drawdown, '')}${distributionChart('R distribution', s.r_distribution, 'R')}${distributionChart('MAE distribution', s.mae_distribution, 'R')}${(s.mfe_vs_realized || []).length ? `<div class="card"><strong>MFE vs realized R</strong><table class="data-table"><thead><tr><th>MFE R</th><th>Realized R</th></tr></thead><tbody>${s.mfe_vs_realized.slice(-30).map(point => `<tr><td>${escapeText(availableNumber(point.mfe_r, 'R'))}</td><td>${escapeText(availableNumber(point.realized_r, 'R'))}</td></tr>`).join('')}</tbody></table></div>` : '<div class="card"><strong>MFE vs realized R</strong><p class="stat-sub">Unavailable — no stored source values.</p></div>'}</div>`;
+      DOM.confidenceCalibrationContainer.innerHTML = renderConfidenceCalibration(calibration.report);
+      renderPerformanceSegmentation();
+    } catch (error) {
+      if (current !== performanceRequestGeneration) return;
+      const message = escapeText(error.message || 'Network error loading analytics.');
+      [DOM.performanceOverallContainer, DOM.performanceExecutionContainer, DOM.performanceChartsContainer, DOM.perfBreakdownContainer, DOM.confidenceCalibrationContainer].filter(Boolean).forEach(container => { container.innerHTML = `<p class="journal-state" role="alert">${message} Use Refresh Analytics to retry.</p>`; });
+    }
   }
 
   // ---- Backtest Runs View ----
@@ -2146,7 +2219,7 @@
     if (!DOM.backtestRunsContainer) return;
     try {
       const res = await apiFetch('/api/forex/backtest/runs');
-      if (!res.ok) return;
+      if (!res.ok) throw new Error('Unable to load backtest runs');
       const data = await res.json();
       const runs = data.runs || [];
       if (runs.length === 0) {
@@ -2164,11 +2237,16 @@
           <thead>
             <tr>
               <th>Backtest ID</th>
+              <th>Run Type</th>
               <th>Mode</th>
               <th>Pair</th>
               <th>Timeframe</th>
+              <th>Data Source</th>
+              <th>Validation</th>
               <th>Trades</th>
               <th>Win Rate</th>
+              <th>Profit Factor</th>
+              <th>Net Result</th>
               <th>Status</th>
               <th>Created</th>
             </tr>
@@ -2177,11 +2255,16 @@
             ${runs.map(r => `
               <tr data-backtest-id="${escapeText(r.backtest_id || '')}" style="cursor:pointer">
                 <td style="font-family:var(--font-mono); font-size:0.75rem; color:var(--text-muted);">${escapeText(r.backtest_id ? r.backtest_id.slice(0, 10) : '-')}</td>
-                <td><span class="lesson-tag" style="font-size:0.65rem;">${escapeText(r.mode || (r.demo_mode ? 'DEMO' : 'HISTORICAL'))}</span></td>
+                <td>${escapeText(r.run_type || 'FOREX_BACKTEST')}</td>
+                <td><span class="lesson-tag" style="font-size:0.65rem; color:${r.mode === 'DEMO' ? 'var(--amber)' : 'var(--cyan)'};">${escapeText(r.mode || 'Unavailable')}</span></td>
                 <td style="font-weight:700; color:var(--cyan);">${escapeText(r.pair)}</td>
                 <td>${escapeText(r.timeframe || '-')}</td>
-                <td>${escapeText(r.total_trades || r.trade_count || r.result?.total_trades || 0)}</td>
-                <td style="color:var(--green); font-weight:600;">${r.win_rate != null ? (Number(r.win_rate) * 100).toFixed(1) + '%' : (r.win_rate_pct != null ? (Number(r.win_rate_pct)).toFixed(1) + '%' : '-')}</td>
+                <td>${escapeText(r.data_source || 'Unavailable')}</td>
+                <td title="${escapeText(r.notice || '')}">${escapeText(r.validation_status || 'Unavailable')}${r.split_count != null ? ` (${escapeText(r.split_count)} splits, OOS)` : ''}</td>
+                <td>${r.total_trades != null ? escapeText(r.total_trades) : 'Unavailable'}</td>
+                <td style="font-weight:600;">${r.win_rate_pct != null ? escapeText(Number(r.win_rate_pct).toFixed(1) + '%') : 'Unavailable'}</td>
+                <td>${r.profit_factor != null ? escapeText(Number(r.profit_factor).toFixed(2)) : 'Unavailable'}</td>
+                <td>${r.net_profit != null ? escapeText('$' + Number(r.net_profit).toFixed(2)) : 'Unavailable'}</td>
                 <td><span class="status-cell ${escapeText(r.status || 'completed')}">${escapeText(r.status || 'completed')}</span></td>
                 <td class="date-cell">${escapeText((r.created_at || '').slice(0, 19).replace('T', ' '))}</td>
               </tr>
@@ -2189,7 +2272,9 @@
           </tbody>
         </table>
       `;
-    } catch (_) {}
+    } catch (error) {
+      DOM.backtestRunsContainer.innerHTML = `<div class="info-banner error">${escapeText(error.message || 'Unable to load backtest runs')}</div>`;
+    }
   }
 
   // ---- Settings View ----
@@ -2235,20 +2320,32 @@
     }
 
     if (DOM.settingBackendUrl) DOM.settingBackendUrl.value = runtimeSettings.backend_url || '';
-    if (DOM.settingApiKeyStatus) DOM.settingApiKeyStatus.textContent = configData.secret_status && configData.secret_status.api_key === 'Configured' ? 'Configured / Hidden' : 'Missing / Not Set';
-    if (DOM.settingApiKeyStatus) DOM.settingApiKeyStatus.style.color = (configData.secret_status && configData.secret_status.api_key === 'Configured') ? 'var(--green)' : 'var(--amber)';
-    if (DOM.settingPair) DOM.settingPair.value = runtimeSettings.forex_broker_symbols && Object.keys(runtimeSettings.forex_broker_symbols).length ? 'EURUSD' : 'EURUSD';
-    if (DOM.settingTimeframe) DOM.settingTimeframe.value = 'H1';
-    if (DOM.settingContextTimeframes) DOM.settingContextTimeframes.value = 'M15, H4, D1';
+    const providerSecretConfigured = configData.secret_status && configData.secret_status.llm_provider_secrets === 'Configured';
+    if (DOM.settingApiKeyStatus) DOM.settingApiKeyStatus.textContent = providerSecretConfigured ? 'Configured / Hidden' : 'Missing / Not Set';
+    if (DOM.settingApiKeyStatus) DOM.settingApiKeyStatus.style.color = providerSecretConfigured ? 'var(--green)' : 'var(--amber)';
+    if (DOM.settingPair) DOM.settingPair.value = runtimeSettings.forex_default_pair || 'EURUSD';
+    if (DOM.settingTimeframe) DOM.settingTimeframe.value = runtimeSettings.forex_default_execution_timeframe || 'H1';
+    if (DOM.settingContextTimeframes) DOM.settingContextTimeframes.value = (runtimeSettings.forex_default_context_timeframes || ['H4', 'D1']).join(', ');
     if (DOM.settingMarketSource) DOM.settingMarketSource.value = runtimeSettings.forex_market_source || 'mt5';
-    if (DOM.settingRiskPercent) DOM.settingRiskPercent.value = runtimeSettings.forex_max_spread_pips ? String(runtimeSettings.forex_max_spread_pips) : '1.0';
-    if (DOM.settingMinRR) DOM.settingMinRR.value = '1.5';
-    if (DOM.settingMaxSpread) DOM.settingMaxSpread.value = runtimeSettings.forex_max_spread_pips ? String(runtimeSettings.forex_max_spread_pips) : '3.0';
-    if (DOM.settingNewsBlackout) DOM.settingNewsBlackout.value = '30';
-    if (DOM.settingPollInterval) DOM.settingPollInterval.value = '2.0';
-    if (DOM.settingBrokerMode) DOM.settingBrokerMode.value = 'passive';
-    if (DOM.settingAutoOrder) DOM.settingAutoOrder.value = 'false';
-    if (DOM.settingReflection) DOM.settingReflection.value = 'true';
+    if (DOM.settingRiskPercent) DOM.settingRiskPercent.value = String(runtimeSettings.forex_default_risk_percent ?? 1.0);
+    if (DOM.settingMinRR) DOM.settingMinRR.value = String(runtimeSettings.forex_min_rr ?? 1.5);
+    if (DOM.settingMaxSpread) DOM.settingMaxSpread.value = String(runtimeSettings.forex_max_spread_pips ?? 5.0);
+    if (DOM.settingNewsBlackout) DOM.settingNewsBlackout.value = String(runtimeSettings.forex_news_blackout_minutes ?? 120);
+    if (DOM.settingPollInterval) DOM.settingPollInterval.value = String(runtimeSettings.mt5_poll_interval_seconds ?? 5.0);
+    if (DOM.settingBrokerMode) DOM.settingBrokerMode.textContent = 'Passive Observer / Manual Execution';
+    if (DOM.settingAutoOrder) DOM.settingAutoOrder.textContent = 'DISABLED — IMMUTABLE';
+    if (DOM.settingReflection) DOM.settingReflection.textContent = 'Enabled by closed-trade workflow';
+
+    if (!document.body.dataset.forexSettingsInitialized) {
+      if (DOM.forexPair) DOM.forexPair.value = runtimeSettings.forex_default_pair || 'EURUSD';
+      if (DOM.forexTimeframe) DOM.forexTimeframe.value = runtimeSettings.forex_default_execution_timeframe || 'H1';
+      if (DOM.riskPercent) DOM.riskPercent.value = String(runtimeSettings.forex_default_risk_percent ?? 1.0);
+      if (DOM.forexMinRR) DOM.forexMinRR.value = String(runtimeSettings.forex_min_rr ?? 1.5);
+      if (DOM.forexMaxSpread) DOM.forexMaxSpread.value = String(runtimeSettings.forex_max_spread_pips ?? 5.0);
+      const contexts = new Set(runtimeSettings.forex_default_context_timeframes || ['H4', 'D1']);
+      DOM.forexContextToggles.forEach(btn => btn.classList.toggle('active', contexts.has(btn.dataset.ctxTf)));
+      document.body.dataset.forexSettingsInitialized = 'true';
+    }
   }
 
   async function saveSettings() {
@@ -2257,20 +2354,27 @@
     if (provider) payload.llm_provider = provider;
     if (DOM.settingQuickModelInput && DOM.settingQuickModelInput.value) payload.quick_think_llm = DOM.settingQuickModelInput.value;
     if (DOM.settingDeepModelInput && DOM.settingDeepModelInput.value) payload.deep_think_llm = DOM.settingDeepModelInput.value;
-    if (DOM.settingBackendUrl && DOM.settingBackendUrl.value.trim()) payload.backend_url = DOM.settingBackendUrl.value.trim();
+    if (DOM.settingBackendUrl) payload.backend_url = DOM.settingBackendUrl.value.trim() || null;
+    if (DOM.settingPair) payload.forex_default_pair = DOM.settingPair.value.trim();
+    if (DOM.settingTimeframe) payload.forex_default_execution_timeframe = DOM.settingTimeframe.value;
+    if (DOM.settingContextTimeframes) payload.forex_default_context_timeframes = DOM.settingContextTimeframes.value.split(',').map(value => value.trim()).filter(Boolean);
     if (DOM.settingMarketSource && DOM.settingMarketSource.value) payload.forex_market_source = DOM.settingMarketSource.value;
     if (DOM.settingMaxSpread && DOM.settingMaxSpread.value) payload.forex_max_spread_pips = Number(DOM.settingMaxSpread.value);
-    if (DOM.settingRiskPercent && DOM.settingRiskPercent.value) payload.forex_max_spread_pips = Number(DOM.settingRiskPercent.value);
-    if (DOM.settingMinRR && DOM.settingMinRR.value) payload.forex_quote_max_age_seconds = Number(DOM.settingMinRR.value);
+    if (DOM.settingRiskPercent && DOM.settingRiskPercent.value) payload.forex_default_risk_percent = Number(DOM.settingRiskPercent.value);
+    if (DOM.settingMinRR && DOM.settingMinRR.value) payload.forex_min_rr = Number(DOM.settingMinRR.value);
+    if (DOM.settingNewsBlackout && DOM.settingNewsBlackout.value) payload.forex_news_blackout_minutes = Number(DOM.settingNewsBlackout.value);
+    if (DOM.settingPollInterval && DOM.settingPollInterval.value) payload.mt5_poll_interval_seconds = Number(DOM.settingPollInterval.value);
     try {
       const res = await apiFetch('/api/forex/settings', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(apiErrorMessage(data, 'Settings update failed'));
+      settingsData = data;
+      configData.runtime_settings = data.settings || {};
+      populateSettingsView();
       if (DOM.settingsStatus) {
-        DOM.settingsStatus.textContent = 'Saved locally. Restart required for runtime reload.';
+        DOM.settingsStatus.textContent = data.restart_required ? 'Saved. Restart required for the MT5 polling change.' : 'Saved and applied.';
         DOM.settingsStatus.className = 'settings-status success';
       }
-      await loadConfig();
     } catch (error) {
       if (DOM.settingsStatus) {
         DOM.settingsStatus.textContent = error.message || 'Validation error';
@@ -2284,11 +2388,13 @@
       const res = await apiFetch('/api/forex/settings/reset', { method: 'POST' });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(apiErrorMessage(data, 'Reset failed'));
+      settingsData = data;
+      configData.runtime_settings = data.settings || {};
+      populateSettingsView();
       if (DOM.settingsStatus) {
-        DOM.settingsStatus.textContent = 'Defaults restored. Restart required for runtime reload.';
+        DOM.settingsStatus.textContent = data.restart_required ? 'Defaults restored. Restart required for the MT5 polling change.' : 'Defaults restored.';
         DOM.settingsStatus.className = 'settings-status success';
       }
-      await loadConfig();
     } catch (error) {
       if (DOM.settingsStatus) {
         DOM.settingsStatus.textContent = error.message || 'Reset failed';
@@ -2449,12 +2555,17 @@
       const est = estRes.ok ? await estRes.json() : null;
       let proceed = true;
       if (est) {
+        const analyses = est.expected_analyses_count ?? 'Unavailable';
         const calls = est.estimated_llm_calls || est.estimated_calls || 0;
         const tokens = est.estimated_tokens || est.estimated_token_usage || 0;
         const cost = est.estimated_cost_usd || est.estimated_cost || 0;
+        if (DOM.backtestEstimate) {
+          DOM.backtestEstimate.style.display = 'block';
+          DOM.backtestEstimate.innerHTML = `<strong>Pre-launch estimate</strong><br>Analyses: ${escapeText(analyses)} · LLM calls: ${escapeText(calls)} · Tokens: ${escapeText(tokens)} · Estimated cost: $${escapeText(Number(cost).toFixed(2))}<br>Sampling interval: ${escapeText(payload.sampling_interval)} bars · Maximum analysis points: ${escapeText(payload.max_analysis_points ?? 'Uncapped')}`;
+        }
         // require confirmation for large jobs
         if (calls > 50 || cost > 5) {
-          proceed = confirm(`Estimated analyses: ${calls}\nEstimated tokens: ${tokens}\nEstimated cost: $${Number(cost).toFixed(2)}\n\nProceed with backtest?`);
+          proceed = confirm(`Estimated analyses: ${analyses}\nEstimated LLM calls: ${calls}\nEstimated tokens: ${tokens}\nEstimated cost: $${Number(cost).toFixed(2)}\nSampling interval: ${payload.sampling_interval}\nMaximum analysis points: ${payload.max_analysis_points ?? 'Uncapped'}\n\nProceed with backtest?`);
         }
         // show a small summary in pipeline area
         showToast(`Estimate: ${calls} analyses, ${tokens} tokens, $${Number(cost||0).toFixed(2)}`, 'info');
@@ -2500,31 +2611,61 @@
         return;
       }
       const data = await res.json();
-      // Render detail below runs container
       const container = DOM.backtestRunsContainer;
       const header = `Backtest: ${escapeText(String(data.backtest_id || backtestId))} - ${escapeText(data.pair || '')} ${escapeText(data.timeframe || '')}`;
-      let body = '';
-      if (data.notice) body += `<div class="info-banner">${escapeText(data.notice)}</div>`;
-      if (data.result) {
-        const r = data.result;
-        body += `
-          <div style="display:grid; grid-template-columns: repeat(4,1fr); gap:8px; margin:8px 0;">
-            <div class="stat-card"><span class="stat-label">Trades</span><span class="stat-value">${escapeText(r.total_trades || r.trade_count || 0)}</span></div>
-            <div class="stat-card"><span class="stat-label">Win Rate</span><span class="stat-value">${r.win_rate_pct != null ? escapeText(Number(r.win_rate_pct).toFixed(1) + '%') : (r.win_rate != null ? escapeText((Number(r.win_rate)*100).toFixed(1)+'%') : '-')}</span></div>
-            <div class="stat-card"><span class="stat-label">Profit Factor</span><span class="stat-value">${escapeText(r.profit_factor != null ? Number(r.profit_factor).toFixed(2) : '-')}</span></div>
-            <div class="stat-card"><span class="stat-label">Net PnL</span><span class="stat-value">${escapeText('$' + (r.total_net_profit != null ? Number(r.total_net_profit).toFixed(2) : (r.net_profit != null ? Number(r.net_profit).toFixed(2) : '0.00')))}</span></div>
-          </div>
-        `;
-      }
+      const result = data.result || {};
+      const provenance = data.market_data_provenance || { source: data.data_source };
+      const validationReport = data.validation_report || {};
+      const reasons = data.validation_reasons || validationReport.validation_reasons || [];
+      const unavailable = value => value == null ? 'Unavailable' : value;
+      const section = (title, content) => `<section style="margin:14px 0;"><h4 style="color:var(--cyan); margin-bottom:8px;">${escapeText(title)}</h4>${content}</section>`;
+      const fields = entries => `<div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:8px;">${entries.map(([label, value]) => `<div class="stat-card"><span class="stat-label">${escapeText(label)}</span><span class="stat-value" style="font-size:0.9rem;">${escapeText(unavailable(value))}</span></div>`).join('')}</div>`;
+      const objectFields = object => fields(Object.entries(object || {}).map(([key, value]) => [key.replaceAll('_', ' '), typeof value === 'object' ? JSON.stringify(value) : value]));
+      const splits = validationReport.splits || [];
+      const splitRows = splits.map(split => `<tr><td>${escapeText(split.split_id)}</td><td>${escapeText(split.development?.start_time)} → ${escapeText(split.development?.end_time)}</td><td>${escapeText(split.out_of_sample?.start_time)} → ${escapeText(split.out_of_sample?.end_time)}</td><td>${split.forward_demo ? `${escapeText(split.forward_demo.start_time)} → ${escapeText(split.forward_demo.end_time)}` : 'Unavailable'}</td></tr>`).join('');
+      const body = `
+        <div class="info-banner">${escapeText(data.notice || 'No validation notice supplied.')}</div>
+        ${section('Overview', fields([['Run type', data.run_type], ['Mode', data.mode], ['Status', data.status], ['Pair', data.pair], ['Timeframe', data.timeframe], ['Created', data.created_at]]))}
+        ${section('Data provenance', objectFields(provenance))}
+        ${section('Execution assumptions', objectFields(data.execution_assumptions || data.execution_summary || {}))}
+        ${section('Cost assumptions', objectFields(data.cost_control_summary || {}))}
+        ${section('Analysis / model configuration', fields([['Provider', data.provider], ['Quick model', data.quick_model], ['Deep model', data.deep_model], ['Analysts', (data.analysts || []).join(', ') || null], ['Analyses performed', data.analyses_performed]]))}
+        ${section('Validation status', fields([['Status', data.validation_status], ['Validated strategy performance', data.validated_strategy_performance], ['Verdict', validationReport.robustness_verdict]]))}
+        ${section('Performance metrics', fields([['Total trades', result.total_trades], ['Win rate', result.win_rate_pct != null ? `${Number(result.win_rate_pct).toFixed(1)}%` : null], ['Profit factor', result.profit_factor], ['Net profit', result.total_net_profit != null ? `$${Number(result.total_net_profit).toFixed(2)}` : null], ['Return', result.total_return_pct != null ? `${result.total_return_pct}%` : null], ['Max drawdown', result.max_drawdown_pct != null ? `${result.max_drawdown_pct}%` : null]]))}
+        ${section('Equity / drawdown data', fields([['Equity points', Array.isArray(result.equity_curve) ? result.equity_curve.length : null], ['Max drawdown', result.max_drawdown_pct != null ? `${result.max_drawdown_pct}%` : null], ['Sharpe ratio', result.sharpe_ratio], ['Sortino ratio', result.sortino_ratio]]))}
+        ${section('Trade statistics', fields([['Winning trades', result.winning_trades], ['Losing trades', result.losing_trades], ['Ambiguous trades', result.ambiguous_trades_count ?? data.ambiguous_trades_count], ['Filled orders', result.filled_orders_count ?? data.filled_orders_count], ['Expired orders', result.expired_orders_count ?? data.expired_orders_count]]))}
+        ${splits.length ? section('Walk-forward splits (out-of-sample)', `<div style="overflow:auto"><table class="data-table"><thead><tr><th>Split</th><th>Training period</th><th>OOS test period</th><th>Forward demo</th></tr></thead><tbody>${splitRows}</tbody></table></div>`) : ''}
+        ${section('Validation reasons', reasons.length ? `<ul>${reasons.map(reason => `<li>${escapeText(reason)}</li>`).join('')}</ul>` : 'Unavailable')}
+        ${section('Audit metadata', objectFields({ analysis_cutoff_policy: data.analysis_cutoff_policy, evidence_policy: data.evidence_policy, strategy_version: data.strategy_version, config_hash: data.config_hash }))}
+        <details><summary>Technical details</summary><pre style="white-space:pre-wrap; font-family:monospace; font-size:0.8rem;">${escapeText(JSON.stringify(data, null, 2))}</pre></details>
+      `;
       container.innerHTML = `
         <div class="card">
           <div class="card-header"><h3 class="card-title">${header}</h3></div>
-          <div style="padding:12px">${body}<pre style="white-space:pre-wrap; font-family:monospace; font-size:0.85rem;">${escapeText(JSON.stringify(data, null, 2))}</pre></div>
+          <div style="padding:12px">${body}</div>
         </div>
       `;
     } catch (e) {
       showToast('Error loading backtest detail', 'error');
     }
+  }
+
+  function renderAblationStudy(study) {
+    if (!DOM.backtestRunsContainer) return;
+    const variants = study.variants || [];
+    DOM.backtestRunsContainer.innerHTML = `
+      <div class="card">
+        <div class="card-header"><h3 class="card-title">Ablation Study: ${escapeText(study.pair || 'Unavailable')}</h3></div>
+        <div style="padding:12px">
+          <div class="info-banner">${escapeText(study.sample_size_warning || 'Exploratory comparison only; no variant is statistically validated.')}</div>
+          <div style="overflow:auto"><table class="data-table"><thead><tr><th>Variant</th><th>Sample</th><th>Trades</th><th>Win rate</th><th>Profit factor</th><th>Net result</th><th>Cost</th><th>Latency</th><th>Sample adequate</th></tr></thead><tbody>
+            ${variants.map(variant => `<tr><td title="${escapeText(variant.description)}">${escapeText(variant.name || variant.variant_id)}</td><td>${escapeText(variant.analyses_performed ?? 'Unavailable')}</td><td>${escapeText(variant.trade_count ?? 'Unavailable')}</td><td>${variant.win_rate_pct != null ? `${escapeText(variant.win_rate_pct)}%` : 'Unavailable'}</td><td>${escapeText(variant.profit_factor ?? 'Unavailable')}</td><td>${variant.total_net_profit != null ? `$${escapeText(Number(variant.total_net_profit).toFixed(2))}` : 'Unavailable'}</td><td>${variant.estimated_llm_cost_usd != null ? `$${escapeText(Number(variant.estimated_llm_cost_usd).toFixed(4))}` : 'Unavailable'}</td><td>${variant.latency_seconds != null ? `${escapeText(variant.latency_seconds)}s` : 'Unavailable'}</td><td>${escapeText(variant.sample_size_adequate)}</td></tr>`).join('')}
+          </tbody></table></div>
+          <h4 style="margin-top:12px; color:var(--cyan);">Validation limitations</h4>
+          <ul>${(study.validation_reasons || []).map(reason => `<li>${escapeText(reason)}</li>`).join('')}</ul>
+          <details><summary>Technical details</summary><pre style="white-space:pre-wrap; font-family:monospace; font-size:0.8rem;">${escapeText(JSON.stringify(study, null, 2))}</pre></details>
+        </div>
+      </div>`;
   }
 
   // Equities Launch Flow (Existing Functionality Preserved)
@@ -2684,7 +2825,7 @@
       await loadForexReport(runId);
       loadJournalTrades();
       loadLessons();
-      loadAnalyticsSummary();
+      loadPerformanceInterface();
       loadRuns();
       loadHistory();
     });
@@ -2881,7 +3022,9 @@
     const modifications = risk.modifications_required || [];
 
     // Lessons
-    const lessons = mem.historical_lessons || prop.applied_lesson_ids || [];
+    const lessons = Array.isArray(prop.applied_lesson_ids)
+      ? prop.applied_lesson_ids.filter(id => typeof id === 'string' && id)
+      : (Array.isArray(mem.applied_lesson_ids) ? mem.applied_lesson_ids.filter(id => typeof id === 'string' && id) : []);
 
     // Entry Zone
     let entryZoneStr = '-';
@@ -3136,16 +3279,16 @@
           </div>
           ${lessons.length > 0 ? `
             <div style="display:flex; flex-direction:column; gap:6px;">
-              ${lessons.map(les => `
+              ${lessons.map(lessonId => `
                 <div style="background:var(--bg-primary); padding:8px 12px; border-radius:var(--radius-sm); border:1px solid var(--border); font-size:0.82rem; display:flex; align-items:center; gap:8px;">
                   <span style="font-family:var(--font-mono); color:var(--cyan); font-weight:600;">[Applied]</span>
-                  <span style="color:var(--text-primary);">${typeof les === 'object' ? escapeText(les.actionable_rule || les.observation || JSON.stringify(les)) : escapeText(String(les))}</span>
+                  <button type="button" class="btn-secondary btn-sm" data-applied-lesson-id="${escapeText(lessonId)}">${escapeText(lessonId)}</button>
                 </div>
               `).join('')}
             </div>
           ` : `
             <div style="font-size:0.82rem; color:var(--text-muted); font-style:italic;">
-              No negative historical lessons matched this setup geometry or regime. Strategy execution verified under baseline rules.
+              No applied lesson IDs were stored on this completed report.
             </div>
           `}
         </div>

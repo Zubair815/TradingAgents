@@ -4,6 +4,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 from tradingagents.agents.schemas_forex import ForexAction
 from tradingagents.database.journal import ForexTradeJournal
@@ -27,6 +29,7 @@ from tradingagents.metrics.models import (
     TradeOutcomeCategory,
     TradeOutcomeResult,
 )
+from web.forex_routes import router, set_forex_dependencies
 
 # ===========================================================================
 # 1. Model Instantiation & Serialization Tests
@@ -1319,13 +1322,48 @@ def test_phase16_report_applied_lesson_ids():
     )
 
     assert prop.applied_lesson_ids == ["lsn_eurusd_m15_pullback", "lsn_slippage_safeguard"]
-
     rendered = render_forex_trader_proposal(prop)
     assert "Applied Historical Lessons" in rendered
     assert "lsn_eurusd_m15_pullback" in rendered
     assert "lsn_slippage_safeguard" in rendered
 
 
+def test_learning_api_filters_and_reports_missing_sources(tmp_path: Path):
+    journal = ForexTradeJournal(db_path=tmp_path / "learning-ui.db")
+    manager = ForexLearningManager(journal=journal)
+    lesson = ForexLesson(
+        lesson_id="lsn_ui_trace",
+        source_trade_id="trd_missing",
+        proposal_id="prop_missing",
+        pair="EURUSD",
+        timeframe="M15",
+        setup="PULLBACK",
+        direction="LONG",
+        evidence_count=3,
+        actionable_rule="Require a closed confirmation candle.",
+    )
+    manager.store.save_lesson(lesson)
+    set_forex_dependencies(journal=journal, learning_manager=manager)
+    app = FastAPI()
+    app.include_router(router)
+    from web.server import _SESSION_TOKEN, DASHBOARD_API_KEY
 
+    client = TestClient(app, headers={"X-API-Key": DASHBOARD_API_KEY or _SESSION_TOKEN})
+    response = client.get(
+        "/api/forex/learning/lessons?pair=EURUSD&setup_type=PULLBACK"
+        "&direction=LONG&timeframe=M15&min_evidence_count=3&active=true"
+    )
+    assert response.status_code == 200
+    assert [item["lesson_id"] for item in response.json()["lessons"]] == ["lsn_ui_trace"]
+
+    detail = client.get("/api/forex/learning/lessons/lsn_ui_trace")
+    assert detail.status_code == 200
+    assert detail.json()["sources"] == {
+        "trade": {"id": "trd_missing", "available": False},
+        "proposal": {"id": "prop_missing", "available": False},
+    }
+    missing = client.get("/api/forex/learning/lessons/not-present")
+    assert missing.status_code == 404
+    assert missing.json()["detail"] == "Run not found"
 
 

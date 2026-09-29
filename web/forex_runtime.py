@@ -2,6 +2,7 @@
 
 import threading
 
+from tradingagents.dataflows.config import get_config
 from tradingagents.journal.post_close import ClosedTradeProcessor
 from tradingagents.mt5.service import MT5ObservationService
 
@@ -16,7 +17,12 @@ class ForexRuntime:
             journal=self.journal, history_provider=learning_manager.history_provider,
             learning_mgr=learning_manager,
         )
-        self.service = MT5ObservationService(observer, journal_manager, post_close_processor=self.processor)
+        self.service = MT5ObservationService(
+            observer,
+            journal_manager,
+            poll_interval_seconds=get_config()["mt5_poll_interval_seconds"],
+            post_close_processor=self.processor,
+        )
         self._lock = threading.Lock()
         self._closing = False
         self.closed = False

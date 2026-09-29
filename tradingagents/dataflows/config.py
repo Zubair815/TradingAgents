@@ -36,6 +36,62 @@ def _validate_runtime_value(key: str, value):
     if key not in default_config.DEFAULT_CONFIG:
         raise ValueError(f"Unsupported runtime setting: {key!r}")
 
+    if key == "forex_default_pair":
+        if not isinstance(value, str):
+            raise ValueError(f"{key} must be a string")
+        from tradingagents.forex.domain import get_forex_pair
+
+        pair = get_forex_pair(value.upper().replace("/", "").replace("-", "").replace("_", ""))
+        if pair is None:
+            raise ValueError(f"{key} must be a supported Forex pair")
+        return pair.symbol
+    if key == "forex_default_execution_timeframe":
+        if not isinstance(value, str):
+            raise ValueError(f"{key} must be a string")
+        from tradingagents.forex.domain import Timeframe
+
+        return Timeframe.from_string(value).value
+    if key == "forex_default_context_timeframes":
+        if not isinstance(value, list) or not value:
+            raise ValueError(f"{key} must be a non-empty list")
+        from tradingagents.forex.domain import Timeframe
+
+        normalized = [Timeframe.from_string(item).value for item in value]
+        if len(set(normalized)) != len(normalized):
+            raise ValueError(f"{key} must not contain duplicates")
+        return normalized
+    if key == "forex_market_source":
+        if value not in {"mt5", "yahoo"}:
+            raise ValueError(f"{key} must be 'mt5' or 'yahoo'")
+        return value
+    if key == "forex_default_risk_percent":
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"{key} must be numeric")
+        value = float(value)
+        if not 0 < value <= 5:
+            raise ValueError(f"{key} must be greater than 0 and at most 5")
+        return value
+    if key == "forex_min_rr":
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"{key} must be numeric")
+        value = float(value)
+        if value <= 0:
+            raise ValueError(f"{key} must be greater than 0")
+        return value
+    if key == "forex_news_blackout_minutes":
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"{key} must be an integer")
+        if value < 0:
+            raise ValueError(f"{key} must be >= 0")
+        return value
+    if key == "mt5_poll_interval_seconds":
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"{key} must be numeric")
+        value = float(value)
+        if value < 0.5:
+            raise ValueError(f"{key} must be at least 0.5 seconds")
+        return value
+
     reference = default_config.DEFAULT_CONFIG.get(key)
     explicit_type = default_config._CONFIG_KEY_TYPES.get(key)
     if key in {"max_tokens", "llm_max_retries"}:
@@ -106,13 +162,14 @@ def save_runtime_settings(patch: dict) -> dict:
     if not isinstance(patch, dict):
         raise ValueError("Runtime settings must be submitted as an object")
 
+    global _config
     merged = deepcopy(_load_runtime_settings())
     for key, value in patch.items():
         merged[key] = _validate_runtime_value(str(key), value)
 
     _RUNTIME_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     _RUNTIME_CONFIG_PATH.write_text(json.dumps(merged, indent=2, sort_keys=True), encoding="utf-8")
-    set_config(merged)
+    _config = build_config()
     return get_config()
 
 

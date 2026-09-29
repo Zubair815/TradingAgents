@@ -15,6 +15,8 @@ Validates:
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -327,9 +329,14 @@ def test_api_performance_route():
     journal = ForexTradeJournal(db_path=":memory:", auto_migrate=True)
     metrics_mgr = ForexMetricsManager(journal=journal)
 
-    journal.record_trade_open(
+    opened = journal.record_trade_open(
         pair="GBPUSD", action=ForexAction.SHORT, open_price=1.25, stop_loss=1.26,
         lots=1.0, confidence=80.0,
+    )
+    journal.record_trade_close(
+        opened.trade_id,
+        close_price=1.24,
+        metadata={"mfe_r": 1.5, "mae_r": -0.25},
     )
 
     set_forex_dependencies(journal=journal, metrics_manager=metrics_mgr)
@@ -342,6 +349,24 @@ def test_api_performance_route():
     assert res.status_code == 200
     data = res.json()
     assert "performance" in data
+    assert "series" in data
+    assert "execution_friction" in data
     assert "markdown" in data
     assert data["performance"]["overall"]["trade_count"] == 1
     assert "GBPUSD" in data["performance"]["segmentation"]["by_pair"]
+    assert data["series"]["cumulative_r"][0]["value"] == 1.0
+    assert data["series"]["equity"][0]["value"] > 100000.0
+    assert data["series"]["mfe_vs_realized"][0] == {
+        "trade_id": opened.trade_id,
+        "mfe_r": 1.5,
+        "realized_r": 1.0,
+    }
+
+
+def test_performance_ui_preserves_zero_and_does_not_fake_missing_series():
+    source = Path("web/static/app.js").read_text(encoding="utf-8")
+    assert "value == null" in source
+    assert "Unavailable — no stored source values." in source
+    assert "No observations for this segment" in source
+    assert "loadPerformanceInterface" in source
+    assert "/api/forex/journal/performance" not in source

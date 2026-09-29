@@ -37,7 +37,7 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 # Forex Domain, Journal, Risk, Backtest, Analytics, MT5, Learning imports
 from tradingagents.agents.schemas_forex import (
@@ -267,26 +267,18 @@ _SETTINGS_KEYS = (
     "quick_think_llm",
     "deep_think_llm",
     "backend_url",
-    "output_language",
-    "max_debate_rounds",
-    "max_risk_discuss_rounds",
-    "checkpoint_enabled",
-    "temperature",
-    "llm_max_retries",
-    "max_tokens",
-    "openai_reasoning_effort",
-    "google_thinking_level",
-    "anthropic_effort",
+    "forex_default_pair",
+    "forex_default_execution_timeframe",
+    "forex_default_context_timeframes",
+    "forex_default_risk_percent",
+    "forex_min_rr",
     "forex_market_source",
-    "forex_allow_yahoo_fallback",
-    "forex_broker_symbols",
-    "forex_quote_max_age_seconds",
     "forex_max_spread_pips",
-    "forex_calendar_provider",
-    "forex_calendar_max_age_seconds",
-    "data_vendors",
-    "tool_vendors",
+    "forex_news_blackout_minutes",
+    "mt5_poll_interval_seconds",
 )
+
+_RESTART_REQUIRED_KEYS = frozenset({"mt5_poll_interval_seconds"})
 
 
 def _serialize_runtime_settings() -> dict[str, Any]:
@@ -302,9 +294,23 @@ def get_runtime_settings():
         "settings": settings,
         "secret_status": {
             "api_key": "Configured" if (os.environ.get("TRADINGAGENTS_DASHBOARD_API_KEY") or os.environ.get("DASHBOARD_API_KEY")) else "Missing",
-            "llm_provider_secrets": "Configured" if settings.get("llm_provider") else "Missing",
+            "llm_provider_secrets": "Configured" if _provider_secret_is_configured(settings.get("llm_provider")) else "Missing",
         },
+        "execution_policy": "manual_only",
+        "restart_required": False,
     }
+
+
+def _provider_secret_is_configured(provider: str | None) -> bool:
+    env_names = {
+        "openai": ("OPENAI_API_KEY",),
+        "openrouter": ("OPENROUTER_API_KEY",),
+        "google": ("GOOGLE_API_KEY", "GEMINI_API_KEY"),
+        "anthropic": ("ANTHROPIC_API_KEY",),
+        "deepseek": ("DEEPSEEK_API_KEY",),
+        "ollama": (),
+    }
+    return provider == "ollama" or any(os.environ.get(name) for name in env_names.get(provider or "", ()))
 
 
 @router.patch("/settings")
@@ -312,18 +318,39 @@ def patch_runtime_settings(payload: dict[str, Any]):
     """Persist non-secret runtime settings to the local settings file."""
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail={"error": "Settings payload must be an object"})
+    unknown = sorted(set(payload) - set(_SETTINGS_KEYS))
+    if unknown:
+        raise HTTPException(status_code=400, detail={"error": f"Unsupported runtime setting(s): {unknown}"})
+    before = _serialize_runtime_settings()
     try:
         saved = save_runtime_settings(payload)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
-    return {"settings": {key: saved.get(key) for key in _SETTINGS_KEYS}, "saved": True}
+    restart_required = _forex_runtime is not None and any(
+        key in _RESTART_REQUIRED_KEYS and saved.get(key) != before.get(key) for key in payload
+    )
+    return {
+        "settings": {key: saved.get(key) for key in _SETTINGS_KEYS},
+        "saved": True,
+        "execution_policy": "manual_only",
+        "restart_required": restart_required,
+    }
 
 
 @router.post("/settings/reset")
 def reset_runtime_settings_route():
     """Restore the project's default config and drop local runtime overrides."""
+    before = _serialize_runtime_settings()
     saved = reset_runtime_settings()
-    return {"settings": {key: saved.get(key) for key in _SETTINGS_KEYS}, "reset": True}
+    restart_required = _forex_runtime is not None and any(
+        saved.get(key) != before.get(key) for key in _RESTART_REQUIRED_KEYS
+    )
+    return {
+        "settings": {key: saved.get(key) for key in _SETTINGS_KEYS},
+        "reset": True,
+        "execution_policy": "manual_only",
+        "restart_required": restart_required,
+    }
 
 
 # Backward-compatible alias
@@ -475,6 +502,58 @@ class ForexBacktestEstimateRequest(BaseModel):
     sampling_interval: int = Field(default=1, ge=1)
     max_analysis_points: int | None = Field(default=None, ge=1)
     analyst_count: int = Field(default=3, ge=1)
+
+
+BacktestMode = Literal["DEMO", "HISTORICAL_AGENT_BACKTEST", "WALK_FORWARD"]
+
+
+class BacktestRunSummary(BaseModel):
+    """Canonical list representation shared by every persisted validation run."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    backtest_id: str
+    run_type: Literal["FOREX_BACKTEST"] = "FOREX_BACKTEST"
+    mode: BacktestMode
+    status: str
+    pair: str
+    timeframe: str
+    created_at: str
+    data_source: str
+    validation_status: str
+    validated_strategy_performance: bool = False
+    notice: str
+    total_trades: int | None = None
+    win_rate_pct: float | None = None
+    profit_factor: float | None = None
+    net_profit: float | None = None
+    split_count: int | None = None
+
+
+class BacktestRunDetail(BaseModel):
+    """Canonical detail envelope; mode-specific evidence remains structured."""
+
+    model_config = ConfigDict(extra="allow")
+
+    backtest_id: str
+    run_type: Literal["FOREX_BACKTEST"] = "FOREX_BACKTEST"
+    mode: BacktestMode
+    status: str
+    pair: str
+    timeframe: str
+    created_at: str
+    data_source: str
+    validation_status: str
+    validated_strategy_performance: bool = False
+    notice: str
+    validation_reasons: list[str] = Field(default_factory=list)
+    result: dict[str, Any] | None = None
+    validation_report: dict[str, Any] | None = None
+
+
+class BacktestRunListResponse(BaseModel):
+    runs: list[BacktestRunSummary]
+    count: int
 
 
 class MonteCarloRequest(BaseModel):
@@ -1394,6 +1473,7 @@ def _run_forex_analysis(run_id: str, req: ForexAnalysisRequest) -> None:
             "max_risk_percent": req.risk_percent,
             "default_risk_percent": req.risk_percent,
             "enforce_news_blackout": getattr(req, "economic_blackout", True),
+            "blackout_lookahead_hours": get_runtime_config()["forex_news_blackout_minutes"] / 60.0,
         }
         if getattr(req, "min_rr", None) is not None:
             risk_kwargs["min_risk_reward_ratio"] = float(req.min_rr)
@@ -1927,8 +2007,10 @@ async def run_backtest(
 
             _backtest_runs[backtest_id] = {
                 **report_dict,
+                "run_type": "FOREX_BACKTEST",
                 "status": "completed",
                 "demo_mode": False,
+                "mode": "HISTORICAL_AGENT_BACKTEST",
                 "data_source": provenance["source"],
                 "strategy": "historical_multi_agent",
                 "notice": "Historical simulation with sourced candles. Strategy performance is not statistically validated.",
@@ -2043,6 +2125,8 @@ async def run_backtest(
         _backtest_runs[backtest_id] = {
             **demo_metadata,
             "backtest_id": backtest_id,
+            "run_type": "FOREX_BACKTEST",
+            "status": "completed",
             "pair": norm_pair,
             "timeframe": req.timeframe,
             "result": result_dict,
@@ -2050,14 +2134,7 @@ async def run_backtest(
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
 
-        return {
-            **demo_metadata,
-            "backtest_id": backtest_id,
-            "pair": norm_pair,
-            "status": "completed",
-            "result": result_dict,
-            "markdown_report": markdown_rep,
-        }
+        return _backtest_runs[backtest_id]
     except DataInsufficientError as exc:
         raise HTTPException(status_code=422, detail={
             "code": "HISTORICAL_DATA_UNAVAILABLE", "message": str(exc),
@@ -2073,28 +2150,35 @@ async def run_backtest(
 
 
 
-@router.get("/backtest/runs")
+@router.get("/backtest/runs", response_model=BacktestRunListResponse)
 async def list_backtest_runs():
-    """List completed backtests."""
-    runs = [
-        {
-            "backtest_id": k,
-            "demo_mode": v["demo_mode"],
-            "data_source": v["data_source"],
-            "strategy": v["strategy"],
-            "validated_strategy_performance": v["validated_strategy_performance"],
-            "notice": v["notice"],
-            "pair": v["pair"],
-            "timeframe": v["timeframe"],
-            "created_at": v["created_at"],
-            "total_trades": v["result"]["total_trades"],
-            "win_rate_pct": v["result"]["win_rate_pct"],
-            "profit_factor": v["result"]["profit_factor"],
-            "net_profit": v["result"]["total_net_profit"],
-        }
-        for k, v in _backtest_runs.items()
-    ]
-    return {"backtests": runs, "count": len(runs)}
+    """List persisted backtest and validation runs using one canonical contract."""
+    runs = [_backtest_run_summary(run_id, run).model_dump() for run_id, run in _backtest_runs.items()]
+    return {"runs": runs, "count": len(runs)}
+
+
+def _backtest_run_summary(backtest_id: str, run: dict[str, Any]) -> BacktestRunSummary:
+    result = run.get("result") or {}
+    validation_report = run.get("validation_report") or {}
+    splits = validation_report.get("splits") or []
+    return BacktestRunSummary(
+        backtest_id=backtest_id,
+        run_type=run.get("run_type", "FOREX_BACKTEST"),
+        mode=run.get("mode", "DEMO" if run.get("demo_mode") else "HISTORICAL_AGENT_BACKTEST"),
+        status=run.get("status", "completed"),
+        pair=run.get("pair", ""),
+        timeframe=run.get("timeframe", ""),
+        created_at=run.get("created_at", ""),
+        data_source=run.get("data_source", "unavailable"),
+        validation_status=run.get("validation_status", "UNAVAILABLE"),
+        validated_strategy_performance=bool(run.get("validated_strategy_performance", False)),
+        notice=run.get("notice", ""),
+        total_trades=result.get("total_trades"),
+        win_rate_pct=result.get("win_rate_pct"),
+        profit_factor=result.get("profit_factor"),
+        net_profit=result.get("total_net_profit"),
+        split_count=len(splits) if run.get("mode") == "WALK_FORWARD" else None,
+    )
 
 
 @router.post("/backtest/walkforward")
@@ -2106,6 +2190,11 @@ async def run_walk_forward(
     try:
         norm_pair = normalize_forex_pair(req.pair)
         # Load candles either from user-supplied payload or historical provider
+        if req.candles and not req.demo_mode:
+            raise DataInsufficientError(
+                "Caller-supplied candles have no verified historical provider provenance; "
+                "set demo_mode=true for an explicitly unvalidated walk-forward demonstration."
+            )
         if req.candles:
             candle_objs = []
             for c in req.candles:
@@ -2120,7 +2209,7 @@ async def run_walk_forward(
                     close=float(c["close"]),
                     volume=float(c.get("volume", 100.0)),
                 ))
-            provenance = {"source": "user_supplied"}
+            provenance = {"source": "user_supplied_unverified", "execution_market": False}
         else:
             from tradingagents.backtest.historical_data import load_historical_candles
             candle_objs, provenance = load_historical_candles(norm_pair, req.timeframe, req.date_from, req.date_to)
@@ -2155,36 +2244,44 @@ async def run_walk_forward(
         # Store a summary into _backtest_runs for UI listing
         _backtest_runs[val_id] = {
             "backtest_id": val_id,
-            "demo_mode": False,
+            "run_type": "FOREX_BACKTEST",
+            "status": "completed",
+            "mode": "WALK_FORWARD",
+            "demo_mode": bool(req.demo_mode),
             "data_source": provenance.get("source", "historical"),
             "strategy": "walk_forward_validation",
             "validated_strategy_performance": False,
+            "validation_status": report_dict.get("validation_status", "DEMO"),
+            "validation_reasons": report_dict.get("validation_reasons", []),
             "notice": "Walk-forward validation report (descriptive; not statistical validation).",
             "pair": norm_pair,
             "timeframe": req.timeframe,
             "created_at": datetime.now(timezone.utc).isoformat(),
-            "result": {
-                "total_trades": 0,
-                "win_rate_pct": 0.0,
-                "profit_factor": 0.0,
-                "total_net_profit": 0.0,
-            },
+            "result": None,
+            "market_data_provenance": provenance,
             "markdown_report": report_dict.get("markdown_summary") or report_dict.get("markdown_summary", ""),
             "validation_report": report_dict,
         }
 
         return report_dict
+    except DataInsufficientError as exc:
+        raise HTTPException(status_code=422, detail={
+            "code": "HISTORICAL_DATA_UNAVAILABLE", "message": str(exc),
+        }) from exc
     except Exception as exc:
-        logger.exception("Walk-forward validation failed")
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        logger.error("Walk-forward validation failed (%s)", type(exc).__name__)
+        raise HTTPException(status_code=400, detail={
+            "code": "WALK_FORWARD_FAILED",
+            "message": "Walk-forward validation did not complete; no result was saved.",
+        }) from exc
 
 
-@router.get("/backtest/{backtest_id}")
+@router.get("/backtest/{backtest_id}", response_model=BacktestRunDetail)
 async def get_backtest(backtest_id: str):
     """Retrieve full result scorecard, equity curve, and markdown report for a backtest."""
     if backtest_id not in _backtest_runs:
         raise HTTPException(status_code=404, detail="Backtest run not found")
-    return _backtest_runs[backtest_id]
+    return BacktestRunDetail.model_validate(_backtest_runs[backtest_id]).model_dump()
 
 
 # ---------------------------------------------------------------------------
@@ -2374,11 +2471,63 @@ async def get_performance_report(
     """Retrieve full deterministic performance analytics, multi-dimensional segmentation, and execution friction (Phase 19)."""
     trades = journal.list_trades(limit=10000)
     proposals = journal.list_proposals(limit=5000)
+    events = journal.get_events(limit=10000)
     report = metrics_mgr.get_comprehensive_performance(
-        trades=trades, proposals=proposals, initial_capital=initial_capital
+        trades=trades, proposals=proposals, events=events, initial_capital=initial_capital
     )
+
+    closed = sorted(
+        (trade for trade in trades if getattr(trade, "close_time_utc", None)),
+        key=lambda trade: str(getattr(trade, "close_time_utc", "")),
+    )
+    cumulative_r: list[dict[str, Any]] = []
+    equity: list[dict[str, Any]] = []
+    drawdown: list[dict[str, Any]] = []
+    r_distribution: list[dict[str, Any]] = []
+    mfe_vs_realized: list[dict[str, Any]] = []
+    mae_distribution: list[dict[str, Any]] = []
+    running_r = 0.0
+    running_equity = initial_capital
+    peak_equity = initial_capital
+    for trade in closed:
+        trade_id = str(getattr(trade, "trade_id", ""))
+        timestamp = str(getattr(trade, "close_time_utc", ""))
+        metadata = getattr(trade, "metadata", None) or {}
+        r_value = getattr(trade, "r_multiple", None)
+        net_profit = getattr(trade, "net_profit", None)
+        mfe_r = metadata.get("mfe_r")
+        mae_r = metadata.get("mae_r")
+        if r_value is not None:
+            realized_r = float(r_value)
+            running_r += realized_r
+            cumulative_r.append({"trade_id": trade_id, "timestamp": timestamp, "value": running_r})
+            r_distribution.append({"trade_id": trade_id, "value": realized_r})
+            if mfe_r is not None:
+                mfe_vs_realized.append({"trade_id": trade_id, "mfe_r": float(mfe_r), "realized_r": realized_r})
+        if mae_r is not None:
+            mae_distribution.append({"trade_id": trade_id, "value": float(mae_r)})
+        if net_profit is not None:
+            running_equity += float(net_profit)
+            peak_equity = max(peak_equity, running_equity)
+            equity.append({"trade_id": trade_id, "timestamp": timestamp, "value": running_equity})
+            drawdown.append({"trade_id": trade_id, "timestamp": timestamp, "value": peak_equity - running_equity})
+
+    summary = metrics_mgr.compute_summary(trades=trades)
     return {
         "performance": _safe_model_dump(report),
+        "series": {
+            "cumulative_r": cumulative_r,
+            "equity": equity,
+            "drawdown": drawdown,
+            "r_distribution": r_distribution,
+            "mfe_vs_realized": mfe_vs_realized,
+            "mae_distribution": mae_distribution,
+        },
+        "execution_friction": {
+            "total_executions_analyzed": summary.total_executions_analyzed,
+            "total_execution_friction_usd": summary.total_execution_friction_usd,
+            "average_execution_quality_score": summary.avg_execution_quality_score,
+        },
         "markdown": report.summary_markdown,
     }
 
@@ -2454,12 +2603,49 @@ async def run_ablation_study(
 async def list_lessons(
     pair: str | None = None,
     setup_type: str | None = None,
+    timeframe: str | None = None,
+    direction: str | None = None,
+    min_evidence_count: int | None = Query(default=None, ge=0),
+    active: bool | None = None,
     tag: str | None = None,
+    limit: int = Query(default=200, ge=1, le=1000),
     learning_mgr: ForexLearningManager = Depends(get_learning_manager),
 ):
     """Query stored heuristic lessons from past trade reflections."""
-    lessons = learning_mgr.store.list_lessons(pair=pair, setup_type=setup_type, tag=tag)
+    filters: dict[str, Any] = {"pair": pair, "setup_type": setup_type, "tag": tag}
+    if timeframe is not None:
+        filters["timeframe"] = timeframe
+    if direction is not None:
+        filters["direction"] = direction
+    if min_evidence_count is not None:
+        filters["min_evidence_count"] = min_evidence_count
+    if active is not None:
+        filters["active"] = active
+    if limit != 200:
+        filters["limit"] = limit
+    lessons = learning_mgr.store.list_lessons(**filters)
     return {"lessons": [_safe_model_dump(les) for les in lessons], "count": len(lessons)}
+
+
+@router.get("/learning/lessons/{lesson_id}")
+async def get_lesson_detail(
+    lesson_id: str,
+    learning_mgr: ForexLearningManager = Depends(get_learning_manager),
+    journal: ForexTradeJournal = Depends(get_journal),
+):
+    """Return a lesson and explicit availability for its stored source records."""
+    lesson = learning_mgr.store.get_lesson(lesson_id)
+    if lesson is None:
+        raise HTTPException(status_code=404, detail="Lesson not found")
+    trade_id = getattr(lesson, "source_trade_id", None)
+    proposal_id = getattr(lesson, "proposal_id", None)
+    return {
+        "lesson": _safe_model_dump(lesson),
+        "sources": {
+            "trade": {"id": trade_id, "available": bool(trade_id and journal.get_trade(trade_id))},
+            "proposal": {"id": proposal_id, "available": bool(proposal_id and journal.get_proposal(proposal_id))},
+        },
+    }
 
 
 

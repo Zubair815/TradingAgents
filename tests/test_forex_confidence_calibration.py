@@ -15,6 +15,8 @@ Validates:
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -390,3 +392,12 @@ def test_api_confidence_calibration_routes():
     assert result["raw_model_confidence"] == 64.0
     assert result["bucket_label"] == "60-70"
     assert "display_string" in result
+
+def test_confidence_calibration_ui_uses_empirical_labels_and_small_sample_state():
+    source = Path("web/static/app.js").read_text(encoding="utf-8")
+    html = Path("web/static/index.html").read_text(encoding="utf-8")
+    assert "Observed win rate" in source
+    assert "Calibration gap" in source
+    assert "SMALL SAMPLE" in source
+    assert "raw model scores" in html
+    assert "not a forecast probability" in html

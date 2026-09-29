@@ -815,29 +815,14 @@
           <span>Small sample guard: Statistical expectancy and win rate require a minimum of 30 closed trades to guard against overfitting.</span>
         </div>
 
-        <div class="stat-cards" id="analyticsStatCards">
-          <div class="stat-card">
-            <span class="stat-label">Win Rate</span>
-            <span class="stat-value" id="statWinRate" style="color:var(--green);">0.0%</span>
-            <span class="stat-sub" id="statTotalTrades">0 closed trades</span>
-          </div>
-          <div class="stat-card">
-            <span class="stat-label">Profit Factor</span>
-            <span class="stat-value" id="statProfitFactor">0.00</span>
-            <span class="stat-sub">Gross Win / Gross Loss</span>
-          </div>
-          <div class="stat-card">
-            <span class="stat-label">Total R-Multiple</span>
-            <span class="stat-value" id="statTotalR" style="color:var(--cyan);">0.0R</span>
-            <span class="stat-sub">Cumulative risk multiple</span>
-          </div>
-          <div class="stat-card">
-            <span class="stat-label">Max Drawdown</span>
-            <span class="stat-value" id="statMaxDD" style="color:var(--red);">0.0%</span>
-            <span class="stat-sub">Peak-to-trough decline</span>
-          </div>
-        </div>
-        <div id="calibrationContainer" style="margin-top:1rem;"></div>
+        <div id="performanceOverallContainer" aria-live="polite"><p class="journal-state">Load Performance to view metrics.</p></div>
+        <h3 style="margin-top:1.25rem;">Execution &amp; Friction</h3>
+        <div id="performanceExecutionContainer"></div>
+        <h3 style="margin-top:1.25rem;">Observed Series</h3>
+        <div id="performanceChartsContainer"></div>
+        <h3 style="margin-top:1.25rem;">Model Confidence Calibration</h3>
+        <p class="stat-sub">Confidence buckets are raw model scores. Observed win rate is historical evidence, not a forecast probability.</p>
+        <div id="confidenceCalibrationContainer" aria-live="polite"></div>
       </div>
 
       <!-- Segmentation Breakdown Table -->
@@ -847,6 +832,15 @@
             <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.21 15.89A10 10 0 1 1 8 2.83"/><path d="M22 12A10 10 0 0 0 12 2v10z"/></svg>
             Performance Segmentations &amp; Excursion Analytics
           </h2>
+          <select id="performanceSegmentSelect" class="form-select" style="width:210px;">
+            <option value="by_pair">Pair</option><option value="by_timeframe">Timeframe</option>
+            <option value="by_setup">Setup</option><option value="by_session">Session</option>
+            <option value="by_direction">Direction</option><option value="by_weekday">Weekday</option>
+            <option value="by_regime">Regime</option><option value="by_news_condition">News condition</option>
+            <option value="by_model">Model</option><option value="by_provider">Provider</option>
+            <option value="by_prompt_version">Prompt version</option><option value="by_strategy_version">Strategy version</option>
+            <option value="by_system_version">System version</option><option value="by_confidence_band">Confidence band</option>
+          </select>
         </div>
         <div id="perfBreakdownContainer">
           <div class="empty-state" style="padding: 2.5rem;">
@@ -937,6 +931,7 @@
             <button type="submit" class="btn-run" id="btnLaunchBacktest">
               🚀 Run Backtest
             </button>
+            <div id="backtestEstimate" class="info-banner" style="display:none; margin-top:0.75rem;" aria-live="polite"></div>
           </form>
         </div>
 
@@ -982,6 +977,11 @@
               <option value="USDJPY">USDJPY</option>
               <option value="AUDUSD">AUDUSD</option>
             </select>
+            <input class="form-input" id="lessonsSetupFilter" placeholder="Setup" style="width:120px; padding:6px 10px;">
+            <select class="form-select" id="lessonsDirectionFilter" style="width:115px; padding:6px 10px;"><option value="">All directions</option><option>LONG</option><option>SHORT</option></select>
+            <input class="form-input" id="lessonsTimeframeFilter" placeholder="Timeframe" style="width:105px; padding:6px 10px;">
+            <select class="form-select" id="lessonsEvidenceFilter" style="width:145px; padding:6px 10px;"><option value="">Any evidence</option><option value="2">2+ observations</option><option value="3">3+ observations</option><option value="6">6+ observations</option></select>
+            <select class="form-select" id="lessonsStatusFilter" style="width:115px; padding:6px 10px;"><option value="true">Active</option><option value="">All status</option><option value="false">Retired</option></select>
             <button class="btn-secondary btn-sm" id="btnRefreshLessons">🔄 Refresh</button>
           </div>
         </div>
@@ -1052,7 +1052,7 @@
           </div>
           <div class="settings-field">
             <label for="settingMarketSource">Market Data Provider</label>
-            <select id="settingMarketSource"><option value="mt5">MT5</option><option value="yahoo">Yahoo</option><option value="alpha_vantage">Alpha Vantage</option></select>
+            <select id="settingMarketSource"><option value="mt5">MT5</option><option value="yahoo">Yahoo (explicit non-execution source)</option></select>
           </div>
         </div>
 
@@ -1085,20 +1085,20 @@
             MetaTrader 5 Observer Settings
           </h2>
           <div class="settings-field">
-            <label for="settingBrokerMode">Broker Execution Mode</label>
-            <select id="settingBrokerMode"><option value="passive">Passive Observer Only</option><option value="manual">Manual</option></select>
+            <label>Broker Execution Mode</label>
+            <span class="settings-val" id="settingBrokerMode">Passive Observer / Manual Execution</span>
           </div>
           <div class="settings-field">
-            <label for="settingAutoOrder">Auto Order Placement</label>
-            <select id="settingAutoOrder"><option value="false">DISABLED</option><option value="true">ENABLED</option></select>
+            <label>Automatic Order Placement</label>
+            <span class="settings-val" id="settingAutoOrder" style="color:var(--green);">DISABLED — IMMUTABLE</span>
           </div>
           <div class="settings-field">
             <label for="settingPollInterval">Polling Interval</label>
             <input id="settingPollInterval" type="number" min="0.5" max="30" step="0.5" value="2.0" />
           </div>
           <div class="settings-field">
-            <label for="settingReflection">Automatic Reflection</label>
-            <select id="settingReflection"><option value="true">ENABLED</option><option value="false">DISABLED</option></select>
+            <label>Post-Close Reflection</label>
+            <span class="settings-val" id="settingReflection">Enabled by closed-trade workflow</span>
           </div>
         </div>
       </div>

@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from unittest.mock import MagicMock
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -58,7 +59,7 @@ def generate_dict_bars(count: int = 50, base_price: float = 1.0800, interval_min
     return bars
 
 
-def test_walkforward_with_user_candles(client):
+def test_walkforward_with_explicit_demo_candles(client):
     candles = generate_dict_bars(count=40)
     payload = {
         "pair": "EURUSD",
@@ -66,6 +67,7 @@ def test_walkforward_with_user_candles(client):
         "date_from": None,
         "date_to": None,
         "candles": candles,
+        "demo_mode": True,
     }
     res = client.post("/api/forex/backtest/walkforward?n_splits=1", json=payload)
     assert res.status_code == 200
@@ -76,5 +78,60 @@ def test_walkforward_with_user_candles(client):
     # Ensure the run was stored and appears in runs listing
     runs_res = client.get("/api/forex/backtest/runs")
     assert runs_res.status_code == 200
-    runs = runs_res.json().get("backtests", [])
-    assert any(r.get("backtest_id") and r.get("strategy") == "walk_forward_validation" for r in runs)
+    runs = runs_res.json().get("runs", [])
+    listed = next(r for r in runs if r.get("backtest_id") == j["validation_id"])
+    assert listed["mode"] == "WALK_FORWARD"
+    assert listed["data_source"] == "user_supplied_unverified"
+    assert listed["split_count"] == 1
+    assert listed["total_trades"] is None
+    assert listed["win_rate_pct"] is None
+    assert listed["profit_factor"] is None
+    assert listed["net_profit"] is None
+
+    detail = client.get(f"/api/forex/backtest/{j['validation_id']}")
+    assert detail.status_code == 200
+    assert detail.json()["mode"] == "WALK_FORWARD"
+    assert detail.json()["result"] is None
+    assert detail.json()["validation_report"]["splits"]
+
+
+def test_walkforward_rejects_unverified_candles_without_demo_opt_in(client):
+    response = client.post("/api/forex/backtest/walkforward", json={
+        "pair": "EURUSD",
+        "timeframe": "H1",
+        "candles": generate_dict_bars(count=40),
+    })
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "HISTORICAL_DATA_UNAVAILABLE"
+    assert client.get("/api/forex/backtest/runs").json()["count"] == 0
+
+
+def test_frontend_consumes_canonical_runs_and_escapes_structured_detail():
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "web/static/app.js").read_text(encoding="utf-8")
+
+    assert "const runs = data.runs || []" in source
+    assert "data.backtests" not in source
+    assert "r.total_trades != null" in source
+    assert "r.total_trades ||" not in source
+    assert "Technical details" in source
+    assert "Walk-forward splits (out-of-sample)" in source
+    assert "escapeText(r.data_source" in source
+    assert "reasons.map(reason => `<li>${escapeText(reason)}</li>`)" in source
+    assert "escapeText(JSON.stringify(data, null, 2))" in source
+
+
+def test_walkforward_provider_failure_is_safe_and_saves_nothing(client):
+    with patch(
+        "tradingagents.backtest.historical_data.load_historical_candles",
+        side_effect=RuntimeError("SENTINEL_PROVIDER_SECRET"),
+    ):
+        response = client.post("/api/forex/backtest/walkforward", json={
+            "pair": "EURUSD",
+            "timeframe": "H1",
+        })
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "WALK_FORWARD_FAILED"
+    assert "SENTINEL_PROVIDER_SECRET" not in response.text
+    assert client.get("/api/forex/backtest/runs").json()["count"] == 0

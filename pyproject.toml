@@ -36,6 +36,11 @@ dev = [
     "pytest>=8.0",
     "pytest-subtests>=0.13",
 ]
+# Browser binaries are installed separately with
+# `python -m playwright install chromium` (or `--with-deps chromium` in CI).
+e2e = [
+    "playwright>=1.49,<2",
+]
 # Amazon Bedrock support (AWS SigV4 auth + boto3). Optional so the core install
 # stays lean: pip install "tradingagents[bedrock]".
 bedrock = [

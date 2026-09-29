@@ -179,12 +179,21 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "forex_market_source": "mt5",
     "forex_allow_yahoo_fallback": False,
     "forex_broker_symbols": {},
+    "forex_default_pair": "EURUSD",
+    "forex_default_execution_timeframe": "H1",
+    "forex_default_context_timeframes": ["H4", "D1"],
+    "forex_default_risk_percent": 1.0,
+    "forex_min_rr": 1.5,
+    "forex_news_blackout_minutes": 120,
     "forex_quote_max_age_seconds": 30,
     "forex_max_spread_pips": 5.0,
     "forex_calendar_provider": "trading_economics",
     "forex_calendar_max_age_seconds": 900,
     "forex_calendar_archive_dir": None,
     "forex_news_archive_dir": None,
+    # Applied when a new MT5 observation service is created. Changing this
+    # while the service exists requires an application restart.
+    "mt5_poll_interval_seconds": 5.0,
     # Data vendor configuration
     # Category-level configuration (default for all tools in category).
     # The configured value is the exact vendor chain — requests are NOT silently

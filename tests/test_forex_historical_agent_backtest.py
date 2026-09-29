@@ -478,3 +478,10 @@ def test_api_run_backtest_historical_agent_mode():
         assert graph_config["max_debate_rounds"] == 3
         assert graph_config["historical_backtest"] is True
         assert mock_graph_cls.call_args.kwargs["selected_analysts"] == ["forex_technical"]
+
+        listed = client.get("/api/forex/backtest/runs").json()["runs"]
+        summary = next(run for run in listed if run["backtest_id"] == data["backtest_id"])
+        assert summary["mode"] == "HISTORICAL_AGENT_BACKTEST"
+        assert summary["data_source"] == data["data_source"]
+        assert summary["validation_status"] == "PARTIALLY_VALIDATED"
+        assert summary["validated_strategy_performance"] is False

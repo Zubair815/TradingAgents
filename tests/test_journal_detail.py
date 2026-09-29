@@ -182,5 +182,10 @@ def test_static_journal_wiring():
     assert html.index('/static/journal.js') < html.index('/static/app.js')
     assert "JournalUI.createController({ request: apiFetch, document })" in app
     assert "tradeDetail.loadTradeDetail(button.dataset.tradeId, button)" in app
+    assert "journalTab.click()" in app
+    assert "Source trade unavailable: no stored ID." in app
+    assert "data-proposal-id" in app
+    assert "openAppliedLesson" in app
+    assert "No applied lesson IDs were stored" in app
     assert '.journal-scroll { overflow-x: auto;' in css
     assert '@media (max-width: 850px)' in css

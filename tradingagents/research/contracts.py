@@ -64,9 +64,16 @@ class AnalysisRequest(Record):
     @classmethod
     def sync_timeframes(cls, data: Any) -> Any:
         if isinstance(data, dict):
+            from tradingagents.dataflows.config import get_config
             from tradingagents.forex.domain import Timeframe, get_default_context_timeframes
 
-            exec_tf = data.get("execution_timeframe") or data.get("timeframe") or "H1"
+            settings = get_config()
+            data.setdefault("pair", settings["forex_default_pair"])
+            data.setdefault("risk_percent", settings["forex_default_risk_percent"])
+            data.setdefault("min_rr", settings["forex_min_rr"])
+            data.setdefault("max_spread_pips", settings["forex_max_spread_pips"])
+            explicit_exec_tf = data.get("execution_timeframe") or data.get("timeframe")
+            exec_tf = explicit_exec_tf or settings["forex_default_execution_timeframe"]
             norm_exec_tf = Timeframe.from_string(exec_tf).value
             data["execution_timeframe"] = norm_exec_tf
             data["timeframe"] = norm_exec_tf
@@ -75,7 +82,8 @@ class AnalysisRequest(Record):
             if ctx_tfs is None:
                 ctx_tfs = data.get("higher_timeframes")
             if ctx_tfs is None:
-                ctx_tfs = tuple(tf.value for tf in get_default_context_timeframes(norm_exec_tf))
+                configured = settings.get("forex_default_context_timeframes") if not explicit_exec_tf else None
+                ctx_tfs = configured or tuple(tf.value for tf in get_default_context_timeframes(norm_exec_tf))
             else:
                 ctx_tfs = tuple(Timeframe.from_string(t).value for t in ctx_tfs)
                 if len(set(ctx_tfs)) != len(ctx_tfs):
