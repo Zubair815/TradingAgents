@@ -428,7 +428,7 @@
 
             <div class="form-group" id="apiKeyGroup" style="margin-bottom: 1rem; display: none;">
               <label class="form-label" for="apiKey">Dashboard API Key</label>
-              <input type="password" class="form-input" id="apiKey" placeholder="Enter API key if configured" spellcheck="false">
+              <input type="password" class="form-input" id="apiKey" autocomplete="off" placeholder="Enter API key if configured" spellcheck="false">
             </div>
 
             <div class="form-group" style="margin-bottom: 1rem;">
@@ -783,7 +783,7 @@
             </button>
           </div>
         </div>
-        <div class="data-table-container" id="journalTableContainer">
+        <div class="data-table-container journal-scroll" id="journalTableContainer" tabindex="0" role="region" aria-label="Forex trade journal">
           <div class="empty-state" style="padding: 2rem;">
             <div class="empty-state-icon">📖</div>
             <div class="empty-state-title">Journal Empty</div>
@@ -804,7 +804,10 @@
             <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
             Quantitative Performance Metrics
           </h2>
-          <button class="btn-secondary btn-sm" id="btnRefreshAnalytics">🔄 Refresh Analytics</button>
+          <div style="display:flex; gap:8px; align-items:center;">
+            <button class="btn-secondary btn-sm" id="btnRefreshAnalytics">🔄 Refresh Analytics</button>
+            <button class="btn-secondary btn-sm" id="btnRunCalibration">🧭 Run Calibration</button>
+          </div>
         </div>
 
         <div class="warning-banner" id="sampleSizeWarning">
@@ -834,6 +837,7 @@
             <span class="stat-sub">Peak-to-trough decline</span>
           </div>
         </div>
+        <div id="calibrationContainer" style="margin-top:1rem;"></div>
       </div>
 
       <!-- Segmentation Breakdown Table -->
@@ -943,7 +947,11 @@
               <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
               Backtest Runs &amp; Validations
             </h2>
-            <button class="btn-secondary btn-sm" id="btnRefreshBacktests">🔄 Refresh</button>
+            <div style="display:flex; gap:8px; align-items:center;">
+              <button class="btn-secondary btn-sm" id="btnRefreshBacktests">🔄 Refresh</button>
+              <button class="btn-secondary btn-sm" id="btnRunWalkForward">🧭 Run Walk-Forward</button>
+              <button class="btn-secondary btn-sm" id="btnRunAblation">🧩 Run Ablation</button>
+            </div>
           </div>
           <div id="backtestRunsContainer">
             <div class="empty-state" style="padding: 2.5rem;">
@@ -998,93 +1006,99 @@
             <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
             LLM Runtime Configuration
           </h2>
-          <div class="settings-row">
-            <span class="settings-key">Active Provider</span>
-            <span class="settings-val" id="settingProvider">Loading...</span>
+          <div class="settings-field">
+            <label for="settingProviderInput">Active Provider</label>
+            <select id="settingProviderInput"></select>
           </div>
-          <div class="settings-row">
-            <span class="settings-key">Quick Think Model</span>
-            <span class="settings-val" id="settingQuickModel">Loading...</span>
+          <div class="settings-field">
+            <label for="settingQuickModelInput">Quick Think Model</label>
+            <select id="settingQuickModelInput"></select>
           </div>
-          <div class="settings-row">
-            <span class="settings-key">Deep Think Model</span>
-            <span class="settings-val" id="settingDeepModel">Loading...</span>
+          <div class="settings-field">
+            <label for="settingDeepModelInput">Deep Think Model</label>
+            <select id="settingDeepModelInput"></select>
           </div>
-          <div class="settings-row">
-            <span class="settings-key">API Key Status</span>
+          <div class="settings-field">
+            <label>API Key Status</label>
             <span class="settings-val" id="settingApiKeyStatus" style="color:var(--green);">Protected / Hidden</span>
           </div>
+          <div class="settings-field">
+            <label for="settingBackendUrl">Custom Backend URL</label>
+            <input id="settingBackendUrl" type="url" placeholder="https://localhost:8000/v1" />
+          </div>
+          <div class="settings-actions">
+            <button class="btn-primary" id="btnSaveSettings" type="button">Save Changes</button>
+            <button class="btn-secondary" id="btnResetSettings" type="button">Reset Defaults</button>
+          </div>
+          <div id="settingsStatus" class="settings-status" aria-live="polite"></div>
         </div>
 
-        <!-- Forex & Multi-Timeframe Defaults -->
         <div class="settings-card">
           <h2 class="card-title">
             <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
             Forex Execution Defaults
           </h2>
-          <div class="settings-row">
-            <span class="settings-key">Default Currency Pair</span>
-            <span class="settings-val">EURUSD</span>
+          <div class="settings-field">
+            <label for="settingPair">Default Currency Pair</label>
+            <input id="settingPair" type="text" value="EURUSD" />
           </div>
-          <div class="settings-row">
-            <span class="settings-key">Execution Timeframe</span>
-            <span class="settings-val">H1 (1-Hour)</span>
+          <div class="settings-field">
+            <label for="settingTimeframe">Execution Timeframe</label>
+            <select id="settingTimeframe"><option>H1</option><option>M15</option><option>H4</option><option>D1</option></select>
           </div>
-          <div class="settings-row">
-            <span class="settings-key">Context Timeframes</span>
-            <span class="settings-val">M15, H4, D1</span>
+          <div class="settings-field">
+            <label for="settingContextTimeframes">Context Timeframes</label>
+            <input id="settingContextTimeframes" type="text" value="M15, H4, D1" />
           </div>
-          <div class="settings-row">
-            <span class="settings-key">Market Data Provider</span>
-            <span class="settings-val">AlphaVantage / MT5 Observer</span>
+          <div class="settings-field">
+            <label for="settingMarketSource">Market Data Provider</label>
+            <select id="settingMarketSource"><option value="mt5">MT5</option><option value="yahoo">Yahoo</option><option value="alpha_vantage">Alpha Vantage</option></select>
           </div>
         </div>
 
-        <!-- Deterministic Risk Parameters -->
         <div class="settings-card">
           <h2 class="card-title">
             <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
             Deterministic Risk Controls
           </h2>
-          <div class="settings-row">
-            <span class="settings-key">Default Risk Per Trade</span>
-            <span class="settings-val">1.0%</span>
+          <div class="settings-field">
+            <label for="settingRiskPercent">Default Risk Per Trade</label>
+            <input id="settingRiskPercent" type="number" min="0.1" max="10" step="0.1" value="1.0" />
           </div>
-          <div class="settings-row">
-            <span class="settings-key">Minimum Reward-to-Risk (RR)</span>
-            <span class="settings-val">1.50</span>
+          <div class="settings-field">
+            <label for="settingMinRR">Minimum Reward-to-Risk (RR)</label>
+            <input id="settingMinRR" type="number" min="0.5" max="10" step="0.1" value="1.5" />
           </div>
-          <div class="settings-row">
-            <span class="settings-key">Maximum Spread Threshold</span>
-            <span class="settings-val">3.0 Pips</span>
+          <div class="settings-field">
+            <label for="settingMaxSpread">Maximum Spread Threshold</label>
+            <input id="settingMaxSpread" type="number" min="0" max="50" step="0.1" value="3.0" />
           </div>
-          <div class="settings-row">
-            <span class="settings-key">High-Impact News Blackout</span>
-            <span class="settings-val">±30 Minutes</span>
+          <div class="settings-field">
+            <label for="settingNewsBlackout">High-Impact News Blackout</label>
+            <input id="settingNewsBlackout" type="number" min="0" max="180" step="5" value="30" />
           </div>
         </div>
 
-        <!-- MT5 Connection Settings -->
         <div class="settings-card">
           <h2 class="card-title">
             <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
             MetaTrader 5 Observer Settings
           </h2>
-          <div class="settings-row">
-            <span class="settings-key">Broker Execution Mode</span>
-            <span class="settings-val" style="color:var(--cyan);">Passive Observer Only</span>
+          <div class="settings-field">
+            <label for="settingBrokerMode">Broker Execution Mode</label>
+            <select id="settingBrokerMode"><option value="passive">Passive Observer Only</option><option value="manual">Manual</option></select>
           </div>
-          <div class="settings-row">
-            <span class="settings-key">Auto Order Placement</span>
-            <span class="settings-val" style="color:var(--red);">DISABLED (Hardcoded)</span>
+          <div class="settings-field">
+            <label for="settingAutoOrder">Auto Order Placement</label>
+            <select id="settingAutoOrder"><option value="false">DISABLED</option><option value="true">ENABLED</option></select>
           </div>
-          <div class="settings-row">
-            <span class="settings-key">Polling Interval</span>
-            <span class="settings-val">2.0 seconds</span>
+          <div class="settings-field">
+            <label for="settingPollInterval">Polling Interval</label>
+            <input id="settingPollInterval" type="number" min="0.5" max="30" step="0.5" value="2.0" />
           </div>
-          <div class="settings-row">
-            <span class="settings-key">Automatic Reflection</span>
-            <span class="settings-val" style="color:var(--green);">ENABLED on Close</span>
+          <div class="settings-field">
+            <label for="settingReflection">Automatic Reflection</label>
+            <select id="settingReflection"><option value="true">ENABLED</option><option value="false">DISABLED</option></select>
           </div>
         </div>
       </div>
@@ -1093,6 +1107,14 @@
   </div> <!-- End App Container -->
 
   <!-- ===== Report Detail Overlay ===== -->
+  <dialog id="tradeDetailDialog" class="trade-detail-dialog" aria-labelledby="tradeDetailTitle">
+    <header class="trade-detail-header">
+      <div><p class="trade-evidence-note">FOREX JOURNAL / INVESTIGATION</p><h2 id="tradeDetailTitle">Trade details</h2></div>
+      <button type="button" id="tradeDetailClose" class="btn-secondary" aria-label="Close trade details" autofocus>Close</button>
+    </header>
+    <div id="tradeDetailBody" class="trade-detail-body" aria-live="polite" aria-busy="false"></div>
+  </dialog>
+
   <div class="report-overlay" id="reportOverlay">
     <div class="report-modal">
       <div class="report-modal-header">
@@ -1106,6 +1128,7 @@
   <!-- ===== Toast ===== -->
   <div class="toast" id="toast"></div>
 
+  <script src="/static/journal.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

@@ -683,8 +683,9 @@ class TestMT5Routes:
         assert data_conn["status"] == "CONNECTED"
         assert data_conn["is_connected"] is True
         assert data_conn["connected"] is True
-        assert data_conn["login"] == 654321
-        assert data_conn["account_login"] == 654321
+        assert data_conn["login"] == "654***"
+        assert data_conn["account_login"] == "654***"
+        assert "654321" not in res_conn.text
         assert data_conn["masked_login"] == "654***"
         assert data_conn["server"] == "Demo-Server"
 
@@ -1342,7 +1343,7 @@ class TestForexAnalysisRuns:
             _run_forex_analysis(run_id, req)
 
         assert _forex_runs[run_id]["status"] == "failed"
-        assert "Broker connection timeout" in _forex_runs[run_id]["error"]
+        assert _forex_runs[run_id]["error"] == "The Forex analysis provider failed. Please retry."
         event_types = [evt["type"] for evt in _forex_run_events[run_id]]
         assert "error" in event_types
 
@@ -1854,7 +1855,7 @@ class TestForexAuthentication:
 
         fresh_client = TestClient(app)
         with patch.object(server, "DASHBOARD_API_KEY", ""):
-            fresh_client.cookies.set("tradingagents_session", server._SESSION_TOKEN)
+            fresh_client.get("/")
             res = fresh_client.post(
                 "/api/forex/journal/trades/manual-open",
                 json={"pair": "EURUSD", "action": "LONG", "entry_price": 1.0850, "lots": 0.1},

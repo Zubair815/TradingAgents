@@ -473,7 +473,8 @@ class TestMT5ConnectionManager:
         with pytest.raises(MT5ConnectionError) as exc_info:
             mgr.connect()
         assert mgr.status == MT5ConnectionStatus.FAILED
-        assert "Terminal process failed to start" in str(exc_info.value)
+        assert "Failed to initialize MetaTrader 5" in str(exc_info.value)
+        assert exc_info.value.code == -1
 
     def test_authorization_failure_raises_auth_error(self):
         mock_api = MockMT5API()
@@ -486,7 +487,9 @@ class TestMT5ConnectionManager:
                 mgr.connect(login=9999, password="bad_password", server="Broker-Live")
             assert mgr.status == MT5ConnectionStatus.FAILED
             assert mock_api.shutdown_calls >= 1
-            assert "Invalid password" in str(exc_info.value)
+            assert "MT5 authorization failed" in str(exc_info.value)
+            assert exc_info.value.code == -2
+            assert "bad_password" not in str(exc_info.value)
 
     def test_context_manager_connects_and_disconnects(self):
         mock_api = MockMT5API()

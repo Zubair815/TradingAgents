@@ -1,0 +1,15 @@
+{
+  "provenance": {
+    "source": "Yahoo", "symbol": "EURUSD=X", "canonical_symbol": "EURUSD",
+    "timeframe": "D1", "retrieved_at_utc": "2026-09-28T19:23:43.859150+00:00",
+    "execution_market": false, "price_basis": "provider_ohlc",
+    "requested_start": "2025-01-06T00:00:00Z", "requested_end": "2025-01-10T00:00:00Z"
+  },
+  "description": "Real Yahoo EURUSD=X daily OHLC fetched through fetch_forex_candles; non-execution-market history, not a contemporaneous news/macro vintage.",
+  "rows": [
+    ["2025-01-06T00:00:00Z", 1.0305347443, 1.0435036421, 1.0296328068, 1.0305347443],
+    ["2025-01-07T00:00:00Z", 1.0386372805, 1.0436234474, 1.0359473228, 1.0386372805],
+    ["2025-01-08T00:00:00Z", 1.0345541239, 1.0358400345, 1.0276752710, 1.0345541239],
+    ["2025-01-09T00:00:00Z", 1.0314701796, 1.0323113203, 1.0286160707, 1.0314701796]
+  ]
+}

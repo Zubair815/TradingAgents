@@ -664,7 +664,9 @@ class ForexTradingAgentsGraph:
             except Exception:
                 learning_mgr = None
 
-        if learning_mgr is not None and hasattr(learning_mgr, "retriever"):
+        from tradingagents.dataflows.forex_context import historical_market_context
+        historical = getattr(self, "config", {}).get("historical_backtest") or historical_market_context() is not None
+        if not historical and learning_mgr is not None and hasattr(learning_mgr, "retriever"):
             try:
                 retrieved = learning_mgr.retriever.retrieve_lessons(
                     pair=canon_pair,

@@ -517,6 +517,29 @@ def fetch_forex_candles(symbol, timeframe=Timeframe.H1, count=100, as_of=None,
                         start_date=None, end_date=None, use_cache=True, *, source=None,
                         allow_fallback=None, observer=None) -> pd.DataFrame:
     """Use MT5 by default; Yahoo is an explicit, labeled analytical fallback."""
+    from tradingagents.dataflows.forex_context import historical_market_context
+    from tradingagents.forex.domain import normalize_forex_pair
+    historical = historical_market_context()
+    if historical is not None:
+        pair, stored, bound = historical
+        raw_pair = symbol.symbol if isinstance(symbol, ForexPair) else str(symbol)
+        if normalize_forex_pair(raw_pair) != pair:
+            raise DataInsufficientError("pair unavailable in historical run dataset")
+        tf = resolve_timeframe(timeframe)
+        cutoff = min(bound, _ensure_utc_datetime(as_of)) if as_of is not None else bound
+        data = filter_candles_by_cutoff(stored, cutoff, stored.attrs["timeframe"])
+        if tf.value != stored.attrs["timeframe"]:
+            if tf.seconds < resolve_timeframe(stored.attrs["timeframe"]).seconds:
+                raise DataInsufficientError("lower timeframe unavailable in historical run dataset")
+            data = resample_candles(data, tf, stored.attrs["timeframe"])
+        data = filter_candles_by_cutoff(data, cutoff, tf)
+        if start_date is not None:
+            data = data.loc[data["Date"] >= _ensure_utc_datetime(start_date)]
+        if end_date is not None:
+            data = filter_candles_by_cutoff(data, min(cutoff, _ensure_utc_datetime(end_date)), tf)
+        if count is not None:
+            data = data.tail(count)
+        return validate_candles(data, tf, as_of=cutoff)
     config = get_config()
     provider = source or config.get("forex_market_source", "mt5")
     fallback = config.get("forex_allow_yahoo_fallback", False) if allow_fallback is None else allow_fallback

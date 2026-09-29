@@ -205,6 +205,7 @@ class ProposalMatcher:
                         ticket=match.broker_ticket,
                         actor="ProposalMatcher",
                     )
+                    match.trade_id = trade_id
                     self.lifecycle.timeline.record_event(
                         event_type=EventType.RECONCILIATION_MATCH,
                         trade_id=trade_id,

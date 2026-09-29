@@ -18,9 +18,7 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
-from tradingagents.agents.schemas_forex import ForexAction
 from tradingagents.database.models import (
-    TradeExitReason,
     TradeStatus,
 )
 
@@ -67,6 +65,10 @@ class MT5ObservationService:
             )
 
         self._lock = threading.RLock()
+        self._lifecycle_lock = threading.Lock()
+        self.last_poll_at = None
+        self.last_successful_poll_at = None
+        self.last_error = None
         self._stop_event = threading.Event()
         self._worker_thread: threading.Thread | None = None
 
@@ -75,6 +77,8 @@ class MT5ObservationService:
         self._known_orders: dict[int, MT5Order] = {}
         self._trade_position_map: dict[int, str] = {}  # ticket -> trade_id
         self._processed_deal_tickets: set[int] = set()
+        self._pending_post_close: set[str] = set()
+        self._closed_position_tickets: set[int] = set()
 
         # Reconstruct known state from journal
         self._reconstruct_state_from_journal()
@@ -83,18 +87,32 @@ class MT5ObservationService:
         """Reconstruct position-to-trade mappings and processed tickets from DB on startup."""
         with self._lock:
             try:
-                open_trades = self.journal.list_trades(status=TradeStatus.OPEN, limit=1000)
+                for trade in self.journal.list_trades(status=TradeStatus.CLOSED, limit=1000000):
+                    ticket = trade.metadata.get("broker_ticket")
+                    if ticket is not None:
+                        with contextlib.suppress(ValueError, TypeError):
+                            self._closed_position_tickets.add(int(ticket))
+                    if trade.metadata.get("post_close_status") in ("PENDING", "PROCESSING"):
+                        self._pending_post_close.add(trade.trade_id)
+                open_trades = self.journal.list_trades(status=TradeStatus.OPEN, limit=1000000)
                 for trade in open_trades:
                     ticket_raw = trade.metadata.get("broker_ticket") or trade.metadata.get("ticket")
                     if ticket_raw is not None:
                         with contextlib.suppress(ValueError, TypeError):
-                            self._trade_position_map[int(ticket_raw)] = trade.trade_id
+                            ticket = int(ticket_raw)
+                            self._trade_position_map[ticket] = trade.trade_id
+                            self._known_positions[ticket] = MT5Position(
+                                ticket=ticket, symbol=trade.pair, type=trade.action, volume=trade.lots,
+                                identifier=trade.metadata.get("broker_position_id", ticket),
+                                price_open=trade.open_price, sl=trade.stop_loss, tp=trade.take_profit or 0,
+                                time=datetime.fromisoformat(trade.open_time_utc),
+                            )
 
                 # Also load existing processed deals/events from trade timeline to guarantee idempotency across restarts
                 events = self.journal_mgr.timeline.get_events(limit=5000)
                 for evt in events:
                     payload = evt.payload or {}
-                    deal_ticket = payload.get("deal_ticket") or payload.get("ticket")
+                    deal_ticket = payload.get("deal_ticket")
                     if deal_ticket is not None:
                         with contextlib.suppress(ValueError, TypeError):
                             self._processed_deal_tickets.add(int(deal_ticket))
@@ -107,7 +125,7 @@ class MT5ObservationService:
 
     def start(self) -> None:
         """Start background polling thread."""
-        with self._lock:
+        with self._lifecycle_lock:
             if self.is_running:
                 logger.info("MT5ObservationService already running.")
                 return
@@ -121,270 +139,159 @@ class MT5ObservationService:
             self._worker_thread.start()
             logger.info("MT5ObservationService background thread started (interval=%.1fs).", self.poll_interval)
 
-    def stop(self, timeout: float = 5.0) -> None:
-        """Stop background worker cleanly."""
-        with self._lock:
-            if not self.is_running:
-                return
-
+    def stop(self, timeout: float = 5.0) -> bool:
+        """Bounded join; retain a live thread reference to prevent duplicate workers."""
+        with self._lifecycle_lock:
             self._stop_event.set()
             thread = self._worker_thread
-            self._worker_thread = None
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=max(0, timeout))
+        return not self.is_running
 
-        if thread is not None:
-            thread.join(timeout=timeout)
-            logger.info("MT5ObservationService stopped.")
+    def status(self):
+        return {
+            "service_running": self.is_running,
+            "mt5_connected": bool(self.observer.connection.is_connected()),
+            "last_poll_at": self.last_poll_at,
+            "last_successful_poll_at": self.last_successful_poll_at,
+            "last_error": self.last_error,
+            "poll_interval": self.poll_interval,
+            "tracked_positions": len(self._trade_position_map),
+            "tracked_orders": len(self._known_orders),
+        }
 
     def _run_loop(self) -> None:
         """Background thread execution loop with backoff on failure."""
         backoff = 1.0
         while not self._stop_event.is_set():
             try:
+                if not self.observer.connection.is_connected():
+                    self._stop_event.wait(self.poll_interval)
+                    continue
                 self.poll_once()
                 backoff = 1.0  # reset on successful poll
             except MT5Error as exc:
-                logger.debug("MT5 terminal unreachable during observation poll: %s", exc)
+                logger.debug("MT5 observation unavailable (%s)", type(exc).__name__)
                 backoff = min(backoff * 1.5, 30.0)
             except Exception as exc:
-                logger.error("Unexpected error in MT5 observation poll loop: %s", exc, exc_info=True)
+                logger.error("MT5 observation failed (%s)", type(exc).__name__)
                 backoff = min(backoff * 1.5, 30.0)
 
             sleep_time = min(self.poll_interval * backoff, 30.0)
             self._stop_event.wait(timeout=sleep_time)
 
     def poll_once(self) -> dict[str, Any]:
-        """Perform a single deterministic synchronization cycle.
+        """Observe snapshots and apply only broker-confirmed fills, once per deal."""
+        from tradingagents.journal.broker_deals import record_broker_deal
 
-        Returns summary of detected events during this cycle.
-        """
-        with self._lock:
-            events_detected: list[dict[str, Any]] = []
-
-            # 1. Fetch current MT5 snapshots
-            try:
+        self.last_poll_at = datetime.now(timezone.utc).isoformat()
+        try:
+            with self._lock:
                 current_positions = {p.ticket: p for p in self.observer.get_open_positions()}
-            except Exception as exc:
-                raise MT5Error(f"Could not read MT5 positions: {exc}") from exc
-
-            try:
                 current_orders = {o.ticket: o for o in self.observer.get_pending_orders()}
-            except Exception as exc:
-                raise MT5Error(f"Could not read MT5 orders: {exc}") from exc
+                # Do not truncate history to 50 fills or infer closes from missing positions.
+                earliest = min((p.time for p in [*self._known_positions.values(), *current_positions.values()]), default=None)
+                deals = sorted(self.observer.get_deals(date_from=earliest, date_to=datetime.now(timezone.utc), count=None),
+                               key=lambda d: (d.time, d.ticket))
+                events = []
+                for ticket, order in current_orders.items():
+                    if ticket not in self._known_orders:
+                        self.journal_mgr.timeline.record_event(
+                            event_type=EventType.ORDER_SUBMITTED, broker_order_id=str(ticket),
+                            event_id=f"mt5-order:{ticket}", actor="MT5Observer",
+                            payload={"ticket": ticket, "symbol": order.symbol, "volume": order.volume_current},
+                        )
+                        events.append({"type": "NEW_ORDER", "ticket": ticket})
+                self._known_orders = current_orders
 
-            try:
-                recent_deals = self.observer.get_deals(count=50)
-            except Exception as exc:
-                recent_deals = []
-                logger.debug("Could not read MT5 deals: %s", exc)
-
-            # 2. Detect New Pending Orders
-            for ticket, order in current_orders.items():
-                if ticket not in self._known_orders:
-                    self._known_orders[ticket] = order
-                    evt_data = {
-                        "ticket": ticket,
-                        "symbol": order.symbol,
-                        "order_type": order.type.value if hasattr(order.type, "value") else str(order.type),
-                        "volume": order.volume_current,
-                        "price": order.price_open,
-                        "sl": order.sl,
-                        "tp": order.tp,
-                    }
-                    self._emit_event(
-                        EventType.ORDER_SUBMITTED,
-                        f"Detected new MT5 pending order #{ticket} ({order.symbol} {order.volume_current} lots @ {order.price_open})",
-                        evt_data,
-                    )
-                    events_detected.append({"type": "NEW_ORDER", **evt_data})
-
-            # 3. Detect New Positions or Reconciliation
-            for ticket, pos in current_positions.items():
-                if ticket not in self._known_positions and ticket not in self._trade_position_map:
-                    # New position detected
-                    trade_id = self._handle_new_position(pos)
-                    if trade_id:
+                for ticket, pos in current_positions.items():
+                    if ticket in self._closed_position_tickets:
+                        continue  # A position snapshot can lag its confirmed final deal.
+                    if ticket not in self._trade_position_map:
+                        # Replay already observed scale-outs from the original volume.
+                        prior_exits = sum(d.volume for d in deals if d.position_id == (pos.identifier or ticket)
+                                          and d.entry in ("OUT", "OUT_BY"))
+                        initial = pos.model_copy(update={"volume": pos.volume + prior_exits})
+                        trade_id = self._handle_new_position(initial)
                         self._trade_position_map[ticket] = trade_id
                         self._known_positions[ticket] = pos
-                        events_detected.append({
-                            "type": "NEW_POSITION",
-                            "ticket": ticket,
-                            "trade_id": trade_id,
-                            "symbol": pos.symbol,
-                            "volume": pos.volume,
-                            "open_price": pos.price_open,
-                        })
-                elif ticket not in self._known_positions and ticket in self._trade_position_map:
-                    # Pre-mapped position from database reconstruction
-                    self._known_positions[ticket] = pos
-                elif ticket in self._known_positions:
-                    # Existing position: check for SL, TP, or Volume changes
-                    prev_pos = self._known_positions[ticket]
-                    trade_id = self._trade_position_map.get(ticket)
-
-                    # Check SL modification
-                    if abs((pos.sl or 0.0) - (prev_pos.sl or 0.0)) > 1e-6:
-                        if trade_id:
-                            self.journal_mgr.modify_stop_loss(
-                                trade_id=trade_id,
-                                new_stop_loss=pos.sl or 0.0,
-                                reason="MT5 terminal SL modification",
-                                actor="MT5Observer",
-                            )
-                        events_detected.append({
-                            "type": "SL_MODIFIED",
-                            "ticket": ticket,
-                            "trade_id": trade_id,
-                            "old_sl": prev_pos.sl,
-                            "new_sl": pos.sl,
-                        })
-
-                    # Check TP modification
-                    if abs((pos.tp or 0.0) - (prev_pos.tp or 0.0)) > 1e-6:
-                        if trade_id:
-                            self.journal_mgr.modify_take_profit(
-                                trade_id=trade_id,
-                                new_take_profit=pos.tp or 0.0,
-                                reason="MT5 terminal TP modification",
-                                actor="MT5Observer",
-                            )
-                        events_detected.append({
-                            "type": "TP_MODIFIED",
-                            "ticket": ticket,
-                            "trade_id": trade_id,
-                            "old_tp": prev_pos.tp,
-                            "new_tp": pos.tp,
-                        })
-
-                    # Check Partial Close (volume reduction)
-                    if pos.volume < prev_pos.volume - 1e-5:
-                        volume_closed = round(prev_pos.volume - pos.volume, 2)
-                        close_price = pos.price_current or pos.price_open
-                        for deal in recent_deals:
-                            if (
-                                deal.position_id == ticket
-                                and deal.ticket not in self._processed_deal_tickets
-                                and deal.volume
-                                and abs(deal.volume - volume_closed) < 1e-4
-                            ):
-                                close_price = deal.price
-                                self._processed_deal_tickets.add(deal.ticket)
-                                break
-
-                        if trade_id:
-                            self.journal_mgr.partial_close(
-                                trade_id=trade_id,
-                                lots_to_close=volume_closed,
-                                close_price=close_price,
-                                exit_reason=TradeExitReason.TAKE_PROFIT,
-                                actor="MT5Observer",
-                            )
-                        events_detected.append({
-                            "type": "PARTIAL_CLOSE",
-                            "ticket": ticket,
-                            "trade_id": trade_id,
-                            "volume_closed": volume_closed,
-                            "remaining_volume": pos.volume,
-                            "close_price": close_price,
-                        })
-
-                    # Update known state
+                        events.append({"type": "NEW_POSITION", "ticket": ticket, "trade_id": trade_id})
+                    trade_id = self._trade_position_map[ticket]
+                    trade = self.journal.get_trade(trade_id)
+                    # Compare persisted levels, so reconnect/restart doesn't lose modifications.
+                    if abs((pos.sl or 0)-(trade.stop_loss or 0)) > 1e-6:
+                        self.journal_mgr.modify_stop_loss(trade_id, pos.sl or 0, actor="MT5Observer")
+                        events.append({"type": "SL_MODIFIED", "ticket": ticket, "trade_id": trade_id})
+                    if abs((pos.tp or 0)-(trade.take_profit or 0)) > 1e-6:
+                        self.journal_mgr.modify_take_profit(trade_id, pos.tp or 0, actor="MT5Observer")
+                        events.append({"type": "TP_MODIFIED", "ticket": ticket, "trade_id": trade_id})
                     self._known_positions[ticket] = pos
 
-            # 4. Detect Closed Positions (in _known_positions but no longer in current_positions)
-            closed_tickets = [t for t in self._known_positions if t not in current_positions]
-            for ticket in closed_tickets:
-                pos = self._known_positions.pop(ticket)
-                trade_id = self._trade_position_map.pop(ticket, None)
-
-                # Look for matching exit deal
-                exit_price = pos.price_current or pos.price_open
-                exit_profit = pos.profit
-                exit_commission = 0.0
-                exit_swap = pos.swap
-                exit_time = datetime.now(timezone.utc).isoformat()
-                exit_reason = TradeExitReason.MANUAL
-
-                for deal in recent_deals:
-                    if deal.position_id == ticket and deal.ticket not in self._processed_deal_tickets:
-                        exit_price = deal.price
-                        exit_profit = deal.profit
-                        exit_commission = deal.commission
-                        exit_swap = deal.swap
-                        exit_time = deal.time.isoformat() if hasattr(deal.time, "isoformat") else str(deal.time)
-                        self._processed_deal_tickets.add(deal.ticket)
-                        break
-
-                # Determine exit reason (SL, TP, or MANUAL)
-                if pos.sl and abs(exit_price - pos.sl) < (0.0005 if "JPY" not in pos.symbol else 0.05):
-                    exit_reason = TradeExitReason.STOP_LOSS
-                elif pos.tp and abs(exit_price - pos.tp) < (0.0005 if "JPY" not in pos.symbol else 0.05):
-                    exit_reason = TradeExitReason.TAKE_PROFIT
-
-                if trade_id:
-                    self.journal_mgr.close_trade(
-                        trade_id=trade_id,
-                        close_price=exit_price,
-                        exit_reason=exit_reason,
-                        close_time=exit_time,
-                        gross_profit=exit_profit,
-                        commission=exit_commission,
-                        swap=exit_swap,
-                        actor="MT5Observer",
-                    )
-                    # Automatically trigger closed-trade pipeline (Phase 13)
-                    if self.post_close_processor is not None:
+                for ticket, trade_id in list(self._trade_position_map.items()):
+                    pos = self._known_positions.get(ticket)
+                    position_id = (pos.identifier or ticket) if pos else ticket
+                    for deal in deals:
+                        if deal.position_id != position_id:
+                            continue
+                        kind = record_broker_deal(self.journal, trade_id, deal)
+                        if kind:
+                            self._processed_deal_tickets.add(deal.ticket)
+                            if kind != "DEAL_FILLED":
+                                events.append({"type": kind, "ticket": ticket, "trade_id": trade_id,
+                                               "volume_closed": deal.volume, "deal_ticket": deal.ticket})
+                    trade = self.journal.get_trade(trade_id)
+                    if trade.status == TradeStatus.CLOSED:
+                        self._closed_position_tickets.add(ticket)
+                        self._trade_position_map.pop(ticket, None)
+                        self._known_positions.pop(ticket, None)
+                        self._pending_post_close.add(trade_id)
+                for trade_id in list(self._pending_post_close):
+                    try:
+                        self.post_close_processor.process_closed_trade(trade_id=trade_id)
+                    except Exception as exc:
+                        self.journal.update_trade_metadata(trade_id, {
+                            "post_close_status": "FAILED", "post_close_error": type(exc).__name__,
+                        })
+                        logger.error("Post-close processing failed for %s (%s)", trade_id, type(exc).__name__)
+                    self._pending_post_close.discard(trade_id)
+                if self.on_event_callback:
+                    for event in events:
                         try:
-                            self.post_close_processor.process_closed_trade(trade_id=trade_id)
-                        except Exception as proc_err:
-                            logger.error("Error in automated post-close pipeline for trade %s: %s", trade_id, proc_err)
-
-                events_detected.append({
-                    "type": "POSITION_CLOSED",
-                    "ticket": ticket,
-                    "trade_id": trade_id,
-                    "close_price": exit_price,
-                    "exit_reason": exit_reason.value,
-                    "profit": exit_profit,
-                })
-
-            return {
-                "events_count": len(events_detected),
-                "events": events_detected,
-                "open_positions_count": len(current_positions),
-                "pending_orders_count": len(current_orders),
-            }
+                            self.on_event_callback(event["type"], event)
+                        except Exception as exc:
+                            logger.warning("Observation callback failed (%s)", type(exc).__name__)
+                self.last_successful_poll_at = datetime.now(timezone.utc).isoformat()
+                self.last_error = None
+                return {"events_count": len(events), "events": events,
+                        "open_positions_count": len(current_positions), "pending_orders_count": len(current_orders)}
+        except Exception as exc:
+            # Never expose vendor exception strings, which may contain credentials.
+            self.last_error = type(exc).__name__
+            raise
 
     def _handle_new_position(self, pos: MT5Position) -> str:
-        """Reconcile new position against approved proposals or record as manual trade."""
-        if self.auto_reconcile:
-            match_results = self.journal_mgr.reconcile_broker_positions([pos], auto_reconcile=True)
-            if match_results and match_results[0].is_matched and match_results[0].trade_id:
-                return match_results[0].trade_id
-
-        if isinstance(pos.type, ForexAction):
-            action = pos.type
-        elif str(pos.type).upper() in ("0", "BUY", "LONG", "FOREXACTION.LONG"):
-            action = ForexAction.LONG
+        """Use the existing matcher; retain ambiguous candidates for human review."""
+        results = self.journal_mgr.reconcile_broker_positions([pos], auto_reconcile=self.auto_reconcile)
+        match = results[0] if results else None
+        if match and match.is_matched and match.trade_id:
+            trade_id = match.trade_id
         else:
-            action = ForexAction.SHORT
-        trade = self.journal.record_trade_open(
-            pair=pos.symbol,
-            action=action,
-            open_price=pos.price_open,
-            stop_loss=pos.sl or 0.0,
-            take_profit=pos.tp,
-            lots=pos.volume,
-            proposal_id=None,
-            metadata={"broker_ticket": str(pos.ticket), "source": "MANUAL_UNPLANNED"},
-        )
-        self.journal_mgr.timeline.record_event(
-            event_type=EventType.POSITION_OPENED,
-            trade_id=trade.trade_id,
-            actor="MT5Observer",
-            description=f"Recorded manual unplanned trade #{pos.ticket} ({pos.symbol} {pos.volume} lots @ {pos.price_open})",
-            payload={"ticket": pos.ticket, "symbol": pos.symbol, "volume": pos.volume, "price": pos.price_open},
-        )
-        return trade.trade_id
+            trade_id, _ = self.journal_mgr.matcher.record_manual_unplanned_trade(pos)
+        self.journal.update_trade_metadata(trade_id, {
+            "broker_ticket": str(pos.ticket), "broker_position_id": pos.identifier or pos.ticket,
+            "initial_stop_loss": pos.sl or 0, "initial_lots": pos.volume,
+            "reconciliation": match.model_dump(mode="json") if match else {},
+        })
+        # Preserve broker opening time for the M1 holding-window request.
+        with self.journal._lock:
+            conn = self.journal._get_connection()
+            try:
+                with conn:
+                    conn.execute("UPDATE trades SET open_time_utc=? WHERE trade_id=?", (pos.time.isoformat(), trade_id))
+            finally:
+                if conn is not self.journal._mem_conn:
+                    conn.close()
+        return trade_id
 
     def _emit_event(self, event_type: EventType, description: str, data: dict[str, Any]) -> None:
         """Log event to timeline and trigger callback if registered."""

@@ -92,8 +92,9 @@ def _parse_timestamp(val: Any) -> datetime:
 class MT5Observer:
     """Read-only inspection and market observation adapter for MetaTrader 5."""
 
-    def __init__(self, connection: MT5ConnectionManager | None = None):
+    def __init__(self, connection: MT5ConnectionManager | None = None, *, auto_connect: bool = True):
         self.connection = connection or MT5ConnectionManager()
+        self.auto_connect = auto_connect
 
     @property
     def api(self) -> Any:
@@ -102,6 +103,9 @@ class MT5Observer:
     def _ensure_connected(self) -> None:
         """Verify connection or attempt auto-connect."""
         if not self.connection.is_connected():
+            if not self.auto_connect:
+                from tradingagents.mt5.errors import MT5ConnectionError
+                raise MT5ConnectionError("MT5 is disconnected; connect explicitly to resume observation")
             logger.info("MT5Observer: connection not active; connecting...")
             self.connection.connect()
 
@@ -367,6 +371,7 @@ class MT5Observer:
             positions.append(
                 MT5Position(
                     ticket=int(_get_field(p, "ticket", 0)),
+                    identifier=int(_get_field(p, "identifier", _get_field(p, "ticket", 0))),
                     time=dt,
                     type=action,
                     magic=int(_get_field(p, "magic", 0)),
@@ -499,6 +504,8 @@ class MT5Observer:
                     price=float(_get_field(d, "price", 0.0)),
                     commission=float(_get_field(d, "commission", 0.0)),
                     swap=float(_get_field(d, "swap", 0.0)),
+                    fee=float(_get_field(d, "fee", 0.0)),
+                    reason=int(_get_field(d, "reason", 0)),
                     profit=float(_get_field(d, "profit", 0.0)),
                     comment=str(_get_field(d, "comment", "")),
                 )

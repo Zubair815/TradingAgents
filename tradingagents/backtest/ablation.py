@@ -336,6 +336,9 @@ class ForexAblationReport:
     def to_dict(self) -> dict[str, Any]:
         return {
             "study_id": self.study_id,
+            "validated_strategy_performance": False,
+            "validation_status": "DEMO",
+            "validation_reasons": ["Exploratory comparison of caller-supplied data; rankings are not statistical validation."],
             "pair": self.pair,
             "timeframe": self.timeframe,
             "start_date": self.start_date,
@@ -435,6 +438,7 @@ class ForexAblationRunner:
                 pipeline_callable = pipeline_factory(var)
                 ag_cfg = AgentBacktestConfig(
                     pair=self.pair,
+                    mode="DEMO",  # Caller-supplied experiment candles are unverified.
                     timeframe=self.timeframe,
                     sampling_interval=var.sampling_interval,
                     max_analysis_points=var.max_analysis_points,
@@ -686,6 +690,7 @@ class ForexAblationRunner:
         """Render institutional Markdown scorecards and audit comparisons."""
         lines = [
             f"# Forex Multi-Agent Ablation Study Report (`{study_id}`)",
+            "> Illustrative comparison only. A minimum trade count does not establish statistical significance or validated strategy performance.",
             "",
             f"**Pair:** `{pair}` | **Timeframe:** `{timeframe}` | **Total Bars:** `{total_bars}`",
             f"**Interval:** `{start_date}` to `{end_date}`",
@@ -746,7 +751,7 @@ class ForexAblationRunner:
             "",
         ])
         if winner_declared and winning_name:
-            lines.append(f"- **Audited Superior Variant:** **{winning_name}** (statistically valid N >= {self.min_sample_size}).")
+            lines.append(f"- **Highest scoring variant in this sample:** **{winning_name}** (N >= {self.min_sample_size}; statistical significance not established).")
         else:
             lines.append(
                 f"- **Verdict:** **NO WINNER DECLARED**. {warning or 'Insufficient sample sizes across variants.'}"

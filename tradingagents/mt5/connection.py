@@ -53,12 +53,12 @@ class MT5ConnectionManager:
             try:
                 import MetaTrader5 as real_mt5
                 self._mt5 = real_mt5
-            except ImportError:
+            except (ImportError, OSError):
                 self._mt5 = None
 
     def __repr__(self) -> str:
         return (
-            f"MT5Connection(login={self.login}, server={self.server!r}, "
+            f"MT5Connection(login={'***' if self.login else None}, server={self.server!r}, "
             f"status={self.status.value!r}, password={'***' if self.password else None})"
         )
 
@@ -86,11 +86,11 @@ class MT5ConnectionManager:
             MT5AuthorizationError: If account login credentials fail.
             MT5ConnectionError: If terminal IPC initialization fails.
         """
-        mt5 = self.api
-
         eff_path = str(path) if path is not None else self.path
         eff_login = int(login) if login is not None else self.login
         eff_password = password if password is not None else self.password
+        self.password = None  # Constructor credentials are consumed once, never retained after a request.
+        mt5 = self.api
         eff_server = server if server is not None else self.server
         eff_timeout = timeout if timeout is not None else self.timeout
         eff_portable = portable if portable is not None else self.portable
@@ -113,12 +113,12 @@ class MT5ConnectionManager:
                 init_success = mt5.initialize(**init_kwargs)
             except Exception as exc:
                 self.status = MT5ConnectionStatus.FAILED
-                raise MT5ConnectionError(f"Exception during MT5 initialization: {exc}") from exc
+                raise MT5ConnectionError("MT5 initialization failed") from exc
 
             if not init_success:
                 code, desc = self._get_last_error()
                 self.status = MT5ConnectionStatus.FAILED
-                raise MT5ConnectionError(f"Failed to initialize MetaTrader 5: {desc}", code=code)
+                raise MT5ConnectionError("Failed to initialize MetaTrader 5", code=code)
 
             # If account credentials provided, authorize via mt5.login
             if eff_login is not None:
@@ -134,7 +134,7 @@ class MT5ConnectionManager:
                     self.status = MT5ConnectionStatus.FAILED
                     with contextlib.suppress(Exception):
                         mt5.shutdown()
-                    raise MT5AuthorizationError(f"Exception during MT5 login: {exc}") from exc
+                    raise MT5AuthorizationError("MT5 authorization failed") from exc
 
                 if not authorized:
                     code, desc = self._get_last_error()
@@ -142,24 +142,28 @@ class MT5ConnectionManager:
                     with contextlib.suppress(Exception):
                         mt5.shutdown()
                     raise MT5AuthorizationError(
-                        f"Failed to authorize account {eff_login} on server {eff_server}: {desc}",
+                        "MT5 authorization failed",
                         code=code,
                     )
 
 
             self.status = MT5ConnectionStatus.CONNECTED
+            self.login = eff_login
+            self.server = eff_server
+            self.path = eff_path
             logger.info("MetaTrader 5 connection established successfully.")
             return True
 
     def disconnect(self) -> None:
         """Shutdown and terminate the MetaTrader 5 connection."""
         if self._mt5 is None:
+            self.status = MT5ConnectionStatus.DISCONNECTED
             return
         with self._lock:
             try:
                 self._mt5.shutdown()
             except Exception as exc:
-                logger.warning("Error during MT5 shutdown: %s", exc)
+                logger.warning("Error during MT5 shutdown (%s)", type(exc).__name__)
             finally:
                 self.status = MT5ConnectionStatus.DISCONNECTED
                 logger.info("MetaTrader 5 connection closed.")

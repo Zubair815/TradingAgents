@@ -44,6 +44,9 @@ CURRENCY_POLICY_RATE_SERIES: dict[str, tuple[str, str]] = {
 
 def _fetch_macro_safe(indicator: str, curr_date: str, look_back_days: int = 365) -> str:
     """Fetch a FRED macro series, returning a user-friendly message on failure."""
+    from tradingagents.dataflows.forex_context import historical_market_context
+    if historical_market_context() is not None:
+        return "MACRO_UNAVAILABLE: no verified intraday historical observation archive for this series."
     try:
         return route_to_vendor("get_macro_indicators", indicator, curr_date, look_back_days)
     except Exception as exc:

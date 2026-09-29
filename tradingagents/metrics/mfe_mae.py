@@ -182,8 +182,8 @@ def calculate_mfe_mae(
             filtered_candles.append((c_high, c_low, ts))
 
 
-    # If timestamp filtering resulted in empty set, fall back to parsed_candles
-    active_candles = filtered_candles if filtered_candles else parsed_candles
+    # Bars outside a known holding window cannot substitute for missing history.
+    active_candles = filtered_candles if open_dt is not None else parsed_candles
 
     # Calculate stop distance in pips
     sl_dist_price = open_price - stop_loss if act == ForexAction.LONG else stop_loss - open_price
@@ -378,7 +378,7 @@ def calculate_trade_mfe_mae(
     if isinstance(trade, TradeJournalRecord):
         return calculate_mfe_mae(
             open_price=trade.open_price,
-            stop_loss=trade.stop_loss,
+            stop_loss=float(trade.metadata.get("initial_stop_loss", trade.stop_loss)),
             action=trade.action,
             pair=trade.pair,
             candles=candles,

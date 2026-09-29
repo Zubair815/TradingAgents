@@ -123,6 +123,7 @@ class MT5Position(BaseModel):
     """Live open position currently managed in the MT5 terminal."""
 
     ticket: int = Field(description="Unique position ticket ID")
+    identifier: int = Field(default=0, description="Stable broker position identifier used by history deals")
     time: datetime = Field(description="Position opening timestamp (UTC)")
     type: ForexAction = Field(description="Position direction (LONG / SHORT)")
     magic: int = Field(default=0, description="Expert Advisor magic number")
@@ -200,4 +201,6 @@ class MT5Deal(BaseModel):
     commission: float = Field(default=0.0, description="Charged commission")
     swap: float = Field(default=0.0, description="Swap booked on closing")
     profit: float = Field(default=0.0, description="Realized gross profit/loss")
+    fee: float = Field(default=0.0, description="Signed broker execution fee")
+    reason: int = Field(default=0, description="Broker deal reason, including SL and TP")
     comment: str = Field(default="", description="Deal comment")

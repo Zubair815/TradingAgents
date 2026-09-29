@@ -499,7 +499,8 @@ def test_web_routes_skipped_metrics_endpoints():
     from fastapi import FastAPI
     app = FastAPI()
     app.include_router(router)
-    client = TestClient(app)
+    from web.server import _SESSION_TOKEN, DASHBOARD_API_KEY
+    client = TestClient(app, headers={"X-API-Key": DASHBOARD_API_KEY or _SESSION_TOKEN})
 
     # 1. GET /api/forex/metrics/skipped
     res_list = client.get("/api/forex/metrics/skipped")

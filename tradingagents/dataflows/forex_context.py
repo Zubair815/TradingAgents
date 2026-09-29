@@ -1,10 +1,27 @@
 """One UTC observation cutoff for Forex graph inputs and tool requests."""
 
-from contextlib import suppress
+from contextlib import contextmanager, suppress
+from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 
 from tradingagents.dataflows.forex_quality import DataInsufficientError
 from tradingagents.forex.calendar import _calendar_cutoff
+
+_historical_market = ContextVar("historical_forex_market", default=None)
+
+
+@contextmanager
+def historical_market_scope(pair, frame, cutoff):
+    """Bind graph tool calls to an immutable run dataset and observation time."""
+    token = _historical_market.set((pair, frame.copy(deep=True), cutoff))
+    try:
+        yield
+    finally:
+        _historical_market.reset(token)
+
+
+def historical_market_context():
+    return _historical_market.get()
 
 
 def resolve_forex_cutoff(requested=None, trade_date="", run_as_of=""):

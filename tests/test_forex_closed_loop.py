@@ -233,6 +233,7 @@ def test_closed_loop_with_premature_exit_learns_runner_discipline(temp_journal_a
 
     # Manual execution
     trade_id = "trd_gbpusd_premature"
+    t0 = datetime.now(timezone.utc) - timedelta(hours=2)
     journal.record_trade_open(
         trade_id=trade_id,
         proposal_id=prop_id,
@@ -242,6 +243,7 @@ def test_closed_loop_with_premature_exit_learns_runner_discipline(temp_journal_a
         stop_loss=1.25600,
         take_profit=1.27200,
         lots=1.0,
+        open_time_utc=t0.isoformat(),
     )
 
     # Closed prematurely for small profit (+15 pips / +0.375R)
@@ -253,7 +255,6 @@ def test_closed_loop_with_premature_exit_learns_runner_discipline(temp_journal_a
     )
 
     # M1 history shows price went straight to 1.27150 (+115 pips / +2.875R MFE)
-    t0 = datetime.now(timezone.utc) - timedelta(hours=2)
     candles = [
         ForexBar(timestamp=t0, open=1.26000, high=1.27150, low=1.25950, close=1.26150, volume=100.0),
     ]

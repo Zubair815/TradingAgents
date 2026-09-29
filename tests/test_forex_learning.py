@@ -445,6 +445,7 @@ def test_forex_learning_manager_end_to_end(tmp_path: Path):
     manager = ForexLearningManager(journal=journal)
 
     # 1. Open trade in journal
+    t0 = datetime.now(timezone.utc) - timedelta(hours=2)
     open_rec = journal.record_trade_open(
         pair="EURUSD",
         action=ForexAction.LONG,
@@ -452,6 +453,7 @@ def test_forex_learning_manager_end_to_end(tmp_path: Path):
         stop_loss=1.0750,
         take_profit=1.0950,
         lots=1.0,
+        open_time_utc=t0.isoformat(),
     )
 
     # 2. Close trade (e.g. premature exit)
@@ -462,7 +464,6 @@ def test_forex_learning_manager_end_to_end(tmp_path: Path):
     )
 
     # 3. Provide candles showing massive runner excursion to 1.0960
-    t0 = datetime.now(timezone.utc) - timedelta(hours=2)
     candles = [
         ForexBar(timestamp=t0, open=1.0800, high=1.0960, low=1.0790, close=1.0825, volume=100.0),
     ]

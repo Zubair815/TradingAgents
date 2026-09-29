@@ -335,7 +335,8 @@ def test_api_performance_route():
     set_forex_dependencies(journal=journal, metrics_manager=metrics_mgr)
     app = FastAPI()
     app.include_router(router)
-    client = TestClient(app)
+    from web.server import _SESSION_TOKEN, DASHBOARD_API_KEY
+    client = TestClient(app, headers={"X-API-Key": DASHBOARD_API_KEY or _SESSION_TOKEN})
 
     res = client.get("/api/forex/analytics/performance")
     assert res.status_code == 200

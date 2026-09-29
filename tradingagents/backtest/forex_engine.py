@@ -199,6 +199,8 @@ class ForexBacktestResult:
     ambiguous_trades_count: int = 0
     mode: str = "DEMO"
     validated_strategy_performance: bool = False
+    validation_status: str = "DEMO"
+    validation_reasons: list[str] = field(default_factory=lambda: ["Illustrative/demo only; no strategy validation."])
 
     def render_markdown_report(self) -> str:
         """Render a formatted institutional Markdown performance card."""

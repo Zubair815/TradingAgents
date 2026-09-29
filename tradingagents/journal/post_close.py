@@ -28,7 +28,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from tradingagents.database.journal import ForexTradeJournal
-from tradingagents.database.models import TradeExitReason, TradeStatus
+from tradingagents.database.models import TradeStatus
 from tradingagents.learning.history_provider import MT5TradeHistoryProvider, TradeHistoryProvider
 from tradingagents.metrics.execution import compare_proposal_against_execution
 from tradingagents.metrics.mfe_mae import calculate_trade_mfe_mae, parse_utc_timestamp
@@ -102,7 +102,8 @@ class ClosedTradeProcessor:
                 st = trade.metadata.get("post_close_status")
                 if st:
                     try:
-                        return PostCloseProcessingStatus(st)
+                        # An in-flight marker from another process lifetime is retryable.
+                        return PostCloseProcessingStatus.FAILED if st == "PROCESSING" else PostCloseProcessingStatus(st)
                     except ValueError:
                         pass
                 if trade.reflection:
@@ -163,12 +164,7 @@ class ClosedTradeProcessor:
         try:
             # Step 1: Ensure trade is closed in journal
             if trade.status != TradeStatus.CLOSED:
-                trade = self.journal.record_trade_close(
-                    trade_id=trade.trade_id,
-                    close_price=trade.close_price or trade.open_price,
-                    exit_reason=trade.exit_reason or TradeExitReason.MANUAL,
-                    close_time_utc=trade.close_time_utc or datetime.now(timezone.utc).isoformat(),
-                )
+                raise ValueError("Post-close processing requires an already closed journal trade")
 
             # Step 2: Load historical bars for the holding period
             active_candles: Sequence[Any] = []
@@ -196,6 +192,8 @@ class ClosedTradeProcessor:
                 }
 
             # Step 3: Calculate MFE & MAE excursions
+            if not history_meta.get("is_available") or not active_candles:
+                raise ValueError("MFE_MAE_UNAVAILABLE: historical M1 coverage is required; retry when available")
             mfe_mae = calculate_trade_mfe_mae(
                 trade=trade,
                 candles=active_candles,
@@ -206,6 +204,8 @@ class ClosedTradeProcessor:
                 is_available=history_meta.get("is_available", True),
                 unavailable_reason=history_meta.get("unavailable_reason"),
             )
+            if not mfe_mae.is_available:
+                raise ValueError("MFE_MAE_UNAVAILABLE: no usable bars within the holding interval")
 
             # Step 4: Calculate execution quality against proposal if linked
             exec_quality_score: float | None = None
@@ -224,27 +224,23 @@ class ClosedTradeProcessor:
 
             # Step 6: Trigger reflection agent
             reflection = self.learning_mgr.reflect_on_trade(
-                trade=trade,
+                trade=self.journal.get_trade(trade_id) or trade,
                 candles=active_candles,
             )
 
             # Step 7: Finalize state to COMPLETED
             with self._lock:
-                self._status_map[trade_id] = PostCloseProcessingStatus.COMPLETED
                 self._update_trade_metadata(
                     trade_id,
                     {
                         "post_close_status": PostCloseProcessingStatus.COMPLETED.value,
+                        "post_close_error": None,
                         "post_close_completed_at_utc": datetime.now(timezone.utc).isoformat(),
                         "outcome_category": outcome.category.value,
-                        "mfe_mae": {
-                            "mfe_pips": mfe_mae.mfe_pips,
-                            "mae_pips": mfe_mae.mae_pips,
-                            "mfe_r": mfe_mae.mfe_r,
-                            "mae_r": mfe_mae.mae_r,
-                        },
+                        "mfe_mae": mfe_mae.model_dump(mode="json"),
                     },
                 )
+                self._status_map[trade_id] = PostCloseProcessingStatus.COMPLETED
 
             # Refresh updated trade record
             updated_trade = self.journal.get_trade(trade_id) or trade
@@ -263,32 +259,24 @@ class ClosedTradeProcessor:
             )
 
         except Exception as exc:
-            logger.error("Error executing post-close pipeline for trade %s: %s", trade_id, exc, exc_info=True)
+            logger.error("Post-close pipeline failed for trade %s (%s)", trade_id, type(exc).__name__)
             with self._lock:
                 self._status_map[trade_id] = PostCloseProcessingStatus.FAILED
                 self._update_trade_metadata(
                     trade_id,
                     {
                         "post_close_status": PostCloseProcessingStatus.FAILED.value,
-                        "post_close_error": str(exc),
+                        "post_close_error": type(exc).__name__,
                     },
                 )
             return PostCloseResult(
                 trade_id=trade_id,
                 status=PostCloseProcessingStatus.FAILED,
-                error_message=str(exc),
+                error_message="Post-close processing failed; retry when the required data or provider is available.",
             )
 
     def _update_trade_status(self, trade_id: str, status: PostCloseProcessingStatus) -> None:
         self._update_trade_metadata(trade_id, {"post_close_status": status.value})
 
     def _update_trade_metadata(self, trade_id: str, meta: dict[str, Any]) -> None:
-        try:
-            if hasattr(self.journal, "update_trade_metadata"):
-                self.journal.update_trade_metadata(trade_id, meta)
-            else:
-                trade = self.journal.get_trade(trade_id)
-                if trade:
-                    trade.metadata.update(meta)
-        except Exception as exc:
-            logger.debug("Failed updating trade metadata in DB: %s", exc)
+        self.journal.update_trade_metadata(trade_id, meta)

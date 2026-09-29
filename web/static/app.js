@@ -13,6 +13,36 @@
   let activePipelineType = 'forex';
   let inMemoryApiKey = '';
 
+  let sessionKey = '';
+  let sessionReady = null;
+  let sessionExpiresAt = 0;
+
+  function apiErrorMessage(data, fallback = 'Request failed') {
+    const error = data && (data.error || data.detail);
+    if (typeof error === 'string') return error;
+    if (error && typeof error.message === 'string') return error.message;
+    return fallback;
+  }
+
+  async function apiFetch(url, options = {}) {
+    const target = new URL(url, window.location.origin);
+    if (target.origin !== window.location.origin) return window.fetch(url, options);
+    const headers = new Headers(options.headers || {});
+    if (inMemoryApiKey) {
+      headers.set('X-API-Key', inMemoryApiKey);
+      if (sessionKey !== inMemoryApiKey || Date.now() >= sessionExpiresAt) {
+        sessionKey = inMemoryApiKey;
+        sessionExpiresAt = Date.now() + 7 * 60 * 60 * 1000;
+        sessionReady = window.fetch('/api/auth/session', {
+          method: 'POST', credentials: 'same-origin',
+          headers: { 'X-API-Key': inMemoryApiKey },
+        }).then(res => { if (!res.ok) sessionKey = ''; }).catch(() => { sessionKey = ''; });
+      }
+      await sessionReady;
+    }
+    return window.fetch(url, { ...options, headers, credentials: 'same-origin' });
+  }
+
   // ---- DOM refs ----
   const $ = (sel) => document.querySelector(sel);
   const $$ = (sel) => document.querySelectorAll(sel);
@@ -132,6 +162,8 @@
     btnRefreshMT5Positions: $('#btnRefreshMT5Positions'),
     // Performance View DOM
     btnRefreshAnalytics: $('#btnRefreshAnalytics'),
+    btnRunCalibration: $('#btnRunCalibration'),
+    calibrationContainer: $('#calibrationContainer'),
     perfBreakdownContainer: $('#perfBreakdownContainer'),
     // Backtesting View DOM
     btnModeBacktestReal: $('#btnModeBacktestReal'),
@@ -140,6 +172,8 @@
     backtestForm:        $('#backtestForm'),
     btnLaunchBacktest:   $('#btnLaunchBacktest'),
     btnRefreshBacktests: $('#btnRefreshBacktests'),
+    btnRunWalkForward: $('#btnRunWalkForward'),
+    btnRunAblation: $('#btnRunAblation'),
     backtestRunsContainer: $('#backtestRunsContainer'),
     // Learning View DOM
     btnRefreshLessons:   $('#btnRefreshLessons'),
@@ -147,6 +181,26 @@
     settingProvider:     $('#settingProvider'),
     settingQuickModel:   $('#settingQuickModel'),
     settingDeepModel:    $('#settingDeepModel'),
+    settingProviderInput: $('#settingProviderInput'),
+    settingQuickModelInput: $('#settingQuickModelInput'),
+    settingDeepModelInput: $('#settingDeepModelInput'),
+    settingBackendUrl: $('#settingBackendUrl'),
+    settingApiKeyStatus: $('#settingApiKeyStatus'),
+    settingsStatus: $('#settingsStatus'),
+    btnSaveSettings: $('#btnSaveSettings'),
+    btnResetSettings: $('#btnResetSettings'),
+    settingPair: $('#settingPair'),
+    settingTimeframe: $('#settingTimeframe'),
+    settingContextTimeframes: $('#settingContextTimeframes'),
+    settingMarketSource: $('#settingMarketSource'),
+    settingRiskPercent: $('#settingRiskPercent'),
+    settingMinRR: $('#settingMinRR'),
+    settingMaxSpread: $('#settingMaxSpread'),
+    settingNewsBlackout: $('#settingNewsBlackout'),
+    settingBrokerMode: $('#settingBrokerMode'),
+    settingAutoOrder: $('#settingAutoOrder'),
+    settingPollInterval: $('#settingPollInterval'),
+    settingReflection: $('#settingReflection'),
   };
 
   // Pipeline Definitions
@@ -262,6 +316,20 @@
       if (e.target === DOM.reportOverlay) closeReportModal();
     });
 
+    const tradeDetail = JournalUI.createController({ request: apiFetch, document });
+    DOM.journalTableContainer.addEventListener('click', event => {
+      const button = event.target.closest('[data-trade-id]');
+      if (button) tradeDetail.loadTradeDetail(button.dataset.tradeId, button);
+    });
+
+    // Allow opening a trade detail from lesson cards (delegated)
+    if (DOM.lessonsContainer) {
+      DOM.lessonsContainer.addEventListener('click', event => {
+        const btn = event.target.closest('[data-trade-id]');
+        if (btn) tradeDetail.loadTradeDetail(btn.dataset.tradeId, btn);
+      });
+    }
+
     if (DOM.btnRefreshJournal) {
       DOM.btnRefreshJournal.addEventListener('click', () => {
         loadMT5Account();
@@ -371,10 +439,104 @@
       });
     }
 
+    if (DOM.btnRunCalibration) {
+      DOM.btnRunCalibration.addEventListener('click', async () => {
+        try {
+          const res = await apiFetch('/api/forex/analytics/calibration');
+          if (!res.ok) {
+            showToast('Calibration failed', 'error');
+            return;
+          }
+          const data = await res.json();
+          const c = data.calibration || {};
+          const markdown = c.summary_markdown || '';
+          const container = DOM.calibrationContainer || document.getElementById('calibrationContainer');
+          if (container) {
+            container.innerHTML = markdown ? `<div class="card" style="padding:10px"><div style="white-space:pre-wrap; font-family:monospace; font-size:0.85rem;">${escapeText(markdown)}</div></div>` : '<div class="info-banner">No calibration data returned.</div>';
+          }
+          showToast('Calibration complete', 'info');
+        } catch (e) {
+          showToast('Calibration error', 'error');
+        }
+      });
+    }
+
     if (DOM.btnRefreshBacktests) {
       DOM.btnRefreshBacktests.addEventListener('click', () => {
         loadBacktestRuns();
         showToast('Backtest runs refreshed', 'info');
+      });
+    }
+
+    if (DOM.btnRunWalkForward) {
+      DOM.btnRunWalkForward.addEventListener('click', async () => {
+        try {
+          const pair = DOM.btPair ? DOM.btPair.value : 'EURUSD';
+          const timeframe = DOM.btTimeframe ? DOM.btTimeframe.value : 'H1';
+          const date_from = DOM.btStartDate ? (DOM.btStartDate.value || null) : null;
+          const date_to = DOM.btEndDate ? (DOM.btEndDate.value || null) : null;
+          const payload = { pair, timeframe, date_from, date_to, count: 300 };
+          const res = await apiFetch('/api/forex/backtest/walkforward', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+          });
+          if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            throw new Error(apiErrorMessage(err, 'Walk-Forward failed'));
+          }
+          const data = await res.json();
+          await loadBacktestRuns();
+          showToast('Walk-forward validation completed', 'success');
+          // show lightweight modal by reusing detail renderer
+          if (data && data.validation_id) openBacktestDetail(data.validation_id);
+        } catch (e) {
+          showToast(e.message || 'Walk-forward failed', 'error');
+        }
+      });
+    }
+
+    if (DOM.btnRunAblation) {
+      DOM.btnRunAblation.addEventListener('click', async () => {
+        try {
+          const pair = DOM.btPair ? DOM.btPair.value : 'EURUSD';
+          const res = await apiFetch('/api/forex/analytics/ablation', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pair }),
+          });
+          if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            throw new Error(apiErrorMessage(err, 'Ablation failed'));
+          }
+          const data = await res.json();
+          // Render simple summary
+          const container = DOM.backtestRunsContainer;
+          container.innerHTML = `
+            <div class="card">
+              <div class="card-header"><h3 class="card-title">Ablation Study: ${escapeText(pair)}</h3></div>
+              <div style="padding:12px"><pre style="white-space:pre-wrap; font-family:monospace; font-size:0.85rem;">${escapeText(JSON.stringify(data.ablation_study, null, 2))}</pre></div>
+            </div>
+          `;
+          showToast('Ablation study complete', 'success');
+        } catch (e) {
+          showToast(e.message || 'Ablation failed', 'error');
+        }
+      });
+    }
+
+    // Backtest form submit handling
+    if (DOM.backtestForm) {
+      DOM.backtestForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        await handleBacktestSubmit(e);
+      });
+    }
+
+    // Allow clicking run rows to open detail
+    if (DOM.backtestRunsContainer) {
+      DOM.backtestRunsContainer.addEventListener('click', (ev) => {
+        const tr = ev.target.closest('[data-backtest-id]');
+        if (tr) {
+          const id = tr.dataset.backtestId;
+          if (id) openBacktestDetail(id);
+        }
       });
     }
 
@@ -415,6 +577,13 @@
         inMemoryApiKey = DOM.apiKey.value.trim();
       });
     }
+
+    if (DOM.btnSaveSettings) {
+      DOM.btnSaveSettings.addEventListener('click', saveSettings);
+    }
+    if (DOM.btnResetSettings) {
+      DOM.btnResetSettings.addEventListener('click', resetSettings);
+    }
   }
 
   function switchAssetMode(mode) {
@@ -435,17 +604,17 @@
   // ---- Config & Auth ----
   async function loadConfig() {
     try {
-      const res = await fetch('/api/config');
+      const res = await apiFetch('/api/config');
       configData = await res.json();
       populateProviders();
       populateSettingsView();
+      // Purge legacy secrets even when API-key mode is no longer enabled.
+      try {
+        localStorage.removeItem('tradingagents_api_key');
+        sessionStorage.removeItem('tradingagents_api_key');
+      } catch (_) {}
       if (configData.auth_required && DOM.apiKeyGroup) {
         DOM.apiKeyGroup.style.display = 'block';
-        // Security hardening: purge any legacy stored secrets from web storage
-        try {
-          localStorage.removeItem('tradingagents_api_key');
-          sessionStorage.removeItem('tradingagents_api_key');
-        } catch (_) {}
       }
       DOM.serverDot.style.background = 'var(--green)';
       DOM.serverStatus.textContent = 'Connected';
@@ -543,7 +712,7 @@
   // ---- MetaTrader 5 Passive Observer ----
   async function loadMT5Status() {
     try {
-      const res = await fetch('/api/forex/mt5/status');
+      const res = await apiFetch('/api/forex/mt5/status');
       if (res.ok) {
         const data = await res.json();
         const connected = data.is_connected === true || data.connected === true || data.status === 'CONNECTED';
@@ -593,7 +762,7 @@
 
   async function loadMT5Account() {
     try {
-      const res = await fetch('/api/forex/mt5/account');
+      const res = await apiFetch('/api/forex/mt5/account');
       if (res.ok) {
         const data = await res.json();
         const acc = data.account || data;
@@ -663,7 +832,7 @@
 
   async function loadMT5Positions() {
     try {
-      const res = await fetch('/api/forex/mt5/positions');
+      const res = await apiFetch('/api/forex/mt5/positions');
       if (!res.ok) return;
       const data = await res.json();
       const positions = data.positions || [];
@@ -725,77 +894,29 @@
       `;
     } catch (_) {}
   }
-  }
 
   // ---- Journal & Learning Data ----
+  let journalListGeneration = 0;
   async function loadJournalTrades() {
+    const current = ++journalListGeneration;
+    DOM.journalTableContainer.innerHTML = '<p class="journal-state" role="status">Loading journal…</p>';
     try {
-      const res = await fetch('/api/forex/journal/trades?limit=50');
-      if (!res.ok) return;
+      const res = await apiFetch('/api/forex/journal/trades?limit=50');
       const data = await res.json();
-      const trades = data.trades || [];
-
-      if (trades.length === 0) {
-        DOM.journalTableContainer.innerHTML = `
-          <div class="empty-state" style="padding: 2rem;">
-            <div class="empty-state-icon">📖</div>
-            <div class="empty-state-title">Journal Empty</div>
-            <div class="empty-state-desc">Proposals and executed trades will be recorded here with audit timeline trails.</div>
-          </div>
-        `;
-        return;
-      }
-
-      DOM.journalTableContainer.innerHTML = `
-        <table class="data-table">
-          <thead>
-            <tr>
-              <th>Trade ID</th>
-              <th>Pair</th>
-              <th>Action</th>
-              <th>Status</th>
-              <th>Open Price</th>
-              <th>Close Price</th>
-              <th>Pips Gained</th>
-              <th>R-Multiple</th>
-              <th>Exit Reason</th>
-              <th>Reflection Tags</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${trades.map(t => {
-              const pips = t.pips_gained != null ? Number(t.pips_gained).toFixed(1) : '-';
-              const r = t.r_multiple != null ? `${Number(t.r_multiple).toFixed(2)}R` : '-';
-              const isProfit = (t.pips_gained || 0) >= 0;
-              const pipsColor = isProfit ? 'var(--green)' : 'var(--red)';
-              const tags = (t.tags || []).map(tg => `<span class="lesson-tag" style="margin-right:4px;">${escapeText(tg)}</span>`).join('');
-
-              return `
-                <tr>
-                  <td style="font-family:var(--font-mono); font-size:0.75rem; color:var(--text-muted);">${escapeText(t.trade_id)}</td>
-                  <td style="font-weight:700; color:var(--cyan);">${escapeText(t.pair)}</td>
-                  <td><span class="signal-badge ${t.action === 'LONG' ? 'bullish' : 'bearish'}" style="font-size:0.7rem; padding:2px 8px;">${escapeText(t.action)}</span></td>
-                  <td><span class="status-cell ${escapeText(t.status)}">${escapeText(t.status)}</span></td>
-                  <td style="font-family:var(--font-mono);">${Number(t.open_price).toFixed(5)}</td>
-                  <td style="font-family:var(--font-mono);">${t.close_price ? Number(t.close_price).toFixed(5) : '-'}</td>
-                  <td style="font-family:var(--font-mono); font-weight:700; color:${pipsColor};">${pips}</td>
-                  <td style="font-family:var(--font-mono); font-weight:700; color:${pipsColor};">${r}</td>
-                  <td style="font-size:0.8rem;">${escapeText(t.exit_reason || '-')}</td>
-                  <td>${tags || '-'}</td>
-                </tr>
-              `;
-            }).join('')}
-          </tbody>
-        </table>
-      `;
-    } catch (_) {}
+      if (current !== journalListGeneration) return;
+      if (!res.ok) throw new Error(apiErrorMessage(data, 'Journal could not be loaded.'));
+      DOM.journalTableContainer.innerHTML = JournalUI.table(data.trades || []);
+    } catch (error) {
+      if (current === journalListGeneration) DOM.journalTableContainer.innerHTML =
+        `<p class="journal-state" role="alert">${escapeText(error.message || 'Network error loading journal.')} Use Refresh Journal to retry.</p>`;
+    }
   }
 
   async function loadLessons(pairFilter = '') {
     try {
       let url = '/api/forex/learning/lessons';
       if (pairFilter) url += `?pair=${encodeURIComponent(pairFilter)}`;
-      const res = await fetch(url);
+      const res = await apiFetch(url);
       if (!res.ok) return;
       const data = await res.json();
       const lessons = data.lessons || [];
@@ -825,18 +946,20 @@
               </div>
               <div style="font-size:0.75rem; color:var(--text-muted); display:flex; justify-content:space-between;">
                 <span>Setup: ${escapeText(l.setup_type || 'ALL')}</span>
-                <span>Confidence: ${(Number(l.confidence_score || 0.9) * 100).toFixed(0)}%</span>
+                <span>Confidence: ${(Number(l.confidence_score || l.confidence || 0.9) * 100).toFixed(0)}%</span>
+              </div>
+              <div style="margin-top:8px; display:flex; gap:8px;">
+                <button class="btn-secondary btn-sm" data-trade-id="${escapeText(l.source_trade_id || l.trade_id || '')}">View Source Trade</button>
               </div>
             </div>
           `).join('')}
-        </div>
-      `;
+        </div>`;
     } catch (_) {}
   }
 
   async function loadAnalyticsSummary() {
     try {
-      const res = await fetch('/api/forex/analytics/dashboard');
+      const res = await apiFetch('/api/forex/analytics/dashboard');
       if (!res.ok) return;
       const data = await res.json();
       const m = data.metrics || {};
@@ -862,7 +985,7 @@
   // ---- Subsystem Loaders for Reorganized Dashboard (Phase 25) ----
   async function loadDashboardOverview() {
     try {
-      const res = await fetch('/api/forex/dashboard/overview');
+      const res = await apiFetch('/api/forex/dashboard/overview');
       if (!res.ok) {
         await Promise.allSettled([
           loadMT5Account(),
@@ -1149,7 +1272,7 @@
   async function loadDashboardPositions() {
     if (!DOM.dashPositionsContainer) return;
     try {
-      const res = await fetch('/api/forex/mt5/positions');
+      const res = await apiFetch('/api/forex/mt5/positions');
       if (!res.ok) return;
       const data = await res.json();
       const positions = data.positions || [];
@@ -1201,7 +1324,7 @@
   async function loadDashboardProposals() {
     if (!DOM.dashProposalsContainer) return;
     try {
-      const res = await fetch('/api/forex/proposals?limit=5');
+      const res = await apiFetch('/api/forex/proposals?limit=5');
       if (!res.ok) return;
       const data = await res.json();
       const proposals = data.proposals || [];
@@ -1248,7 +1371,7 @@
 
   async function loadDashboardAnalytics() {
     try {
-      const res = await fetch('/api/forex/analytics/dashboard');
+      const res = await apiFetch('/api/forex/analytics/dashboard');
       if (!res.ok) return;
       const data = await res.json();
       const m = data.metrics || {};
@@ -1263,7 +1386,7 @@
   async function loadDashboardLessons() {
     if (!DOM.dashLessonsContainer) return;
     try {
-      const res = await fetch('/api/forex/learning/lessons');
+      const res = await apiFetch('/api/forex/learning/lessons');
       if (!res.ok) return;
       const data = await res.json();
       const lessons = (data.lessons || []).slice(0, 2);
@@ -1286,6 +1409,9 @@
           <div class="lesson-rule" style="font-size:0.8rem;">${escapeText(l.rule_violated || l.observation || 'Operational Rule')}</div>
           <div class="lesson-action" style="padding:6px 10px; font-size:0.75rem;">
             ${escapeText(l.actionable_rule || l.observation || 'Follow risk guidelines.')}
+          </div>
+          <div style="margin-top:8px;"> 
+            <button class="btn-secondary btn-sm" data-trade-id="${escapeText(l.source_trade_id || l.trade_id || '')}">View Source</button>
           </div>
         </div>
       `).join('');
@@ -1311,7 +1437,7 @@
       if (setup) url += `&setup=${encodeURIComponent(setup)}`;
       if (timeframe) url += `&timeframe=${encodeURIComponent(timeframe)}`;
 
-      const res = await fetch(url);
+      const res = await apiFetch(url);
       if (!res.ok) return;
       const data = await res.json();
       const props = data.proposals || [];
@@ -1392,7 +1518,7 @@
     document.body.style.overflow = 'hidden';
 
     try {
-      const res = await fetch(`/api/forex/proposals/${encodeURIComponent(proposalId)}`);
+      const res = await apiFetch(`/api/forex/proposals/${encodeURIComponent(proposalId)}`);
       if (!res.ok) {
         DOM.reportModalBody.innerHTML = `<div style="padding:2rem; color:var(--red);">Proposal ${escapeText(proposalId)} could not be loaded.</div>`;
         return;
@@ -1639,7 +1765,7 @@
   window.updateProposalDecision = async function(proposalId, newStatus) {
     if (!proposalId || !newStatus) return;
     try {
-      const res = await fetch(`/api/forex/proposals/${encodeURIComponent(proposalId)}/status`, {
+      const res = await apiFetch(`/api/forex/proposals/${encodeURIComponent(proposalId)}/status`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status: newStatus, reason: `User selected ${newStatus} via dashboard` }),
@@ -1650,7 +1776,7 @@
         loadProposals();
       } else {
         const err = await res.json().catch(() => ({}));
-        showToast(err.detail || 'Failed to update proposal status', 'error');
+        showToast(apiErrorMessage(err, 'Failed to update proposal status'), 'error');
       }
     } catch (_) {
       showToast('Network error updating proposal status', 'error');
@@ -1661,7 +1787,7 @@
   async function loadMT5Orders() {
     if (!DOM.mt5OrdersContainer) return;
     try {
-      const res = await fetch('/api/forex/mt5/orders');
+      const res = await apiFetch('/api/forex/mt5/orders');
       if (!res.ok) return;
       const data = await res.json();
       const orders = data.orders || [];
@@ -1711,7 +1837,7 @@
   async function loadMT5Deals() {
     if (!DOM.mt5DealsContainer) return;
     try {
-      const res = await fetch('/api/forex/mt5/deals');
+      const res = await apiFetch('/api/forex/mt5/deals');
       if (!res.ok) return;
       const data = await res.json();
       const deals = data.deals || [];
@@ -1780,7 +1906,7 @@
     if (savedApiKey) headers['X-API-Key'] = savedApiKey;
 
     try {
-      const res = await fetch('/api/forex/mt5/connect', {
+      const res = await apiFetch('/api/forex/mt5/connect', {
         method: 'POST',
         headers: headers,
         body: JSON.stringify(payload),
@@ -1794,7 +1920,7 @@
         await loadMT5Orders();
         await loadMT5Deals();
       } else {
-        showToast(data.error || 'Failed to connect to MT5 terminal', 'error');
+        showToast(apiErrorMessage(data, 'Failed to connect to MT5 terminal'), 'error');
         await loadMT5Status();
       }
     } catch (err) {
@@ -1814,7 +1940,7 @@
     if (savedApiKey) headers['X-API-Key'] = savedApiKey;
 
     try {
-      const res = await fetch('/api/forex/mt5/disconnect', {
+      const res = await apiFetch('/api/forex/mt5/disconnect', {
         method: 'POST',
         headers: headers,
         body: JSON.stringify({}),
@@ -1823,7 +1949,7 @@
         showToast('MT5 observer disconnected', 'success');
       } else {
         const data = await res.json().catch(() => ({}));
-        showToast(data.detail || 'MT5 disconnect returned an error', 'warning');
+        showToast(apiErrorMessage(data, 'MT5 disconnect returned an error'), 'warning');
       }
       await loadMT5Status();
       await loadMT5Account();
@@ -1866,12 +1992,12 @@
     }
 
     try {
-      const res = await fetch(`/api/forex/mt5/symbol/${encodeURIComponent(rawSym)}`);
+      const res = await apiFetch(`/api/forex/mt5/symbol/${encodeURIComponent(rawSym)}`);
       if (res.ok) {
         const data = await res.json();
         renderMT5SymbolQuote(data.symbol_info || data, data.tick);
       } else {
-        const tickRes = await fetch(`/api/forex/mt5/tick/${encodeURIComponent(rawSym)}`);
+        const tickRes = await apiFetch(`/api/forex/mt5/tick/${encodeURIComponent(rawSym)}`);
         if (tickRes.ok) {
           const tickData = await tickRes.json();
           renderMT5SymbolQuote({ name: rawSym, canonical_symbol: rawSym }, tickData.tick || tickData);
@@ -1881,7 +2007,7 @@
             <div class="empty-state" style="padding: 1.5rem;">
               <div class="empty-state-icon">⚠️</div>
               <div class="empty-state-title">Symbol Unavailable</div>
-              <div class="empty-state-desc">${escapeText(errData.detail || `Symbol "${rawSym}" not found on active MT5 broker market watch.`)}</div>
+              <div class="empty-state-desc">${escapeText(apiErrorMessage(errData, `Symbol "${rawSym}" not found on active MT5 broker market watch.`))}</div>
             </div>
           `;
         }
@@ -1959,7 +2085,7 @@
   async function loadPerformanceBreakdown() {
     if (!DOM.perfBreakdownContainer) return;
     try {
-      const res = await fetch('/api/forex/journal/performance');
+      const res = await apiFetch('/api/forex/journal/performance');
       if (!res.ok) return;
       const data = await res.json();
       const byPair = data.performance?.by_pair || {};
@@ -2019,7 +2145,7 @@
   async function loadBacktestRuns() {
     if (!DOM.backtestRunsContainer) return;
     try {
-      const res = await fetch('/api/forex/backtest/runs');
+      const res = await apiFetch('/api/forex/backtest/runs');
       if (!res.ok) return;
       const data = await res.json();
       const runs = data.runs || [];
@@ -2049,13 +2175,13 @@
           </thead>
           <tbody>
             ${runs.map(r => `
-              <tr>
+              <tr data-backtest-id="${escapeText(r.backtest_id || '')}" style="cursor:pointer">
                 <td style="font-family:var(--font-mono); font-size:0.75rem; color:var(--text-muted);">${escapeText(r.backtest_id ? r.backtest_id.slice(0, 10) : '-')}</td>
-                <td><span class="lesson-tag" style="font-size:0.65rem;">${escapeText(r.mode || 'HISTORICAL')}</span></td>
+                <td><span class="lesson-tag" style="font-size:0.65rem;">${escapeText(r.mode || (r.demo_mode ? 'DEMO' : 'HISTORICAL'))}</span></td>
                 <td style="font-weight:700; color:var(--cyan);">${escapeText(r.pair)}</td>
                 <td>${escapeText(r.timeframe || '-')}</td>
-                <td>${escapeText(r.trade_count || r.trades_count || 0)}</td>
-                <td style="color:var(--green); font-weight:600;">${r.win_rate != null ? (Number(r.win_rate) * 100).toFixed(1) + '%' : '-'}</td>
+                <td>${escapeText(r.total_trades || r.trade_count || r.result?.total_trades || 0)}</td>
+                <td style="color:var(--green); font-weight:600;">${r.win_rate != null ? (Number(r.win_rate) * 100).toFixed(1) + '%' : (r.win_rate_pct != null ? (Number(r.win_rate_pct)).toFixed(1) + '%' : '-')}</td>
                 <td><span class="status-cell ${escapeText(r.status || 'completed')}">${escapeText(r.status || 'completed')}</span></td>
                 <td class="date-cell">${escapeText((r.created_at || '').slice(0, 19).replace('T', ' '))}</td>
               </tr>
@@ -2072,6 +2198,103 @@
     if (DOM.settingProvider) DOM.settingProvider.textContent = configData.provider || 'Not configured';
     if (DOM.settingQuickModel) DOM.settingQuickModel.textContent = configData.quick_model || 'Default';
     if (DOM.settingDeepModel) DOM.settingDeepModel.textContent = configData.deep_model || 'Default';
+
+    if (DOM.settingProviderInput && configData.providers) {
+      DOM.settingProviderInput.innerHTML = '';
+      configData.providers.forEach(p => {
+        const opt = document.createElement('option');
+        opt.value = p.id;
+        opt.textContent = p.name;
+        if (p.id === configData.provider) opt.selected = true;
+        DOM.settingProviderInput.appendChild(opt);
+      });
+    }
+
+    const runtimeSettings = configData.runtime_settings || {};
+    if (DOM.settingQuickModelInput) {
+      DOM.settingQuickModelInput.innerHTML = '';
+      const provider = configData.providers.find(p => p.id === (DOM.settingProviderInput ? DOM.settingProviderInput.value : configData.provider));
+      const models = provider ? provider.models : [];
+      models.forEach(model => {
+        const opt = document.createElement('option');
+        opt.value = model; opt.textContent = model;
+        if (model === (runtimeSettings.quick_think_llm || configData.quick_model)) opt.selected = true;
+        DOM.settingQuickModelInput.appendChild(opt);
+      });
+    }
+    if (DOM.settingDeepModelInput) {
+      DOM.settingDeepModelInput.innerHTML = '';
+      const provider = configData.providers.find(p => p.id === (DOM.settingProviderInput ? DOM.settingProviderInput.value : configData.provider));
+      const models = provider ? provider.models : [];
+      models.forEach(model => {
+        const opt = document.createElement('option');
+        opt.value = model; opt.textContent = model;
+        if (model === (runtimeSettings.deep_think_llm || configData.deep_model)) opt.selected = true;
+        DOM.settingDeepModelInput.appendChild(opt);
+      });
+    }
+
+    if (DOM.settingBackendUrl) DOM.settingBackendUrl.value = runtimeSettings.backend_url || '';
+    if (DOM.settingApiKeyStatus) DOM.settingApiKeyStatus.textContent = configData.secret_status && configData.secret_status.api_key === 'Configured' ? 'Configured / Hidden' : 'Missing / Not Set';
+    if (DOM.settingApiKeyStatus) DOM.settingApiKeyStatus.style.color = (configData.secret_status && configData.secret_status.api_key === 'Configured') ? 'var(--green)' : 'var(--amber)';
+    if (DOM.settingPair) DOM.settingPair.value = runtimeSettings.forex_broker_symbols && Object.keys(runtimeSettings.forex_broker_symbols).length ? 'EURUSD' : 'EURUSD';
+    if (DOM.settingTimeframe) DOM.settingTimeframe.value = 'H1';
+    if (DOM.settingContextTimeframes) DOM.settingContextTimeframes.value = 'M15, H4, D1';
+    if (DOM.settingMarketSource) DOM.settingMarketSource.value = runtimeSettings.forex_market_source || 'mt5';
+    if (DOM.settingRiskPercent) DOM.settingRiskPercent.value = runtimeSettings.forex_max_spread_pips ? String(runtimeSettings.forex_max_spread_pips) : '1.0';
+    if (DOM.settingMinRR) DOM.settingMinRR.value = '1.5';
+    if (DOM.settingMaxSpread) DOM.settingMaxSpread.value = runtimeSettings.forex_max_spread_pips ? String(runtimeSettings.forex_max_spread_pips) : '3.0';
+    if (DOM.settingNewsBlackout) DOM.settingNewsBlackout.value = '30';
+    if (DOM.settingPollInterval) DOM.settingPollInterval.value = '2.0';
+    if (DOM.settingBrokerMode) DOM.settingBrokerMode.value = 'passive';
+    if (DOM.settingAutoOrder) DOM.settingAutoOrder.value = 'false';
+    if (DOM.settingReflection) DOM.settingReflection.value = 'true';
+  }
+
+  async function saveSettings() {
+    const payload = {};
+    const provider = DOM.settingProviderInput ? DOM.settingProviderInput.value : configData.provider;
+    if (provider) payload.llm_provider = provider;
+    if (DOM.settingQuickModelInput && DOM.settingQuickModelInput.value) payload.quick_think_llm = DOM.settingQuickModelInput.value;
+    if (DOM.settingDeepModelInput && DOM.settingDeepModelInput.value) payload.deep_think_llm = DOM.settingDeepModelInput.value;
+    if (DOM.settingBackendUrl && DOM.settingBackendUrl.value.trim()) payload.backend_url = DOM.settingBackendUrl.value.trim();
+    if (DOM.settingMarketSource && DOM.settingMarketSource.value) payload.forex_market_source = DOM.settingMarketSource.value;
+    if (DOM.settingMaxSpread && DOM.settingMaxSpread.value) payload.forex_max_spread_pips = Number(DOM.settingMaxSpread.value);
+    if (DOM.settingRiskPercent && DOM.settingRiskPercent.value) payload.forex_max_spread_pips = Number(DOM.settingRiskPercent.value);
+    if (DOM.settingMinRR && DOM.settingMinRR.value) payload.forex_quote_max_age_seconds = Number(DOM.settingMinRR.value);
+    try {
+      const res = await apiFetch('/api/forex/settings', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(apiErrorMessage(data, 'Settings update failed'));
+      if (DOM.settingsStatus) {
+        DOM.settingsStatus.textContent = 'Saved locally. Restart required for runtime reload.';
+        DOM.settingsStatus.className = 'settings-status success';
+      }
+      await loadConfig();
+    } catch (error) {
+      if (DOM.settingsStatus) {
+        DOM.settingsStatus.textContent = error.message || 'Validation error';
+        DOM.settingsStatus.className = 'settings-status error';
+      }
+    }
+  }
+
+  async function resetSettings() {
+    try {
+      const res = await apiFetch('/api/forex/settings/reset', { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(apiErrorMessage(data, 'Reset failed'));
+      if (DOM.settingsStatus) {
+        DOM.settingsStatus.textContent = 'Defaults restored. Restart required for runtime reload.';
+        DOM.settingsStatus.className = 'settings-status success';
+      }
+      await loadConfig();
+    } catch (error) {
+      if (DOM.settingsStatus) {
+        DOM.settingsStatus.textContent = error.message || 'Reset failed';
+        DOM.settingsStatus.className = 'settings-status error';
+      }
+    }
   }
 
   // ---- Submit Analysis ----
@@ -2151,7 +2374,7 @@
     if (savedApiKey) headers['X-API-Key'] = savedApiKey;
 
     try {
-      const res = await fetch('/api/forex/analyze', {
+      const res = await apiFetch('/api/forex/analyze', {
         method: 'POST',
         headers: headers,
         body: JSON.stringify(payload),
@@ -2159,7 +2382,7 @@
 
       const data = await res.json();
       if (!res.ok) {
-        throw new Error(data.detail || 'Failed to start Forex analysis');
+        throw new Error(apiErrorMessage(data, 'Failed to start Forex analysis'));
       }
 
       currentRunId = data.run_id;
@@ -2171,6 +2394,136 @@
     } catch (err) {
       showToast(err.message, 'error');
       resetRunButton();
+    }
+  }
+
+  // ---- Backtest Submit Flow ----
+  async function handleBacktestSubmit() {
+    // Gather form values
+    const modeReal = DOM.btnModeBacktestReal && DOM.btnModeBacktestReal.classList.contains('active');
+    const demoMode = DOM.btnModeBacktestDemo && DOM.btnModeBacktestDemo.classList.contains('active') && !modeReal;
+    const pair = DOM.btPair ? DOM.btPair.value : 'EURUSD';
+    const timeframe = DOM.btTimeframe ? DOM.btTimeframe.value : 'H1';
+    const date_from = DOM.btStartDate ? (DOM.btStartDate.value || null) : null;
+    const date_to = DOM.btEndDate ? (DOM.btEndDate.value || null) : null;
+    const initial_balance = DOM.btCapital ? Number(DOM.btCapital.value) : 100000;
+    const max_analysis_points = DOM.btMaxPoints ? Number(DOM.btMaxPoints.value) : 10;
+    const spread_pips = DOM.btSpread ? Number(DOM.btSpread.value) : 1.5;
+
+    const payload = {
+      demo_mode: demoMode,
+      mode: modeReal ? 'HISTORICAL_AGENT_BACKTEST' : (demoMode ? 'DEMO' : null),
+      pair: pair,
+      timeframe: timeframe,
+      date_from: date_from,
+      date_to: date_to,
+      initial_balance: initial_balance,
+      account_currency: 'USD',
+      leverage: 100,
+      spread_pips: spread_pips,
+      slippage_pips: 0.3,
+      commission_per_lot_usd: 5.0,
+      swap_per_day_usd: 0.0,
+      sampling_interval: 1,
+      max_analysis_points: max_analysis_points,
+      analyst_selection: ['forex_technical','forex_macro','forex_news'],
+      provider: DOM.provider ? DOM.provider.value || null : null,
+      quick_model: DOM.quickModel ? DOM.quickModel.value || null : null,
+      deep_model: DOM.deepModel ? DOM.deepModel.value || null : null,
+      research_depth: 'standard',
+    };
+
+    // Pre-launch estimate
+    try {
+      const estReq = {
+        pair: payload.pair,
+        timeframe: payload.timeframe,
+        count: 300,
+        sampling_interval: payload.sampling_interval,
+        max_analysis_points: payload.max_analysis_points,
+        analyst_count: payload.analyst_selection ? payload.analyst_selection.length : 3,
+      };
+      const estRes = await apiFetch('/api/forex/backtest/estimate', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(estReq),
+      });
+      const est = estRes.ok ? await estRes.json() : null;
+      let proceed = true;
+      if (est) {
+        const calls = est.estimated_llm_calls || est.estimated_calls || 0;
+        const tokens = est.estimated_tokens || est.estimated_token_usage || 0;
+        const cost = est.estimated_cost_usd || est.estimated_cost || 0;
+        // require confirmation for large jobs
+        if (calls > 50 || cost > 5) {
+          proceed = confirm(`Estimated analyses: ${calls}\nEstimated tokens: ${tokens}\nEstimated cost: $${Number(cost).toFixed(2)}\n\nProceed with backtest?`);
+        }
+        // show a small summary in pipeline area
+        showToast(`Estimate: ${calls} analyses, ${tokens} tokens, $${Number(cost||0).toFixed(2)}`, 'info');
+      }
+      if (!proceed) return;
+    } catch (e) {
+      // proceed but warn
+      showToast('Estimate failed — proceeding with caution', 'warning');
+    }
+
+    // Disable launch button
+    if (DOM.btnLaunchBacktest) {
+      DOM.btnLaunchBacktest.disabled = true;
+      DOM.btnLaunchBacktest.textContent = 'Running…';
+    }
+
+    try {
+      const res = await apiFetch('/api/forex/backtest/run', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(apiErrorMessage(data, 'Backtest request failed'));
+      // Refresh runs and open detail
+      await loadBacktestRuns();
+      const bt_id = data.backtest_id || data.backtest_id;
+      if (bt_id) openBacktestDetail(bt_id);
+      showToast('Backtest completed', 'success');
+    } catch (err) {
+      showToast(err.message || 'Backtest failed', 'error');
+    } finally {
+      if (DOM.btnLaunchBacktest) {
+        DOM.btnLaunchBacktest.disabled = false;
+        DOM.btnLaunchBacktest.textContent = '🚀 Run Backtest';
+      }
+    }
+  }
+
+  async function openBacktestDetail(backtestId) {
+    try {
+      const res = await apiFetch(`/api/forex/backtest/${encodeURIComponent(backtestId)}`);
+      if (!res.ok) {
+        showToast('Failed to load backtest detail', 'error');
+        return;
+      }
+      const data = await res.json();
+      // Render detail below runs container
+      const container = DOM.backtestRunsContainer;
+      const header = `Backtest: ${escapeText(String(data.backtest_id || backtestId))} - ${escapeText(data.pair || '')} ${escapeText(data.timeframe || '')}`;
+      let body = '';
+      if (data.notice) body += `<div class="info-banner">${escapeText(data.notice)}</div>`;
+      if (data.result) {
+        const r = data.result;
+        body += `
+          <div style="display:grid; grid-template-columns: repeat(4,1fr); gap:8px; margin:8px 0;">
+            <div class="stat-card"><span class="stat-label">Trades</span><span class="stat-value">${escapeText(r.total_trades || r.trade_count || 0)}</span></div>
+            <div class="stat-card"><span class="stat-label">Win Rate</span><span class="stat-value">${r.win_rate_pct != null ? escapeText(Number(r.win_rate_pct).toFixed(1) + '%') : (r.win_rate != null ? escapeText((Number(r.win_rate)*100).toFixed(1)+'%') : '-')}</span></div>
+            <div class="stat-card"><span class="stat-label">Profit Factor</span><span class="stat-value">${escapeText(r.profit_factor != null ? Number(r.profit_factor).toFixed(2) : '-')}</span></div>
+            <div class="stat-card"><span class="stat-label">Net PnL</span><span class="stat-value">${escapeText('$' + (r.total_net_profit != null ? Number(r.total_net_profit).toFixed(2) : (r.net_profit != null ? Number(r.net_profit).toFixed(2) : '0.00')))}</span></div>
+          </div>
+        `;
+      }
+      container.innerHTML = `
+        <div class="card">
+          <div class="card-header"><h3 class="card-title">${header}</h3></div>
+          <div style="padding:12px">${body}<pre style="white-space:pre-wrap; font-family:monospace; font-size:0.85rem;">${escapeText(JSON.stringify(data, null, 2))}</pre></div>
+        </div>
+      `;
+    } catch (e) {
+      showToast('Error loading backtest detail', 'error');
     }
   }
 
@@ -2210,7 +2563,7 @@
     if (savedApiKey) headers['X-API-Key'] = savedApiKey;
 
     try {
-      const res = await fetch('/api/analyze', {
+      const res = await apiFetch('/api/analyze', {
         method: 'POST',
         headers: headers,
         body: JSON.stringify(payload),
@@ -2221,7 +2574,7 @@
         if (res.status === 401 && DOM.apiKeyGroup) {
           DOM.apiKeyGroup.style.display = 'block';
         }
-        throw new Error(data.detail || 'Failed to start analysis');
+        throw new Error(apiErrorMessage(data, 'Failed to start analysis'));
       }
 
       currentRunId = data.run_id;
@@ -2344,7 +2697,7 @@
       resetRunButton();
       try {
         const data = JSON.parse(e.data);
-        showToast(data.message || data.error || 'Forex analysis failed', 'error');
+        showToast(apiErrorMessage(data, data.message || 'Forex analysis failed'), 'error');
       } catch (_) {
         showToast('Forex analysis stream error', 'error');
       }
@@ -2423,7 +2776,7 @@
       resetRunButton();
       try {
         const data = JSON.parse(e.data);
-        showToast(data.error || 'Analysis failed', 'error');
+        showToast(apiErrorMessage(data, 'Analysis failed'), 'error');
       } catch (_) {}
     });
 
@@ -2471,7 +2824,7 @@
   // ---- Report Loading & Rendering ----
   async function loadForexReport(runId) {
     try {
-      const res = await fetch(`/api/forex/runs/${encodeURIComponent(runId)}`);
+      const res = await apiFetch(`/api/forex/runs/${encodeURIComponent(runId)}`);
       if (!res.ok) {
         if (res.status === 404) {
           showToast('Forex run not found', 'error');
@@ -2835,7 +3188,7 @@
 
   async function loadReport(runId) {
     try {
-      const res = await fetch(`/api/runs/${encodeURIComponent(runId)}/report`);
+      const res = await apiFetch(`/api/runs/${encodeURIComponent(runId)}/report`);
       if (res.ok) {
         const report = await res.json();
         renderEquitiesReport(report);
@@ -2870,8 +3223,8 @@
   async function loadRuns() {
     try {
       const [eqRes, fxRes] = await Promise.all([
-        fetch('/api/runs').catch(() => null),
-        fetch('/api/forex/runs').catch(() => null),
+        apiFetch('/api/runs').catch(() => null),
+        apiFetch('/api/forex/runs').catch(() => null),
       ]);
       const eqRuns = eqRes && eqRes.ok ? (await eqRes.json()).runs || [] : [];
       const fxRuns = fxRes && fxRes.ok ? (await fxRes.json()).runs || [] : [];
@@ -2884,7 +3237,7 @@
 
   async function loadHistory() {
     try {
-      const res = await fetch('/api/history');
+      const res = await apiFetch('/api/history');
       if (res.ok) {
         const data = await res.json();
         diskHistory = data.reports || [];
@@ -2984,7 +3337,7 @@
       return;
     }
     try {
-      const res = await fetch(`/api/runs/${encodeURIComponent(runId)}/report`);
+      const res = await apiFetch(`/api/runs/${encodeURIComponent(runId)}/report`);
       if (res.ok) {
         const report = await res.json();
         showReportModal(report);

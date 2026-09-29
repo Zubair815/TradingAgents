@@ -499,6 +499,7 @@ def test_metrics_manager_integration(tmp_path: Path):
     manager = ForexMetricsManager(journal=journal)
 
     # 1. Open and close a trade in journal
+    t0 = datetime.now(timezone.utc) - timedelta(hours=2)
     rec = journal.record_trade_open(
         pair="EURUSD",
         action=ForexAction.LONG,
@@ -506,6 +507,7 @@ def test_metrics_manager_integration(tmp_path: Path):
         stop_loss=1.0750,
         take_profit=1.0950,
         lots=1.0,
+        open_time_utc=t0.isoformat(),
     )
     journal.record_trade_close(
         trade_id=rec.trade_id,
@@ -514,7 +516,6 @@ def test_metrics_manager_integration(tmp_path: Path):
     )
 
     # 2. Provide candles
-    t0 = datetime.now(timezone.utc) - timedelta(hours=2)
     candles = [
         ForexBar(timestamp=t0, open=1.0800, high=1.0890, low=1.0785, close=1.0880, volume=50.0),
     ]

@@ -190,6 +190,7 @@ class MatchResult(BaseModel):
     """Result of reconciling a broker position/deal with a pending proposal."""
 
     proposal_id: str | None = None
+    trade_id: str | None = None
     broker_ticket: int | str
     symbol: str
     action: ForexAction

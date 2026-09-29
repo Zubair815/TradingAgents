@@ -42,6 +42,11 @@ class ForexNewsArticle(BaseModel):
 
 
 def fetch_forex_news(symbol, *, as_of=None, lookback_days=5, limit=8):
+    from tradingagents.dataflows.forex_context import historical_market_context
+    historical = historical_market_context()
+    if historical is not None:
+        bound = historical[2]
+        as_of = min(utc_timestamp(as_of), bound) if as_of is not None else bound
     config = get_config()
     pair = get_forex_pair(symbol)
     if pair is None:

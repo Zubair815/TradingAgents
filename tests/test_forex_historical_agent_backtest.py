@@ -135,7 +135,7 @@ def test_agent_receives_only_past_and_current_bars():
         seen_windows.append((ts, [c.timestamp for c in pit_candles]))
         return None
 
-    config = AgentBacktestConfig(
+    config = AgentBacktestConfig(mode="DEMO",
         pair="EURUSD",
         timeframe="H1",
         sampling_interval=2,
@@ -143,8 +143,8 @@ def test_agent_receives_only_past_and_current_bars():
     backtester = HistoricalForexAgentBacktester(config=config)
     report = backtester.run(candles=bars, agent_pipeline_callable=mock_agent_cb)
 
-    assert report.mode == "HISTORICAL_AGENT_BACKTEST"
-    assert report.validated_strategy_performance is True
+    assert report.mode == "DEMO"
+    assert report.validated_strategy_performance is False
     assert len(seen_windows) == 10  # 20 bars / 2
 
     for eval_ts, window_timestamps in seen_windows:
@@ -170,7 +170,7 @@ def test_sampling_interval_and_max_analysis_points_cap():
         return None
 
     # sampling_interval=3 on 30 bars yields 10 points; capped at max_analysis_points=4
-    config = AgentBacktestConfig(
+    config = AgentBacktestConfig(mode="DEMO",
         pair="EURUSD",
         timeframe="H1",
         sampling_interval=3,
@@ -215,7 +215,7 @@ def test_limit_order_fills_on_subsequent_candle_hit():
             )
         return None
 
-    config = AgentBacktestConfig(
+    config = AgentBacktestConfig(mode="DEMO",
         pair="EURUSD",
         timeframe="H1",
         sampling_interval=1,
@@ -258,7 +258,7 @@ def test_pending_order_expires_when_valid_until_exceeded():
             )
         return None
 
-    config = AgentBacktestConfig(pair="EURUSD", timeframe="H1", sampling_interval=1)
+    config = AgentBacktestConfig(mode="DEMO", pair="EURUSD", timeframe="H1", sampling_interval=1)
     backtester = HistoricalForexAgentBacktester(config=config)
     report = backtester.run(candles=[b0, b1, b2], agent_pipeline_callable=mock_agent)
 
@@ -304,7 +304,7 @@ def test_overnight_swap_drag_accrual():
         default_slippage_pips=0.0,
         commission_per_lot_usd=0.0,
     )
-    config = AgentBacktestConfig(
+    config = AgentBacktestConfig(mode="DEMO",
         pair="EURUSD",
         timeframe="D1",
         sampling_interval=1,
@@ -349,7 +349,7 @@ def test_intrabar_collision_resolved_by_lower_timeframe_candles():
             )
         return None
 
-    config = AgentBacktestConfig(
+    config = AgentBacktestConfig(mode="DEMO",
         pair="EURUSD",
         timeframe="H1",
         backtest_config=ForexBacktestConfig(conservative_stops=False, allow_ambiguous=True),
@@ -407,16 +407,33 @@ def test_api_run_backtest_historical_agent_mode():
         "timeframe": "M15",
         "mode": "HISTORICAL_AGENT_BACKTEST",
         "count": 30,
+        "date_from": "2025-01-06",
+        "date_to": "2025-01-06T07:30:00Z",
         "initial_balance": 50000.0,
         "spread_pips": 1.0,
         "slippage_pips": 0.2,
         "commission_per_lot_usd": 3.5,
         "sampling_interval": 5,
         "max_analysis_points": 3,
+        "provider": "anthropic",
+        "quick_model": "quick-test",
+        "deep_model": "deep-test",
+        "token_limits": 2048,
+        "research_depth": "deep",
+        "analyst_selection": ["forex_technical"],
     }
 
     # Patch graph factory inside router to produce deterministic mock proposal
-    with patch("web.forex_routes.ForexTradingAgentsGraph") as mock_graph_cls:
+    from tests.test_historical_integrity import sourced_bars
+    from tradingagents.backtest.historical_data import candle_frame
+    bars, meta = sourced_bars(30, minutes=15)
+    frame = candle_frame(bars, meta)
+    frame["close_time"] = [b.close_time for b in bars]
+    frame["is_closed"] = True
+    with (patch("web.forex_routes.ForexTradingAgentsGraph") as mock_graph_cls,
+          patch("tradingagents.backtest.historical_data.fetch_forex_candles", return_value=frame),
+          patch("tradingagents.dataflows.trading_economics.TradingEconomicsCalendar.query", return_value=[])):
+
         mock_graph = MagicMock()
         mock_graph.run.return_value = (
             {
@@ -430,7 +447,12 @@ def test_api_run_backtest_historical_agent_mode():
                     take_profit_1=1.0860,
                     suggested_lot_size=0.1,
                     reasoning="Agent backtest mock",
-                )
+                ),
+                "forex_risk_decision": {
+                    "pair": "EURUSD", "decision": "APPROVE", "original_action": "LONG",
+                    "approved_action": "LONG", "approved_lot_size": 0.1,
+                    "executive_rationale": "Mock approved decision",
+                },
             },
             "LONG",
         )
@@ -441,9 +463,18 @@ def test_api_run_backtest_historical_agent_mode():
         data = res.json()
         assert data["mode"] == "HISTORICAL_AGENT_BACKTEST"
         assert data["demo_mode"] is False
-        assert data["validated_strategy_performance"] is True
+        assert data["validated_strategy_performance"] is False
+        assert data["validation_status"] == "PARTIALLY_VALIDATED"
         assert "backtest_id" in data
         assert "markdown_report" in data
         assert "result" in data
         assert data["result"]["mode"] == "HISTORICAL_AGENT_BACKTEST"
-        assert data["result"]["validated_strategy_performance"] is True
+        assert data["result"]["validated_strategy_performance"] is False
+        graph_config = mock_graph_cls.call_args.kwargs["config"]
+        assert graph_config["llm_provider"] == "anthropic"
+        assert graph_config["quick_think_llm"] == "quick-test"
+        assert graph_config["deep_think_llm"] == "deep-test"
+        assert graph_config["max_tokens"] == 2048
+        assert graph_config["max_debate_rounds"] == 3
+        assert graph_config["historical_backtest"] is True
+        assert mock_graph_cls.call_args.kwargs["selected_analysts"] == ["forex_technical"]

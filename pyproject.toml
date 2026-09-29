@@ -63,6 +63,7 @@ markers = [
     "unit: fast isolated unit tests",
     "integration: tests requiring external services",
     "smoke: quick sanity-check tests",
+    "e2e: browser end-to-end tests",
 ]
 filterwarnings = [
     "ignore::DeprecationWarning",

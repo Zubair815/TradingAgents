@@ -211,7 +211,11 @@ def test_mt5_observation_service_lifecycle_and_snapshots(memory_journal_mgr: For
     assert final_trade.trade_id == trade_id
     assert final_trade.status == TradeStatus.CLOSED
     assert final_trade.close_price == 1.0930
-    assert final_trade.gross_profit == 480.0
+    assert final_trade.gross_profit == 680.0  # partial and final broker fills
+    assert final_trade.commission == 5.0
+    assert final_trade.swap == -1.5
+    assert final_trade.net_profit == 673.5
+    assert len(memory_journal_mgr.journal.list_executions_for_trade(trade_id)) == 2
 
     # Assert: Timeline contains chronological audit trail
     timeline = memory_journal_mgr.get_timeline(trade_id=trade_id)

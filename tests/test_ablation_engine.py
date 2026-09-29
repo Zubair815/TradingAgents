@@ -261,7 +261,9 @@ def test_ablation_adequate_sample_declares_winner() -> None:
     assert report.winning_variant_id == "high_alpha"
     assert report.winning_variant_name == "High Alpha Variant"
     assert report.sample_size_warning is None
-    assert "**Audited Superior Variant:** **High Alpha Variant**" in report.markdown_summary
+    assert "**Highest scoring variant in this sample:** **High Alpha Variant**" in report.markdown_summary
+    assert "statistical significance not established" in report.markdown_summary
+    assert report.to_dict()["validated_strategy_performance"] is False
 
 
 def test_ablation_pipeline_factory_invocation() -> None:

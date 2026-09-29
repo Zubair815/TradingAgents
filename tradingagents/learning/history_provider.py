@@ -67,15 +67,9 @@ class MT5TradeHistoryProvider(TradeHistoryProvider):
 
                 obs = MT5Observer()
 
-            if not getattr(obs, "is_connected", False):
-                conn_mgr = getattr(obs, "connection", None)
-                if conn_mgr and not conn_mgr.is_connected:
-                    try:
-                        conn_mgr.connect()
-                    except Exception as conn_err:
-                        logger.debug("MT5 connection attempt failed: %s", conn_err)
-
-            if not getattr(obs, "is_connected", False):
+            conn_mgr = getattr(obs, "connection", None)
+            connected = conn_mgr.is_connected() if conn_mgr is not None else bool(getattr(obs, "is_connected", False))
+            if not connected:
                 return TradeHistoryResult(
                     candles=None,
                     source="MT5",

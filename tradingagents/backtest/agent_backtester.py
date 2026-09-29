@@ -16,11 +16,15 @@ from __future__ import annotations
 import logging
 import uuid
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
-from datetime import datetime
+from contextlib import nullcontext
+from dataclasses import asdict, dataclass, field, replace
+from datetime import datetime, timedelta
+from math import isfinite
 from typing import Any
 
 from tradingagents.agents.schemas_forex import (
+    ForexAction,
+    ForexRiskDecision,
     ForexRiskDecisionAction,
     ForexTraderProposal,
 )
@@ -29,10 +33,16 @@ from tradingagents.backtest.forex_engine import (
     ForexBacktestEngine,
     ForexBacktestResult,
 )
+from tradingagents.backtest.historical_data import (
+    HistoricalDataUnavailable,
+    candle_frame,
+    validate_historical_input,
+)
 from tradingagents.database.journal import ForexTradeJournal
 from tradingagents.database.models import TradeExitReason
+from tradingagents.dataflows.forex_context import historical_market_scope
 from tradingagents.dataflows.forex_data import ForexBar
-from tradingagents.forex.domain import normalize_forex_pair
+from tradingagents.forex.domain import Timeframe, normalize_forex_pair
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +57,7 @@ class AgentBacktestConfig:
     """Institutional configuration for historical agent backtesting."""
 
     pair: str = "EURUSD"
+    mode: str = "HISTORICAL_AGENT_BACKTEST"
     timeframe: str = "H1"
     date_from: str | None = None
     date_to: str | None = None
@@ -130,7 +141,11 @@ class HistoricalAgentBacktestReport:
 
     backtest_id: str
     mode: str = "HISTORICAL_AGENT_BACKTEST"
-    validated_strategy_performance: bool = True
+    validated_strategy_performance: bool = False
+    validation_status: str = "INSUFFICIENT_DATA"
+    validation_reasons: list[str] = field(default_factory=list)
+    market_data_provenance: dict[str, Any] = field(default_factory=dict)
+    audit: dict[str, Any] = field(default_factory=dict)
     pair: str = "EURUSD"
     timeframe: str = "H1"
     start_date: str = "N/A"
@@ -151,6 +166,11 @@ class HistoricalAgentBacktestReport:
             "backtest_id": self.backtest_id,
             "mode": self.mode,
             "validated_strategy_performance": self.validated_strategy_performance,
+            "validation_status": self.validation_status,
+            "validation_reasons": self.validation_reasons,
+            "market_data_source": self.market_data_provenance.get("source", "unverified"),
+            "market_data_provenance": self.market_data_provenance,
+            **self.audit,
             "pair": self.pair,
             "timeframe": self.timeframe,
             "start_date": self.start_date,
@@ -200,6 +220,8 @@ class HistoricalForexAgentBacktester:
         candles: Sequence[ForexBar],
         lower_tf_candles: Sequence[ForexBar] | None = None,
         agent_pipeline_callable: Callable[[str, datetime, list[ForexBar]], ForexTraderProposal | None] | None = None,
+        market_data_provenance: dict[str, Any] | None = None,
+        lower_tf_provenance: dict[str, Any] | None = None,
     ) -> HistoricalAgentBacktestReport:
         """Run full bar-by-bar historical agent simulation.
 
@@ -212,19 +234,35 @@ class HistoricalForexAgentBacktester:
         """
         pair = normalize_forex_pair(self.config.pair)
         backtest_id = f"bt_agent_{uuid.uuid4().hex[:10]}"
-
-        if not candles:
-            empty_engine = ForexBacktestEngine(config=self.config.backtest_config, journal=self.journal)
-            empty_res = empty_engine._build_empty_result()
-            empty_res.mode = "HISTORICAL_AGENT_BACKTEST"
-            empty_res.validated_strategy_performance = True
-            return HistoricalAgentBacktestReport(
-                backtest_id=backtest_id,
-                pair=pair,
-                timeframe=self.config.timeframe,
-                result=empty_res,
-                markdown_report="# Empty Historical Agent Backtest\nNo candles provided.",
+        if self.config.mode not in ("DEMO", "HISTORICAL_AGENT_BACKTEST"):
+            raise ValueError("Unknown backtest mode")
+        historical = self.config.mode == "HISTORICAL_AGENT_BACKTEST"
+        provenance = {}
+        if historical:
+            costs = self.config.backtest_config
+            if any(not isfinite(v) or v < 0 for v in (
+                costs.default_spread_pips, costs.default_slippage_pips,
+                costs.commission_per_lot_usd, costs.swap_per_day_usd,
+            )) or not isfinite(costs.leverage) or costs.leverage <= 0:
+                raise ValueError("finite nonnegative costs and positive leverage are required")
+            costs.execution_timeframe = self.config.timeframe
+            provenance = validate_historical_input(
+                candles, market_data_provenance, pair, self.config.timeframe,
+                self.config.date_from, self.config.date_to,
             )
+            if lower_tf_candles:
+                lower_meta = lower_tf_provenance or {}
+                lower_tf = lower_meta.get("timeframe")
+                if not lower_tf or Timeframe.from_string(lower_tf).seconds >= Timeframe.from_string(self.config.timeframe).seconds:
+                    raise HistoricalDataUnavailable("verified lower timeframe provenance is required")
+                validate_historical_input(lower_tf_candles, lower_meta, pair, lower_tf,
+                                          provenance["actual_start"], provenance["actual_end"])
+                if lower_meta["source"] != provenance["source"] or lower_meta["symbol"] != provenance["symbol"]:
+                    raise HistoricalDataUnavailable("lower timeframe execution source mismatch")
+        if not candles:
+            raise HistoricalDataUnavailable("no candles provided")
+        if agent_pipeline_callable is None and self.graph_factory is None:
+            raise HistoricalDataUnavailable("analysis pipeline is required")
 
         # Sort candles strictly chronologically
         sorted_candles = sorted(candles, key=lambda c: c.timestamp)
@@ -251,35 +289,69 @@ class HistoricalForexAgentBacktester:
         history_window: list[ForexBar] = []
 
         for i, candle in enumerate(sorted_candles):
+            if historical:
+                # Settle the completed bar before acting on information from its close.
+                engine.step(candle=candle, pair=pair, lower_tf_candles=lower_tf_candles)
             history_window.append(candle)
             new_proposals: list[ForexTraderProposal] = []
 
             if i in analysis_indices:
-                analyses_performed += 1
                 pit_candles = list(history_window)  # Strictly <= current timestamp
+                cutoff = candle.close_time if historical else candle.timestamp
                 proposal: ForexTraderProposal | None = None
+                graph_risk_action = None
 
                 # 1. User/Test-injected callable
                 if agent_pipeline_callable is not None:
-                    proposal = agent_pipeline_callable(pair, candle.timestamp, pit_candles)
+                    if historical:
+                        with historical_market_scope(pair, candle_frame(pit_candles, provenance), cutoff):
+                            proposal = agent_pipeline_callable(pair, cutoff, pit_candles)
+                    else:
+                        proposal = agent_pipeline_callable(pair, cutoff, pit_candles)
                 # 2. Graph factory invocation
                 elif self.graph_factory is not None:
-                    try:
+                    scope = historical_market_scope(pair, candle_frame(pit_candles, provenance), cutoff) if historical else nullcontext()
+                    with scope:
+                        # Calendar coverage is mandatory for deterministic event risk.
+                        from tradingagents.dataflows.trading_economics import (
+                            TradingEconomicsCalendar,
+                        )
+                        if historical:
+                            TradingEconomicsCalendar().query(
+                                pair, (cutoff - timedelta(days=7)).date().isoformat(),
+                                (cutoff + timedelta(days=7)).date().isoformat(), as_of=cutoff,
+                            )
                         graph = self.graph_factory()
                         final_state, signal = graph.run(
                             pair=pair,
-                            trade_date=candle.timestamp.isoformat(),
+                            trade_date=cutoff.isoformat(),
                             execution_timeframe=self.config.timeframe,
                         )
                         proposal = final_state.get("forex_proposal")
-                    except Exception as exc:
-                        logger.warning("Agent graph failed at %s: %s", candle.timestamp, exc)
-                        proposal = None
+                        if proposal is None:
+                            raise ValueError("historical graph did not produce a typed decision")
+                        if isinstance(proposal, dict):
+                            proposal = ForexTraderProposal.model_validate(proposal)
+                        decision = ForexRiskDecision.model_validate(final_state.get("forex_risk_decision"))
+                        if decision.pair != pair or proposal.pair != pair:
+                            raise ValueError("historical graph returned a different pair")
+                        graph_risk_action = decision.decision
+                        if (decision.approved_action != ForexAction.NO_TRADE
+                                and decision.decision != ForexRiskDecisionAction.REJECT
+                                and (not decision.approved_lot_size or decision.approved_lot_size <= 0)):
+                            raise ValueError("historical graph did not authorize a positive lot size")
+                        updates = {"action": decision.approved_action, "suggested_lot_size": decision.approved_lot_size}
+                        for key, value in (("entry_price", decision.entry_price), ("stop_loss", decision.stop_loss),
+                                           ("take_profit_1", decision.take_profit)):
+                            if value is not None:
+                                updates[key] = value
+                        proposal = proposal.model_copy(update=updates)
+                analyses_performed += 1
 
                 if proposal is not None:
                     proposals_generated += 1
                     # Check risk action
-                    action_val = getattr(proposal, "risk_action", ForexRiskDecisionAction.APPROVE)
+                    action_val = graph_risk_action or getattr(proposal, "risk_action", ForexRiskDecisionAction.APPROVE)
                     if hasattr(action_val, "value"):
                         action_str = action_val.value
                     else:
@@ -297,27 +369,38 @@ class HistoricalForexAgentBacktester:
                         proposals_skipped += 1
 
             # Discrete step execution on incoming bar
-            engine.step(
-                candle=candle,
-                pair=pair,
-                new_proposals=new_proposals if new_proposals else None,
-                lower_tf_candles=lower_tf_candles,
-            )
+            if historical:
+                # Zero-latency close-price fill assumption, with normal costs and constraints.
+                execution_bar = replace(candle, timestamp=candle.close_time,
+                                        open=candle.close, high=candle.close, low=candle.close)
+                for proposal in new_proposals:
+                    engine.execute_proposal(proposal, execution_bar)
+            else:
+                engine.step(candle=candle, pair=pair, new_proposals=new_proposals or None,
+                            lower_tf_candles=lower_tf_candles)
 
         # Force settlement on last bar
         if engine.open_trades and sorted_candles:
             last_bar = sorted_candles[-1]
             for t in list(engine.open_trades):
-                engine._settle_trade(t, last_bar.close, last_bar.timestamp, TradeExitReason.MANUAL)
+                engine._settle_trade(t, last_bar.close, last_bar.close_time if historical else last_bar.timestamp, TradeExitReason.MANUAL)
             engine.open_trades = []
+            if historical:
+                engine.equity = engine.balance
 
         start_str = sorted_candles[0].timestamp.strftime("%Y-%m-%d %H:%M")
-        end_str = sorted_candles[-1].timestamp.strftime("%Y-%m-%d %H:%M")
+        end_str = (sorted_candles[-1].close_time if historical else sorted_candles[-1].timestamp).strftime("%Y-%m-%d %H:%M")
         result = engine._build_result(start_str, end_str)
 
         # Set mode and validation flags
-        result.mode = "HISTORICAL_AGENT_BACKTEST"
-        result.validated_strategy_performance = True
+        result.mode = self.config.mode
+        result.validated_strategy_performance = False
+        reasons = (["Historical input integrity checked; statistical strategy validation has not been performed.",
+                    "LLM pretrained knowledge cannot be proven point-in-time.",
+                    "Macro series unavailable without verified intraday archives; news uses observed archives only."]
+                   if historical else ["Illustrative/demo only; candle provenance is unverified."])
+        result.validation_status = "PARTIALLY_VALIDATED" if historical else "DEMO"
+        result.validation_reasons = reasons
 
         # Render Markdown Dashboard
         cost_control_meta = {
@@ -329,6 +412,8 @@ class HistoricalForexAgentBacktester:
             "provider": self.config.provider,
             "quick_model": self.config.quick_model,
             "deep_model": self.config.deep_model,
+            "token_limits": self.config.token_limits,
+            "research_depth": self.config.research_depth,
         }
 
         execution_meta = {
@@ -359,11 +444,26 @@ class HistoricalForexAgentBacktester:
             proposals_gen=proposals_generated,
             proposals_app=proposals_approved,
         )
+        report_md += "\n\n" + "\n".join(f"- {reason}" for reason in reasons)
+        if historical:
+            report_md += (f"\n- Source: {provenance['source']} / {provenance['symbol']}"
+                          f"; execution market: {provenance['execution_market']}"
+                          f"\n- Coverage: {provenance['actual_start']} to {provenance['actual_end']}"
+                          f"\n- Retrieved: {provenance['retrieved_at_utc']}")
 
         return HistoricalAgentBacktestReport(
             backtest_id=backtest_id,
-            mode="HISTORICAL_AGENT_BACKTEST",
-            validated_strategy_performance=True,
+            mode=self.config.mode,
+            validated_strategy_performance=False,
+            validation_status="PARTIALLY_VALIDATED" if historical else "DEMO",
+            validation_reasons=reasons,
+            market_data_provenance=provenance,
+            audit={"analysis_cutoff_policy": "completed candles only; analysis and fills at bar close" if historical else "demo only",
+                   "analysts": self.config.analyst_selection, "provider": self.config.provider,
+                   "quick_model": self.config.quick_model, "deep_model": self.config.deep_model,
+                   "strategy_version": "historical-agent-phase30", "prompt_system_version": None,
+                   "execution_assumptions": {k: v for k, v in asdict(self.config.backtest_config).items() if k != "results_dir"},
+                   "evidence_policy": "calendar mandatory for graph; news archive optional; unverified intraday macro unavailable"},
             pair=pair,
             timeframe=self.config.timeframe,
             start_date=start_str,
@@ -395,7 +495,8 @@ class HistoricalForexAgentBacktester:
         """Build institutional markdown report."""
         lines = [
             "# Real Historical Agent Backtest Report",
-            f"**Run ID:** `{report_id}` | **Mode:** `HISTORICAL_AGENT_BACKTEST` | **Validated:** `True`",
+            f"**Run ID:** `{report_id}` | **Mode:** `{self.config.mode}` | **Validated:** `False`",
+            "Historical simulation is not statistical validation of strategy performance." if self.config.mode != "DEMO" else "Illustrative/demo only.",
             f"**Pair:** `{pair}` | **Period:** {start_date} to {end_date} | **Timeframe:** `{self.config.timeframe}`",
             "",
             "## 1. Agent Evaluation & Cost Control",

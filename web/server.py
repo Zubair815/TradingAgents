@@ -5,6 +5,9 @@ to launch analyses, track live agent progress, and retrieve reports.
 """
 
 import asyncio
+import hashlib
+import hmac
+import ipaddress
 import json
 import logging
 import os
@@ -18,6 +21,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -32,6 +36,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from tradingagents.dataflows.config import get_config as get_runtime_config  # noqa: E402
 from tradingagents.dataflows.utils import safe_ticker_component  # noqa: E402
 from tradingagents.default_config import DEFAULT_CONFIG  # noqa: E402
 from tradingagents.graph.trading_graph import TradingAgentsGraph  # noqa: E402
@@ -45,42 +50,71 @@ DASHBOARD_API_KEY = os.environ.get("TRADINGAGENTS_DASHBOARD_API_KEY") or os.envi
 _SESSION_TOKEN = secrets.token_hex(24)
 
 
+def _api_session_token() -> str:
+    return hmac.new(_SESSION_TOKEN.encode(), DASHBOARD_API_KEY.encode(), hashlib.sha256).hexdigest()
+
+
+def _cookie_value(secret: str, expires: int) -> str:
+    signature = hmac.new(secret.encode(), str(expires).encode(), hashlib.sha256).hexdigest()
+    return f"{expires}.{signature}"
+
+
+def _valid_cookie(cookie: str, secret: str) -> bool:
+    try:
+        expires = int(cookie.split(".", 1)[0])
+        return time.time() < expires and secrets.compare_digest(cookie.encode(), _cookie_value(secret, expires).encode())
+    except (ValueError, TypeError):
+        return False
+
+
 def verify_auth(request: Request) -> bool:
-    """Verify that the request is authorized to launch analyses.
-
-    If TRADINGAGENTS_DASHBOARD_API_KEY is configured in the environment,
-    require an explicit matching API key header (X-API-Key or Authorization Bearer).
-    Otherwise, require the session token (issued via SameSite cookie or X-Session-Token).
-    """
-    api_key_header = request.headers.get("X-API-Key") or request.headers.get("x-api-key")
-    auth_header = request.headers.get("Authorization") or request.headers.get("authorization")
-    bearer_token = None
-    if auth_header and auth_header.startswith("Bearer "):
-        bearer_token = auth_header[7:].strip()
-
-    provided_token = api_key_header or bearer_token
-
-    if DASHBOARD_API_KEY:
-        if provided_token and secrets.compare_digest(provided_token, DASHBOARD_API_KEY):
+    """Explicit keys take precedence; cookies require a same-origin browser request."""
+    if not isinstance(_SESSION_TOKEN, str) or not _SESSION_TOKEN or (DASHBOARD_API_KEY is not None and not isinstance(DASHBOARD_API_KEY, str)):
+        raise HTTPException(503, detail={"code": "AUTH_UNAVAILABLE"})
+    key = request.headers.get("X-API-Key")
+    authorization = request.headers.get("Authorization")
+    if authorization:
+        if not authorization.startswith("Bearer "):
+            raise HTTPException(401, detail="Unauthorized")
+        key = key or authorization[7:].strip()
+    header = request.headers.get("X-Session-Token")
+    if key is not None or header is not None:
+        supplied = key if key is not None else header
+        expected = DASHBOARD_API_KEY or _SESSION_TOKEN
+        if supplied and secrets.compare_digest(supplied.encode(), expected.encode()):
             return True
-        raise HTTPException(
-            status_code=401,
-            detail="Unauthorized: invalid or missing API key (configure TRADINGAGENTS_DASHBOARD_API_KEY)",
-        )
-
-    # When no explicit DASHBOARD_API_KEY is configured, require session token authentication
-    session_cookie = request.cookies.get("tradingagents_session")
-    session_header = request.headers.get("X-Session-Token") or provided_token
-
-    if session_cookie and secrets.compare_digest(session_cookie, _SESSION_TOKEN):
+        raise HTTPException(401, detail="Unauthorized: invalid credentials")
+    origin = request.headers.get("Origin")
+    if origin and (urlsplit(origin).scheme, urlsplit(origin).netloc) != (request.url.scheme, request.url.netloc):
+        raise HTTPException(401, detail="Unauthorized: cross-origin cookie request")
+    cookie_name = "tradingagents_api_session" if DASHBOARD_API_KEY else "tradingagents_session"
+    expected = _api_session_token() if DASHBOARD_API_KEY else _SESSION_TOKEN
+    cookie = request.cookies.get(cookie_name)
+    if cookie and _valid_cookie(cookie, expected):
         return True
-    if session_header and secrets.compare_digest(session_header, _SESSION_TOKEN):
-        return True
+    raise HTTPException(401, detail="Unauthorized: missing dashboard authentication")
 
-    raise HTTPException(
-        status_code=401,
-        detail="Unauthorized: missing session authentication. Access dashboard in browser or provide API key.",
+
+def set_session_cookie(response: Response, request: Request, *, api_key=False):
+    response.set_cookie(
+        key="tradingagents_api_session" if api_key else "tradingagents_session",
+        value=_cookie_value(_api_session_token() if api_key else _SESSION_TOKEN, int(time.time()) + 8 * 60 * 60),
+        httponly=True, samesite="strict", secure=request.url.scheme == "https",
+        max_age=8 * 60 * 60, path="/",
     )
+    response.headers["Cache-Control"] = "no-store"
+
+
+def _local_browser(request: Request) -> bool:
+    host = request.url.hostname
+    peer = request.client.host if request.client else ""
+    if host == "testserver" and peer == "testclient":
+        return True  # Starlette's in-process test transport, never a network peer.
+    try:
+        local_host = host == "localhost" or ipaddress.ip_address(host).is_loopback
+        return local_host and ipaddress.ip_address(peer).is_loopback
+    except ValueError:
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -89,6 +123,33 @@ def verify_auth(request: Request) -> bool:
 _runs: dict[str, dict[str, Any]] = {}         # run_id -> run metadata
 _run_events: dict[str, list[dict]] = {}        # run_id -> ordered event list
 _completed_reports: dict[str, dict] = {}       # run_id -> final_state snapshot
+_RUN_TTL_SECONDS = 1800
+
+
+def _prune_expired_runs() -> list[str]:
+    """Remove stale queued/running entries so the in-memory run store stays bounded."""
+    now = time.time()
+    expired: list[str] = []
+    for run_id, run in list(_runs.items()):
+        status = str(run.get("status", "")).lower()
+        if status in {"completed", "failed", "cancelled", "done"}:
+            continue
+        started = run.get("started_at")
+        if not started:
+            continue
+        try:
+            started_at = datetime.fromisoformat(str(started))
+        except ValueError:
+            expired.append(run_id)
+            continue
+        if started_at.tzinfo is None:
+            started_at = started_at.replace(tzinfo=datetime.now().astimezone().tzinfo)
+        if now - started_at.timestamp() > _RUN_TTL_SECONDS:
+            expired.append(run_id)
+    for run_id in expired:
+        _runs.pop(run_id, None)
+        _run_events.pop(run_id, None)
+    return expired
 
 
 # ---------------------------------------------------------------------------
@@ -376,18 +437,12 @@ def _run_analysis(run_id: str, req: AnalysisRequest):
         })
 
     except Exception as exc:
-        error_msg = str(exc)
-        # Sanitize: never leak API keys from error messages
-        if "openrouter.ai/workspaces" in error_msg:
-            error_msg = "OpenRouter credit limit exceeded. Add credits and retry."
-        elif "402" in error_msg:
-            error_msg = "Provider returned 402 — credit/billing limit reached."
-
+        error_msg = "The analysis provider failed. Please retry."
         _runs[run_id]["status"] = "failed"
         _runs[run_id]["error"] = error_msg
         _runs[run_id]["finished_at"] = datetime.now().isoformat()
         _emit(run_id, "error", {"error": error_msg})
-        logger.error("Analysis failed for run %s: %s", run_id, error_msg, exc_info=True)
+        logger.error("Analysis failed for run %s (%s)", run_id, type(exc).__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -396,8 +451,15 @@ def _run_analysis(run_id: str, req: AnalysisRequest):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("TradingAgents Web Dashboard starting")
-    yield
-    logger.info("TradingAgents Web Dashboard shutting down")
+    from web.forex_routes import get_forex_runtime, reset_forex_state
+    runtime = get_forex_runtime()
+    app.state.forex_runtime = runtime
+    try:
+        await asyncio.to_thread(runtime.start)
+        yield
+    finally:
+        await asyncio.to_thread(reset_forex_state)
+        logger.info("TradingAgents Web Dashboard shutting down")
 
 
 app = FastAPI(
@@ -439,31 +501,50 @@ app.include_router(forex_router)
 # Routes
 # ---------------------------------------------------------------------------
 @app.get("/", response_class=HTMLResponse)
-async def index(response: Response):
+async def index(response: Response, request: Request):
     """Serve the main dashboard page and establish session token."""
     index_path = STATIC_DIR / "index.html"
     if not index_path.exists():
         raise HTTPException(status_code=500, detail="Frontend not built")
-    response.set_cookie(
-        key="tradingagents_session",
-        value=_SESSION_TOKEN,
-        httponly=True,
-        samesite="lax",
-        path="/",
-    )
+    if not DASHBOARD_API_KEY and _local_browser(request):
+        set_session_cookie(response, request)
+    response.headers["Cache-Control"] = "no-store"
     return index_path.read_text(encoding="utf-8")
+
+
+@app.post("/api/auth/session")
+async def browser_api_session(request: Request, response: Response):
+    """Exchange an in-memory key for an HttpOnly cookie usable by EventSource."""
+    verify_auth(request)
+    set_session_cookie(response, request, api_key=bool(DASHBOARD_API_KEY))
+    return {"authenticated": True}
 
 
 @app.get("/api/config")
 async def get_config():
-    """Return safe config (no secrets) for the frontend."""
+    """Return the canonical runtime-aware config without exposing secrets."""
+    cfg = get_runtime_config()
+    runtime_settings = {
+        "llm_provider": cfg.get("llm_provider"),
+        "quick_think_llm": cfg.get("quick_think_llm"),
+        "deep_think_llm": cfg.get("deep_think_llm"),
+        "backend_url": cfg.get("backend_url"),
+        "temperature": cfg.get("temperature"),
+        "max_tokens": cfg.get("max_tokens"),
+        "forex_market_source": cfg.get("forex_market_source"),
+        "forex_max_spread_pips": cfg.get("forex_max_spread_pips"),
+    }
     return {
         "auth_required": bool(DASHBOARD_API_KEY),
-        "provider": DEFAULT_CONFIG.get("llm_provider", "openai"),
-        "quick_model": DEFAULT_CONFIG.get("quick_think_llm", ""),
-        "deep_model": DEFAULT_CONFIG.get("deep_think_llm", ""),
-        "max_tokens": DEFAULT_CONFIG.get("max_tokens"),
-        "temperature": DEFAULT_CONFIG.get("temperature"),
+        "provider": cfg.get("llm_provider", DEFAULT_CONFIG.get("llm_provider", "openai")),
+        "quick_model": cfg.get("quick_think_llm", DEFAULT_CONFIG.get("quick_think_llm", "")),
+        "deep_model": cfg.get("deep_think_llm", DEFAULT_CONFIG.get("deep_think_llm", "")),
+        "max_tokens": cfg.get("max_tokens", DEFAULT_CONFIG.get("max_tokens")),
+        "temperature": cfg.get("temperature", DEFAULT_CONFIG.get("temperature")),
+        "runtime_settings": runtime_settings,
+        "secret_status": {
+            "api_key": "Configured" if (os.environ.get("TRADINGAGENTS_DASHBOARD_API_KEY") or os.environ.get("DASHBOARD_API_KEY")) else "Missing",
+        },
         "analysts": ["market", "social", "news", "fundamentals"],
         "forex_analysts": ["forex_technical", "forex_macro", "forex_news"],
         "providers": [
@@ -507,13 +588,35 @@ async def start_analysis(req: AnalysisRequest, request: Request):
 @app.get("/api/runs")
 async def list_runs():
     """List all runs (most recent first)."""
+    _prune_expired_runs()
     runs = sorted(_runs.values(), key=lambda r: r["started_at"], reverse=True)
     return {"runs": runs}
+
+
+@app.post("/api/runs/{run_id}/cancel")
+async def cancel_run(run_id: str, request: Request):
+    """Cancel a queued or in-flight run and keep the event stream deterministic."""
+    verify_auth(request)
+    if run_id not in _runs:
+        raise HTTPException(status_code=404, detail="Run not found")
+    run = _runs[run_id]
+    if str(run.get("status", "")).lower() in {"completed", "failed", "cancelled"}:
+        return {"run_id": run_id, "status": run.get("status", "cancelled")}
+    run["status"] = "cancelled"
+    run["finished_at"] = datetime.now().isoformat()
+    run["error"] = "Cancelled by user"
+    _run_events.setdefault(run_id, []).append({
+        "type": "cancelled",
+        "data": {"run_id": run_id, "status": "cancelled", "message": "Run cancelled by user"},
+        "ts": time.time(),
+    })
+    return {"run_id": run_id, "status": "cancelled"}
 
 
 @app.get("/api/runs/{run_id}")
 async def get_run(run_id: str):
     """Get run details."""
+    _prune_expired_runs()
     if run_id not in _runs:
         raise HTTPException(status_code=404, detail="Run not found")
     return _runs[run_id]
@@ -626,6 +729,7 @@ async def get_report(run_id: str):
 @app.get("/api/runs/{run_id}/events")
 async def stream_events(run_id: str, request: Request):
     """SSE endpoint for live progress updates."""
+    _prune_expired_runs()
     if run_id not in _runs:
         raise HTTPException(status_code=404, detail="Run not found")
 
@@ -642,7 +746,7 @@ async def stream_events(run_id: str, request: Request):
                 last_idx += 1
 
                 # Stop streaming after terminal events
-                if evt["type"] in ("complete", "error"):
+                if evt["type"] in ("complete", "error", "cancelled"):
                     return
 
             await asyncio.sleep(0.5)

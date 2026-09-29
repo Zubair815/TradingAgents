@@ -364,7 +364,8 @@ def test_api_confidence_calibration_routes():
     from fastapi import FastAPI
     app = FastAPI()
     app.include_router(router)
-    client = TestClient(app)
+    from web.server import _SESSION_TOKEN, DASHBOARD_API_KEY
+    client = TestClient(app, headers={"X-API-Key": DASHBOARD_API_KEY or _SESSION_TOKEN})
 
     # GET /api/forex/metrics/confidence-calibration
     res_get = client.get("/api/forex/metrics/confidence-calibration?min_samples=2")

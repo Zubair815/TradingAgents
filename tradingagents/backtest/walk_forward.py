@@ -188,6 +188,9 @@ class WalkForwardValidationReport:
     def to_dict(self) -> dict[str, Any]:
         return {
             "validation_id": self.validation_id,
+            "validated_strategy_performance": False,
+            "validation_status": "DEMO",
+            "validation_reasons": ["Descriptive split comparison; source provenance and statistical significance are unverified."],
             "pair": self.pair,
             "timeframe": self.timeframe,
             "splits": [s.to_dict() for s in self.splits],
@@ -527,7 +530,7 @@ class ForexWalkForwardValidator:
     ) -> str:
         """Render institutional walk-forward summary dashboard."""
         verdict_badge = {
-            "ROBUST": "🟢 **ROBUST** (Strategy generalizes well to unseen historical regime)",
+            "ROBUST": "🟢 **ROBUST** (Heuristic thresholds met in this sample; not statistical validation)",
             "MARGINAL": "🟡 **MARGINAL** (Degradation observed, sizing dampening advised)",
             "OVERFITTED": "🔴 **OVERFITTED** (Performance deteriorates significantly out-of-sample)",
             "TAINTED": "🚨 **TAINTED** (OOS data was accessed during optimization)",

@@ -119,7 +119,7 @@ def test_duplicate_reflection_prevention(tmp_path: Path):
         close_time_utc=t_close.isoformat(),
     )
 
-    provider = InMemoryTradeHistoryProvider(candle_map={"EURUSD": []})
+    provider = InMemoryTradeHistoryProvider(candle_map=lambda pair, start, end, tf: [ForexBar(timestamp=start, open=1.08, high=1.09, low=1.07, close=1.085)])
     processor = ClosedTradeProcessor(journal=journal, history_provider=provider)
 
     res1 = processor.process_closed_trade("trd_dup_1")
@@ -164,11 +164,12 @@ def test_transient_failure_and_retry(tmp_path: Path):
     # First attempt fails
     res_fail = processor.process_closed_trade("trd_retry_1")
     assert res_fail.status == PostCloseProcessingStatus.FAILED
-    assert "socket timeout" in (res_fail.error_message or "")
+    assert "retry" in (res_fail.error_message or "")
+    assert "socket timeout" not in (res_fail.error_message or "")
     assert processor.get_status("trd_retry_1") == PostCloseProcessingStatus.FAILED
 
     # Second attempt with healthy provider succeeds
-    healthy_provider = InMemoryTradeHistoryProvider(candle_map={"GBPUSD": []})
+    healthy_provider = InMemoryTradeHistoryProvider(candle_map=lambda pair, start, end, tf: [ForexBar(timestamp=start, open=1.25, high=1.26, low=1.24, close=1.245)])
     processor.history_provider = healthy_provider
     processor.learning_mgr.history_provider = healthy_provider
 
@@ -216,7 +217,7 @@ def test_automatic_orchestration_via_mt5_observation_service(tmp_path: Path):
     mock_obs.get_pending_orders.return_value = []
     mock_obs.get_deals.return_value = []
 
-    history_provider = InMemoryTradeHistoryProvider(candle_map={"EURUSD": []})
+    history_provider = InMemoryTradeHistoryProvider(candle_map=lambda pair, start, end, tf: [ForexBar(timestamp=start, open=1.08, high=1.09, low=1.07, close=1.085)])
     processor = ClosedTradeProcessor(
         journal=journal,
         history_provider=history_provider,

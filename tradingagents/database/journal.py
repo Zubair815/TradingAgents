@@ -1210,9 +1210,9 @@ class ForexTradeJournal:
         pair: str,
         setup_type: str,
         outcome_category: str,
-        observation: str,
-        root_cause: str,
-        actionable_rule: str,
+        observation: str | None = None,
+        root_cause: str | None = None,
+        actionable_rule: str | None = None,
         lesson_id: str | None = None,
         trade_id: str | None = None,
         proposal_id: str | None = None,
@@ -1225,6 +1225,11 @@ class ForexTradeJournal:
         lid = lesson_id or f"lsn_{uuid.uuid4().hex[:12]}"
         now_str = created_at_utc or datetime.now(timezone.utc).isoformat()
         tags_json = json.dumps(tags or [])
+        # Allow observation/root_cause/actionable_rule to be optional when callers
+        # provide only a subset of lesson details (frontend or quick annotations).
+        observation_val = observation or ""
+        root_cause_val = root_cause or ""
+        actionable_rule_val = actionable_rule or ""
 
         with self._lock:
             conn = self._get_connection()
@@ -1246,9 +1251,9 @@ class ForexTradeJournal:
                             str(setup_type),
                             str(outcome_category),
                             rule_violated,
-                            observation,
-                            root_cause,
-                            actionable_rule,
+                            observation_val,
+                            root_cause_val,
+                            actionable_rule_val,
                             confidence_score,
                             tags_json,
                             now_str,

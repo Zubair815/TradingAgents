@@ -176,6 +176,11 @@ class TradingEconomicsCalendar:
         return events
 
     def query(self, symbol, start_date, end_date, as_of=None):
+        from tradingagents.dataflows.forex_context import historical_market_context
+        historical = historical_market_context()
+        if historical is not None:
+            bound = historical[2]
+            as_of = min(utc_timestamp(as_of), bound) if as_of is not None else bound
         countries = self._countries(symbol)
         cutoff = utc_timestamp(as_of) if as_of is not None else self.clock()
         candidates = []

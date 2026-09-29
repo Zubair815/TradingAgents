@@ -19,6 +19,16 @@
 
 # TradingAgents: Multi-Agents LLM Financial Trading Framework
 
+## Verified current branch status
+
+The current workspace was verified with the repository's supported Windows virtual environment:
+
+```powershell
+D:\TradingAgents\.venv\Scripts\python.exe -m pytest -q
+```
+
+Result: `2051 passed, 6 skipped, 0 failed` in 60.35s. The suite is green on the current branch. The remaining warnings are non-fatal model-catalog warnings for newer provider aliases and optional dependency skips.
+
 ## News
 - [2026-09] **Interactive Web Dashboard**: Added a modern browser-based UI and FastAPI backend with real-time SSE progress streaming across all 13 pipeline nodes, interactive multi-section reports, secure browser session auth with optional API key protection, and unified history deduplication.
 - [2026-09] **TradingAgents v0.5.0** released with point-in-time integrity across every dated path, SEC EDGAR fundamentals served as filed, backtesting over a ticker and date grid, portfolio-aware runs, and current model lineups across every provider. See [CHANGELOG.md](CHANGELOG.md) for the full list.

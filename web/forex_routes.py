@@ -28,14 +28,15 @@ import dataclasses
 import json
 import logging
 import math
+import os
 import threading
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 # Forex Domain, Journal, Risk, Backtest, Analytics, MT5, Learning imports
@@ -58,6 +59,12 @@ from tradingagents.backtest.forex_engine import (
     ForexBacktestConfig,
     ForexBacktestEngine,
 )
+from tradingagents.backtest.walk_forward import ForexWalkForwardValidator
+from tradingagents.dataflows.config import (
+    get_config as get_runtime_config,
+    reset_runtime_settings,
+    save_runtime_settings,
+)
 from tradingagents.database.journal import ForexTradeJournal
 from tradingagents.database.models import (
     ProposalStatus,
@@ -65,6 +72,7 @@ from tradingagents.database.models import (
     TradeStatus,
 )
 from tradingagents.dataflows.forex_data import ForexBar
+from tradingagents.dataflows.forex_quality import DataInsufficientError
 from tradingagents.forex import ForexTradingAgentsGraph
 from tradingagents.forex.domain import (
     MAJOR_PAIRS,
@@ -89,7 +97,10 @@ from tradingagents.risk.sizing import (
 
 logger = logging.getLogger("tradingagents.web.forex")
 
-router = APIRouter(prefix="/api/forex", tags=["forex"])
+from web.forex_security import ForexRoute, verify_forex_auth  # noqa: E402
+
+router = APIRouter(prefix="/api/forex", tags=["forex"],
+                   dependencies=[Depends(verify_forex_auth)], route_class=ForexRoute)
 
 # ---------------------------------------------------------------------------
 # Global State & Singletons (with thread-safe overrides for tests)
@@ -101,12 +112,40 @@ _analytics_mgr: ForexAnalyticsManager | None = None
 _metrics_mgr: ForexMetricsManager | None = None
 _learning_mgr: ForexLearningManager | None = None
 _mt5_observer: MT5Observer | None = None
+_forex_runtime = None
 
 # In-memory stores for runs, events, and backtests
 _forex_runs: dict[str, dict[str, Any]] = {}
 _forex_run_events: dict[str, list[dict[str, Any]]] = {}
 _forex_completed_reports: dict[str, dict[str, Any]] = {}
 _backtest_runs: dict[str, dict[str, Any]] = {}
+_FOREX_RUN_TTL_SECONDS = 1800
+
+
+def _prune_expired_forex_runs() -> list[str]:
+    """Drop stale queued/running Forex jobs so the live run store remains bounded."""
+    now = time.time()
+    expired: list[str] = []
+    for run_id, run in list(_forex_runs.items()):
+        status = str(run.get("status", "")).lower()
+        if status in {"completed", "failed", "cancelled", "done"}:
+            continue
+        started = run.get("started_at")
+        if not started:
+            continue
+        try:
+            started_at = datetime.fromisoformat(str(started))
+        except ValueError:
+            expired.append(run_id)
+            continue
+        if started_at.tzinfo is None:
+            started_at = started_at.replace(tzinfo=timezone.utc)
+        if now - started_at.timestamp() > _FOREX_RUN_TTL_SECONDS:
+            expired.append(run_id)
+    for run_id in expired:
+        _forex_runs.pop(run_id, None)
+        _forex_run_events.pop(run_id, None)
+    return expired
 
 
 def get_journal() -> ForexTradeJournal:
@@ -150,7 +189,8 @@ def get_learning_manager() -> ForexLearningManager:
     global _learning_mgr
     with _lock:
         if _learning_mgr is None:
-            _learning_mgr = ForexLearningManager(journal=get_journal())
+            from tradingagents.learning.history_provider import MT5TradeHistoryProvider
+            _learning_mgr = ForexLearningManager(journal=get_journal(), history_provider=MT5TradeHistoryProvider(get_mt5_observer()))
         return _learning_mgr
 
 
@@ -159,8 +199,20 @@ def get_mt5_observer() -> MT5Observer:
     global _mt5_observer
     with _lock:
         if _mt5_observer is None:
-            _mt5_observer = MT5Observer()
+            _mt5_observer = MT5Observer(auto_connect=False)
         return _mt5_observer
+
+
+def get_forex_runtime():
+    """Authoritative dependency chain for both API requests and application lifespan."""
+    global _forex_runtime
+    with _lock:
+        if _forex_runtime is not None and _forex_runtime.closed:
+            reset_forex_state()
+        if _forex_runtime is None:
+            from web.forex_runtime import ForexRuntime
+            _forex_runtime = ForexRuntime(get_mt5_observer(), get_journal_manager(), get_learning_manager())
+        return _forex_runtime
 
 
 def set_forex_dependencies(
@@ -172,6 +224,14 @@ def set_forex_dependencies(
     mt5_observer: MT5Observer | None = None,
 ) -> None:
     """Inject dependencies for testing or configuration."""
+    if _forex_runtime is not None:
+        reset_forex_state()
+        if _forex_runtime is not None:
+            raise RuntimeError("Previous MT5 runtime is still stopping")
+    if journal_manager is not None:
+        if journal is not None and journal_manager.journal is not journal:
+            raise ValueError("Journal manager must use the shared journal")
+        journal = journal_manager.journal
     global _journal, _journal_mgr, _analytics_mgr, _metrics_mgr, _learning_mgr, _mt5_observer
     with _lock:
         _journal = journal
@@ -184,7 +244,11 @@ def set_forex_dependencies(
 
 def reset_forex_state() -> None:
     """Reset all in-memory runs, events, backtests, and dependency singletons."""
-    global _journal, _journal_mgr, _analytics_mgr, _metrics_mgr, _learning_mgr, _mt5_observer
+    global _journal, _journal_mgr, _analytics_mgr, _metrics_mgr, _learning_mgr, _mt5_observer, _forex_runtime
+    if _forex_runtime is not None:
+        if not _forex_runtime.close():
+            return  # Keep the authoritative runtime while a native call drains.
+        _forex_runtime = None
     with _lock:
         _journal = None
         _journal_mgr = None
@@ -198,18 +262,68 @@ def reset_forex_state() -> None:
         _backtest_runs.clear()
 
 
-def verify_forex_auth(request: Request) -> bool:
-    """Enforce authentication on Forex mutation and execution routes.
+_SETTINGS_KEYS = (
+    "llm_provider",
+    "quick_think_llm",
+    "deep_think_llm",
+    "backend_url",
+    "output_language",
+    "max_debate_rounds",
+    "max_risk_discuss_rounds",
+    "checkpoint_enabled",
+    "temperature",
+    "llm_max_retries",
+    "max_tokens",
+    "openai_reasoning_effort",
+    "google_thinking_level",
+    "anthropic_effort",
+    "forex_market_source",
+    "forex_allow_yahoo_fallback",
+    "forex_broker_symbols",
+    "forex_quote_max_age_seconds",
+    "forex_max_spread_pips",
+    "forex_calendar_provider",
+    "forex_calendar_max_age_seconds",
+    "data_vendors",
+    "tool_vendors",
+)
 
-    Delegates to web.server.verify_auth.
-    CRITICAL: Never catch HTTPException — unauthorized requests MUST raise 401.
-    """
+
+def _serialize_runtime_settings() -> dict[str, Any]:
+    cfg = get_runtime_config()
+    return {key: cfg.get(key) for key in _SETTINGS_KEYS}
+
+
+@router.get("/settings")
+def get_runtime_settings():
+    """Return safe local runtime settings without exposing secret material."""
+    settings = _serialize_runtime_settings()
+    return {
+        "settings": settings,
+        "secret_status": {
+            "api_key": "Configured" if (os.environ.get("TRADINGAGENTS_DASHBOARD_API_KEY") or os.environ.get("DASHBOARD_API_KEY")) else "Missing",
+            "llm_provider_secrets": "Configured" if settings.get("llm_provider") else "Missing",
+        },
+    }
+
+
+@router.patch("/settings")
+def patch_runtime_settings(payload: dict[str, Any]):
+    """Persist non-secret runtime settings to the local settings file."""
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail={"error": "Settings payload must be an object"})
     try:
-        from web.server import verify_auth
-    except ImportError:
-        return True
+        saved = save_runtime_settings(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+    return {"settings": {key: saved.get(key) for key in _SETTINGS_KEYS}, "saved": True}
 
-    return verify_auth(request)
+
+@router.post("/settings/reset")
+def reset_runtime_settings_route():
+    """Restore the project's default config and drop local runtime overrides."""
+    saved = reset_runtime_settings()
+    return {"settings": {key: saved.get(key) for key in _SETTINGS_KEYS}, "reset": True}
 
 
 # Backward-compatible alias
@@ -346,8 +460,8 @@ class ForexBacktestRequest(BaseModel):
     provider: str | None = Field(default=None, description="LLM provider: openai, google, anthropic")
     quick_model: str | None = Field(default=None, description="Quick thinking model")
     deep_model: str | None = Field(default=None, description="Deep reasoning model")
-    token_limits: int | None = Field(default=None, description="Max token limit per call")
-    research_depth: str = Field(default="standard", description="Research depth: standard or deep")
+    token_limits: int | None = Field(default=None, ge=1, description="Max token limit per call")
+    research_depth: Literal["standard", "deep"] = Field(default="standard", description="Research depth: standard or deep")
     candles: list[dict[str, Any]] | None = Field(
         default=None, description="Optional custom OHLCV candle records"
     )
@@ -465,14 +579,42 @@ async def get_trade(
         raise HTTPException(status_code=404, detail=f"Trade {trade_id} not found")
 
     executions = journal.list_executions_for_trade(trade_id)
-    raw_events = journal.get_events(trade_id=trade_id)
+    # SQLite LIMIT -1 retrieves the complete audit, not the default first 100.
+    raw_events = journal.get_events(trade_id=trade_id, limit=-1)
     proposal = journal.get_proposal(trade.proposal_id) if trade.proposal_id else None
+    if proposal:
+        # Include the proposal/risk prelude, but never another trade's events.
+        raw_events += [event for event in journal.get_events(proposal_id=trade.proposal_id, limit=-1)
+                       if event.get("trade_id") in (None, trade_id)]
+    unique_events = {event["event_id"]: event for event in raw_events}
+
+    def event_order(event):
+        try:
+            stamp = datetime.fromisoformat(event["timestamp_utc"].replace("Z", "+00:00"))
+            return (stamp.replace(tzinfo=stamp.tzinfo or timezone.utc).timestamp(), event["event_id"])
+        except (ValueError, TypeError, KeyError):
+            return (float("inf"), event["event_id"])
+
+    events = sorted(unique_events.values(), key=event_order)
+    reflection_event = next((event for event in reversed(events)
+                             if event.get("actor") == "ForexReflectionAgent" and
+                             event.get("payload", {}).get("rating")), None)
 
     return {
         "trade": _safe_model_dump(trade),
         "proposal": _safe_model_dump(proposal),
         "executions": [_safe_model_dump(e) for e in executions],
-        "events": [_safe_model_dump(ev) for ev in raw_events],
+        "events": [_safe_model_dump(ev) for ev in events],
+        "original_proposal": _safe_model_dump(proposal.proposal_payload) if proposal and proposal.proposal_payload else None,
+        "risk_decision": _safe_model_dump(proposal.risk_decision) if proposal else None,
+        "metrics": _safe_model_dump(trade.metadata.get("mfe_mae")),
+        "execution_comparison": _safe_model_dump(trade.metadata.get("execution_quality")),
+        "reflection": {
+            "summary": trade.reflection or None,
+            "rating": reflection_event["payload"]["rating"] if reflection_event else None,
+            "tags": trade.tags,
+        },
+        "lessons": journal.list_lessons(trade_id=trade_id, limit=-1),
     }
 
 
@@ -483,7 +625,6 @@ async def manual_open_trade(
     journal_mgr: ForexJournalManager = Depends(get_journal_manager),
 ):
     """Record an open trade directly or from a proposal."""
-    verify_forex_auth(request)
     try:
         norm_pair = normalize_forex_pair(req.pair)
         action_enum = ForexAction(req.action.upper())
@@ -527,7 +668,6 @@ async def close_trade(
     journal_mgr: ForexJournalManager = Depends(get_journal_manager),
 ):
     """Close and settle an open trade."""
-    verify_forex_auth(request)
     try:
         reason_enum = TradeExitReason(req.exit_reason.upper())
     except ValueError as exc:
@@ -559,7 +699,6 @@ async def modify_stop_loss(
     journal_mgr: ForexJournalManager = Depends(get_journal_manager),
 ):
     """Modify stop loss level and automatically detect breakeven."""
-    verify_forex_auth(request)
     try:
         success = journal_mgr.modify_stop_loss(
             trade_id=trade_id,
@@ -581,7 +720,6 @@ async def modify_take_profit(
     journal_mgr: ForexJournalManager = Depends(get_journal_manager),
 ):
     """Modify take profit target price."""
-    verify_forex_auth(request)
     try:
         journal_mgr.modify_take_profit(
             trade_id=trade_id,
@@ -603,7 +741,6 @@ async def partial_close_trade(
     journal_mgr: ForexJournalManager = Depends(get_journal_manager),
 ):
     """Scale out of an open trade partially."""
-    verify_forex_auth(request)
     try:
         reason_enum = TradeExitReason(req.exit_reason.upper())
         result = journal_mgr.partial_close(
@@ -627,7 +764,6 @@ async def update_trade_reflection(
     journal: ForexTradeJournal = Depends(get_journal),
 ):
     """Update qualitative reflection notes on a settled trade."""
-    verify_forex_auth(request)
     try:
         success = journal.update_trade_reflection(
             trade_id=trade_id,
@@ -947,7 +1083,6 @@ async def update_proposal_status(
     journal_mgr: ForexJournalManager = Depends(get_journal_manager),
 ):
     """Update status of a proposal or record user decision (EXECUTED, SKIPPED, WAIT)."""
-    verify_forex_auth(request)
     journal = journal_mgr.journal
     clean_status = req.status.strip().upper()
 
@@ -993,11 +1128,10 @@ async def reconcile_proposals(
     mt5: MT5Observer = Depends(get_mt5_observer),
 ):
     """Reconcile broker executions with active approved proposals."""
-    verify_forex_auth(request)
     try:
         positions = mt5.get_open_positions()
     except Exception as exc:
-        logger.info("MT5 observer positions unavailable for reconciliation: %s", exc)
+        logger.info("MT5 observer positions unavailable for reconciliation (%s)", type(exc).__name__)
         positions = []
 
     matches = journal_mgr.reconcile_broker_positions(
@@ -1016,18 +1150,19 @@ async def get_mt5_status(
 ):
     """Return MT5 connection status and terminal diagnostics."""
     conn = mt5.connection
-    status_str = conn.get_status().value if hasattr(conn, "get_status") else "DISCONNECTED"
     is_conn = conn.is_connected()
+    status_str = "CONNECTED" if is_conn else "DISCONNECTED"
     login_val = getattr(conn, "login", None)
     return {
         "status": status_str,
         "is_connected": is_conn,
         "connected": is_conn,
-        "terminal_path": str(conn.terminal_path or ""),
+        "terminal_path": str(getattr(conn, "path", None) or ""),
         "server": str(conn.server or ""),
-        "login": login_val,
-        "account_login": login_val,
+        "login": mask_account_login(login_val),
+        "account_login": mask_account_login(login_val),
         "masked_login": mask_account_login(login_val),
+        **get_forex_runtime().service.status(),
     }
 
 
@@ -1038,23 +1173,19 @@ async def connect_mt5(
     mt5: MT5Observer = Depends(get_mt5_observer),
 ):
     """Attempt connection to MetaTrader 5 terminal."""
-    verify_forex_auth(request)
     try:
-        conn = mt5.connection
-        connected = conn.connect(
+        runtime = get_forex_runtime()
+        connected = await asyncio.to_thread(runtime.connect,
             path=req.path,
             login=req.login,
             password=req.password,
             server=req.server,
         )
-        return {"connected": connected, "status": conn.get_status().value}
-    except MT5Error as exc:
-        return JSONResponse(
-            status_code=503,
-            content={"connected": False, "error": str(exc), "code": getattr(exc, "code", None)},
-        )
+        return {"connected": connected, "status": "CONNECTED" if connected else "DISCONNECTED",
+                **runtime.service.status()}
     except Exception as exc:
-        return JSONResponse(status_code=500, content={"connected": False, "error": str(exc)})
+        raise HTTPException(503, detail={"code": "MT5_CONNECTION_FAILED"}) from exc
+
 
 
 @router.post("/mt5/disconnect")
@@ -1063,13 +1194,26 @@ async def disconnect_mt5(
     mt5: MT5Observer = Depends(get_mt5_observer),
 ):
     """Disconnect from MetaTrader 5 terminal."""
-    verify_forex_auth(request)
     try:
-        mt5.connection.disconnect()
-        return {"status": "DISCONNECTED", "is_connected": False}
+        stopped = await asyncio.to_thread(get_forex_runtime().disconnect)
+        return {"status": "DISCONNECTED" if stopped else "STOPPING", "is_connected": False,
+                "service_running": get_forex_runtime().service.is_running}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
+
+
+@router.post("/journal/trades/{trade_id}/post-close/retry")
+async def retry_post_close(trade_id: str, request: Request):
+    """Retry failed post-close analytics without changing broker state."""
+    runtime = get_forex_runtime()
+    trade = runtime.journal.get_trade(trade_id)
+    if trade is None:
+        raise HTTPException(status_code=404, detail="Trade not found")
+    if trade.status != TradeStatus.CLOSED:
+        raise HTTPException(status_code=409, detail="Trade is not closed")
+    result = await asyncio.to_thread(runtime.processor.process_closed_trade, trade_id)
+    return _safe_model_dump(result)
 
 
 @router.get("/mt5/account")
@@ -1099,13 +1243,13 @@ async def get_mt5_symbols(
     try:
         symbols = mt5.get_symbols(group=group)
         return {"symbols": [_safe_model_dump(s) for s in symbols], "count": len(symbols)}
-    except MT5Error as exc:
+    except MT5Error:
         # Fallback to major pairs if offline
         return {
             "symbols": [{"name": p.broker_symbol, "canonical_symbol": p.symbol} for p in MAJOR_PAIRS.values()],
             "count": len(MAJOR_PAIRS),
             "offline": True,
-            "error": str(exc),
+            "error": {"code": "MT5_DISCONNECTED", "message": "MetaTrader 5 is not connected.", "details": {}},
         }
 
 
@@ -1386,7 +1530,7 @@ def _run_forex_analysis(run_id: str, req: ForexAnalysisRequest) -> None:
         try:
             report_path = graph.save_reports(final_state, req.pair, trade_date=req.date)
         except Exception as rep_exc:
-            logger.warning("Could not write markdown report tree for %s: %s", run_id, rep_exc)
+            logger.warning("Could not write markdown report tree for %s (%s)", run_id, type(rep_exc).__name__)
 
         report_id = report_path.parent.name if report_path else None
         proposal_id = final_state.get("forex_proposal_id") or getattr(proposal, "proposal_id", None)
@@ -1475,18 +1619,14 @@ def _run_forex_analysis(run_id: str, req: ForexAnalysisRequest) -> None:
         )
 
     except Exception as exc:
-        error_msg = str(exc)
-        if "openrouter.ai/workspaces" in error_msg:
-            error_msg = "OpenRouter credit limit exceeded."
-        elif "402" in error_msg:
-            error_msg = "Provider returned 402 — credit/billing limit reached."
-
+        error_msg = "The Forex analysis provider failed. Please retry."
         with _lock:
             if run_id in _forex_runs:
                 _forex_runs[run_id].update(
                     status="failed",
                     finished_at=datetime.now(timezone.utc).isoformat(),
                     error=error_msg,
+                    error_code="PROVIDER_ERROR",
                 )
 
         _emit_fx_event(
@@ -1495,10 +1635,11 @@ def _run_forex_analysis(run_id: str, req: ForexAnalysisRequest) -> None:
             {
                 "run_id": run_id,
                 "error": error_msg,
+                "code": "PROVIDER_ERROR",
                 "message": f"Forex analysis failed: {error_msg}",
             },
         )
-        logger.error("Forex analysis failed for run %s: %s", run_id, error_msg, exc_info=True)
+        logger.error("Forex analysis failed for run %s (%s)", run_id, type(exc).__name__)
 
 
 @router.post("/analyze")
@@ -1507,7 +1648,6 @@ async def start_forex_analysis(
     request: Request,
 ):
     """Start asynchronous Forex multi-agent analysis with live agent execution and SSE updates."""
-    verify_optional_auth(request)
 
     if not req.analysts:
         raise HTTPException(status_code=422, detail="At least one Forex analyst must be selected")
@@ -1579,13 +1719,43 @@ async def start_forex_analysis(
 @router.get("/runs")
 async def list_forex_runs():
     """List all Forex agent analysis runs."""
-    runs = sorted(_forex_runs.values(), key=lambda r: r["started_at"], reverse=True)
+    _prune_expired_forex_runs()
+    def _sort_key(run: dict[str, Any]) -> tuple[float, str]:
+        started = run.get("started_at")
+        try:
+            ts = datetime.fromisoformat(str(started)).timestamp() if started else 0.0
+        except ValueError:
+            ts = 0.0
+        return (float(ts), str(run.get("run_id", "")))
+
+    runs = sorted(_forex_runs.values(), key=_sort_key, reverse=True)
     return {"runs": runs, "count": len(runs)}
+
+
+@router.post("/runs/{run_id}/cancel")
+async def cancel_forex_run(run_id: str):
+    """Mark a queued or running Forex job as cancelled so browser clients can stop waiting."""
+    if run_id not in _forex_runs:
+        raise HTTPException(status_code=404, detail="Run not found")
+    entry = _forex_runs[run_id]
+    status = str(entry.get("status", "")).lower()
+    if status in {"completed", "failed", "cancelled"}:
+        return {"run_id": run_id, "status": entry.get("status", "cancelled")}
+    entry["status"] = "cancelled"
+    entry["finished_at"] = datetime.now(timezone.utc).isoformat()
+    entry["error"] = "Cancelled by user"
+    _forex_run_events.setdefault(run_id, []).append({
+        "type": "cancelled",
+        "data": {"run_id": run_id, "status": "cancelled", "message": "Forex analysis cancelled by user"},
+        "ts": time.time(),
+    })
+    return {"run_id": run_id, "status": "cancelled"}
 
 
 @router.get("/runs/{run_id}")
 async def get_forex_run(run_id: str):
     """Get metadata and report for a specific Forex analysis run."""
+    _prune_expired_forex_runs()
     if run_id not in _forex_runs:
         raise HTTPException(status_code=404, detail="Run not found")
     report = _forex_completed_reports.get(run_id)
@@ -1595,6 +1765,7 @@ async def get_forex_run(run_id: str):
 @router.get("/runs/{run_id}/events")
 async def stream_forex_events(run_id: str, request: Request):
     """Server-Sent Events (SSE) streaming endpoint for live agent node progress."""
+    _prune_expired_forex_runs()
     if run_id not in _forex_runs:
         raise HTTPException(status_code=404, detail="Run not found")
 
@@ -1610,7 +1781,7 @@ async def stream_forex_events(run_id: str, request: Request):
                 yield f"event: {evt['type']}\ndata: {json.dumps(evt['data'])}\n\n"
                 last_idx += 1
 
-                if evt["type"] in ("complete", "error"):
+                if evt["type"] in ("complete", "error", "cancelled"):
                     return
 
             await asyncio.sleep(0.3)
@@ -1665,7 +1836,6 @@ async def estimate_backtest_costs(
     request: Request,
 ):
     """Estimate expected AI invocations and token usage before launching an agent backtest."""
-    verify_forex_auth(request)
     estimate = estimate_agent_analyses(
         total_bars=req.count,
         sampling_interval=req.sampling_interval,
@@ -1681,10 +1851,11 @@ async def run_backtest(
     request: Request,
 ):
     """Run an explicitly requested demonstration or real historical agent backtest."""
-    verify_forex_auth(request)
-    effective_mode = "HISTORICAL_AGENT_BACKTEST" if (req.mode and req.mode.upper() == "HISTORICAL_AGENT_BACKTEST") else ("DEMO" if req.demo_mode else None)
+    effective_mode = req.mode.upper() if req.mode else ("DEMO" if req.demo_mode else None)
+    if effective_mode is not None and effective_mode not in ("DEMO", "HISTORICAL_AGENT_BACKTEST"):
+        raise HTTPException(status_code=422, detail={"code": "INVALID_BACKTEST_MODE"})
 
-    if effective_mode != "HISTORICAL_AGENT_BACKTEST" and not req.demo_mode:
+    if effective_mode is None:
         raise HTTPException(
             status_code=503,
             detail={
@@ -1692,23 +1863,99 @@ async def run_backtest(
                 "message": "Production Forex backtesting is unavailable. Set demo_mode=true to run the demonstration strategy or mode='HISTORICAL_AGENT_BACKTEST' for historical agent backtesting.",
             },
         )
-    data_source = "user_supplied" if req.candles else "synthetic"
-    demo_notice = (
-        "DEMO ONLY: Demonstration strategy using "
-        + ("generated synthetic candles" if data_source == "synthetic" else "user-supplied candles of unverified provenance")
-        + ". This does not evaluate the Forex agent pipeline. "
-        "Execution timing and point-in-time correctness are not validated; "
-        "results must not be treated as validated strategy performance."
-    )
-    demo_metadata = {
-        "demo_mode": True,
-        "data_source": data_source,
-        "strategy": "demo_trend_continuation",
-        "validated_strategy_performance": False,
-        "notice": demo_notice,
-    }
     try:
         norm_pair = normalize_forex_pair(req.pair)
+        if effective_mode == "HISTORICAL_AGENT_BACKTEST":
+            from tradingagents.backtest.historical_data import (
+                HistoricalDataUnavailable,
+                load_historical_candles,
+            )
+            if req.candles is not None:
+                raise HistoricalDataUnavailable("user-supplied candles have no verified provider provenance")
+            candle_objs, provenance = load_historical_candles(
+                norm_pair, req.timeframe, req.date_from, req.date_to,
+            )
+            bt_cfg = ForexBacktestConfig(
+                initial_balance=req.initial_balance,
+                account_currency=req.account_currency,
+                leverage=req.leverage,
+                default_spread_pips=req.spread_pips,
+                default_slippage_pips=req.slippage_pips,
+                commission_per_lot_usd=req.commission_per_lot_usd,
+                swap_per_day_usd=req.swap_per_day_usd,
+                conservative_stops=req.conservative_stops,
+                max_open_trades=req.max_open_trades,
+                execution_timeframe=req.timeframe,
+            )
+            agent_cfg = AgentBacktestConfig(
+                pair=norm_pair,
+                timeframe=req.timeframe,
+                date_from=req.date_from,
+                date_to=req.date_to,
+                sampling_interval=req.sampling_interval,
+                max_analysis_points=req.max_analysis_points,
+                analyst_selection=req.analyst_selection or ["forex_technical", "forex_macro", "forex_news"],
+                provider=req.provider or "openai",
+                quick_model=req.quick_model or "gpt-4.1-mini",
+                deep_model=req.deep_model or "gpt-4.1",
+                token_limits=req.token_limits,
+                research_depth=req.research_depth,
+                backtest_config=bt_cfg,
+            )
+
+            def graph_f():
+                return ForexTradingAgentsGraph(
+                    config={
+                        "llm_provider": agent_cfg.provider,
+                        "quick_think_llm": agent_cfg.quick_model,
+                        "deep_think_llm": agent_cfg.deep_model,
+                        "max_tokens": agent_cfg.token_limits,
+                        "max_debate_rounds": 3 if agent_cfg.research_depth == "deep" else 1,
+                        "historical_backtest": True,
+                    },
+                    selected_analysts=agent_cfg.analyst_selection,
+                    auto_record_trades=False,
+                )
+
+            agent_backtester = HistoricalForexAgentBacktester(
+                config=agent_cfg,
+                graph_factory=graph_f,
+            )
+            report = agent_backtester.run(candles=candle_objs, market_data_provenance=provenance)
+            backtest_id = report.backtest_id
+            report_dict = _safe_model_dump(report.to_dict())
+
+            _backtest_runs[backtest_id] = {
+                **report_dict,
+                "status": "completed",
+                "demo_mode": False,
+                "data_source": provenance["source"],
+                "strategy": "historical_multi_agent",
+                "notice": "Historical simulation with sourced candles. Strategy performance is not statistically validated.",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+            return _backtest_runs[backtest_id]
+
+
+        data_source = "user_supplied" if req.candles else "synthetic"
+        demo_notice = (
+            "DEMO ONLY: Demonstration strategy using "
+            + ("generated synthetic candles" if data_source == "synthetic" else "user-supplied candles of unverified provenance")
+            + ". This does not evaluate the Forex agent pipeline. "
+            "Execution timing and point-in-time correctness are not validated; "
+            "results must not be treated as validated strategy performance."
+        )
+        demo_metadata = {
+            "demo_mode": True,
+            "data_source": data_source,
+            "strategy": "demo_trend_continuation",
+            "mode": "DEMO",
+            "validation_status": "DEMO",
+            "validation_reasons": ["Illustrative/demo only; no strategy validation."],
+            "validated_strategy_performance": False,
+            "notice": demo_notice,
+        }
+
         pip_sz = pip_size_for(norm_pair)
         base_price = 1.0800 if "JPY" not in norm_pair else 150.00
 
@@ -1743,64 +1990,6 @@ async def run_backtest(
                 candle_objs.append(ForexBar(timestamp=ts, open=o, high=h, low=low_val, close=c, volume=100.0))
 
 
-        if effective_mode == "HISTORICAL_AGENT_BACKTEST":
-            bt_cfg = ForexBacktestConfig(
-                initial_balance=req.initial_balance,
-                account_currency=req.account_currency,
-                leverage=req.leverage,
-                default_spread_pips=req.spread_pips,
-                default_slippage_pips=req.slippage_pips,
-                commission_per_lot_usd=req.commission_per_lot_usd,
-                swap_per_day_usd=req.swap_per_day_usd,
-                conservative_stops=req.conservative_stops,
-                max_open_trades=req.max_open_trades,
-                execution_timeframe=req.timeframe,
-            )
-            agent_cfg = AgentBacktestConfig(
-                pair=norm_pair,
-                timeframe=req.timeframe,
-                date_from=req.date_from,
-                date_to=req.date_to,
-                sampling_interval=req.sampling_interval,
-                max_analysis_points=req.max_analysis_points,
-                analyst_selection=req.analyst_selection or ["forex_technical", "forex_macro", "forex_news"],
-                provider=req.provider or "openai",
-                quick_model=req.quick_model or "gpt-4.1-mini",
-                deep_model=req.deep_model or "gpt-4.1",
-                token_limits=req.token_limits,
-                research_depth=req.research_depth,
-                backtest_config=bt_cfg,
-            )
-
-            def graph_f():
-                return ForexTradingAgentsGraph(
-                    config={
-                        "llm_provider": agent_cfg.provider,
-                        "quick_model": agent_cfg.quick_model,
-                        "deep_model": agent_cfg.deep_model,
-                    },
-                    selected_analysts=agent_cfg.analyst_selection,
-                )
-
-            agent_backtester = HistoricalForexAgentBacktester(
-                config=agent_cfg,
-                graph_factory=graph_f,
-            )
-            report = agent_backtester.run(candles=candle_objs)
-            backtest_id = report.backtest_id
-            report_dict = report.to_dict()
-
-            _backtest_runs[backtest_id] = {
-                **report_dict,
-                "status": "completed",
-                "demo_mode": False,
-                "data_source": data_source,
-                "strategy": "historical_multi_agent",
-                "validated_strategy_performance": True,
-                "notice": "Validated historical agent backtest executed under strict point-in-time constraints.",
-                "created_at": datetime.now(timezone.utc).isoformat(),
-            }
-            return _backtest_runs[backtest_id]
 
         config = ForexBacktestConfig(
             initial_balance=req.initial_balance,
@@ -1869,8 +2058,17 @@ async def run_backtest(
             "result": result_dict,
             "markdown_report": markdown_rep,
         }
+    except DataInsufficientError as exc:
+        raise HTTPException(status_code=422, detail={
+            "code": "HISTORICAL_DATA_UNAVAILABLE", "message": str(exc),
+        }) from exc
     except Exception as exc:
-        logger.error("Forex backtest failed: %s", exc, exc_info=True)
+        logger.error("Forex backtest failed (%s)", type(exc).__name__)
+        if effective_mode == "HISTORICAL_AGENT_BACKTEST":
+            raise HTTPException(status_code=400, detail={
+                "code": "HISTORICAL_ANALYSIS_FAILED",
+                "message": "Historical evaluation did not complete; no performance result was saved.",
+            }) from exc
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
@@ -1897,6 +2095,88 @@ async def list_backtest_runs():
         for k, v in _backtest_runs.items()
     ]
     return {"backtests": runs, "count": len(runs)}
+
+
+@router.post("/backtest/walkforward")
+async def run_walk_forward(
+    req: ForexBacktestRequest,
+    n_splits: int = Query(default=1, ge=1, le=10),
+):
+    """Run a walk-forward validation using historical candles or supplied candles."""
+    try:
+        norm_pair = normalize_forex_pair(req.pair)
+        # Load candles either from user-supplied payload or historical provider
+        if req.candles:
+            candle_objs = []
+            for c in req.candles:
+                t_val = c.get("time") or c.get("timestamp") or datetime.now(timezone.utc)
+                if isinstance(t_val, str):
+                    t_val = datetime.fromisoformat(t_val.replace("Z", "+00:00"))
+                candle_objs.append(ForexBar(
+                    timestamp=t_val,
+                    open=float(c["open"]),
+                    high=float(c["high"]),
+                    low=float(c["low"]),
+                    close=float(c["close"]),
+                    volume=float(c.get("volume", 100.0)),
+                ))
+            provenance = {"source": "user_supplied"}
+        else:
+            from tradingagents.backtest.historical_data import load_historical_candles, HistoricalDataUnavailable
+            candle_objs, provenance = load_historical_candles(norm_pair, req.timeframe, req.date_from, req.date_to)
+
+        validator = ForexWalkForwardValidator(
+            strategy_version="v1.0.0",
+            config_snapshot={"timeframe": req.timeframe, "provider": req.provider},
+            strict_oos_guard=True,
+        )
+        report = validator.validate(
+            candles=candle_objs,
+            pair=norm_pair,
+            timeframe=req.timeframe,
+            backtest_config=ForexBacktestConfig(
+                initial_balance=req.initial_balance,
+                account_currency=req.account_currency,
+                leverage=req.leverage,
+                default_spread_pips=req.spread_pips,
+                default_slippage_pips=req.slippage_pips,
+                commission_per_lot_usd=req.commission_per_lot_usd,
+                conservative_stops=req.conservative_stops,
+                max_open_trades=req.max_open_trades,
+                execution_timeframe=req.timeframe,
+            ),
+            agent_pipeline_callable=None,
+            n_splits=n_splits,
+            include_forward_demo=True,
+        )
+
+        val_id = report.validation_id
+        report_dict = _safe_model_dump(report.to_dict())
+        # Store a summary into _backtest_runs for UI listing
+        _backtest_runs[val_id] = {
+            "backtest_id": val_id,
+            "demo_mode": False,
+            "data_source": provenance.get("source", "historical"),
+            "strategy": "walk_forward_validation",
+            "validated_strategy_performance": False,
+            "notice": "Walk-forward validation report (descriptive; not statistical validation).",
+            "pair": norm_pair,
+            "timeframe": req.timeframe,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "result": {
+                "total_trades": 0,
+                "win_rate_pct": 0.0,
+                "profit_factor": 0.0,
+                "total_net_profit": 0.0,
+            },
+            "markdown_report": report_dict.get("markdown_summary") or report_dict.get("markdown_summary", ""),
+            "validation_report": report_dict,
+        }
+
+        return report_dict
+    except Exception as exc:
+        logger.exception("Walk-forward validation failed")
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/backtest/{backtest_id}")
@@ -2130,7 +2410,6 @@ async def run_monte_carlo_analysis(
     journal: ForexTradeJournal = Depends(get_journal),
 ):
     """Execute Monte Carlo bootstrap resampling and ruin probabilities."""
-    verify_forex_auth(request)
     trades = journal.list_trades(limit=10000)
     result = analytics_mgr.run_monte_carlo(
         trades=trades,
@@ -2162,7 +2441,6 @@ async def run_ablation_study(
     journal: ForexTradeJournal = Depends(get_journal),
 ):
     """Evaluate marginal alpha contributions across agents in the pipeline."""
-    verify_forex_auth(request)
     trades = journal.list_trades(limit=10000)
     study = analytics_mgr.run_ablation(trades=trades)
     return {"ablation_study": _safe_model_dump(study)}
@@ -2192,7 +2470,6 @@ async def reflect_on_trade(
     learning_mgr: ForexLearningManager = Depends(get_learning_manager),
 ):
     """Trigger automated post-trade reflection and lesson extraction for a settled position."""
-    verify_forex_auth(request)
     try:
         reflection = learning_mgr.reflect_on_trade(trade=trade_id)
         return {"reflection": _safe_model_dump(reflection), "status": "COMPLETED"}
@@ -2263,7 +2540,6 @@ async def evaluate_skipped_proposals(
     mt5: MT5Observer = Depends(get_mt5_observer),
 ):
     """Run counterfactual market simulation across all skipped/expired proposals."""
-    verify_forex_auth(request)
     try:
         from tradingagents.learning.history_provider import MT5TradeHistoryProvider
         provider = MT5TradeHistoryProvider(observer=mt5)
