@@ -4,7 +4,7 @@
 
 ### Multi-Agent LLM Financial Trading & Market Analysis Framework
 
-[![Python](https://img.shields.io/badge/Python-3.10%20%7C%203.11%20%7C%203.12-blue?logo=python)](https://python.org)
+[![Python](https://img.shields.io/badge/Python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13-blue?logo=python)](https://python.org)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688?logo=fastapi)](https://fastapi.tiangolo.com)
 [![LangGraph](https://img.shields.io/badge/LangGraph-0.4+-FF4B4B)](https://github.com/langchain-ai/langgraph)
 [![License](https://img.shields.io/badge/License-Apache_2.0-green.svg)](LICENSE)
@@ -27,7 +27,31 @@ The current workspace was verified with the repository's supported Windows virtu
 D:\TradingAgents\.venv\Scripts\python.exe -m pytest -q
 ```
 
-Result: `2051 passed, 6 skipped, 0 failed` in 60.35s. The suite is green on the current branch. The remaining warnings are non-fatal model-catalog warnings for newer provider aliases and optional dependency skips.
+Result: `2094 passed, 5 skipped, 0 failed, 20 warnings, 88 subtests passed` in
+143.57s. Local Chromium E2E also passed (`4 passed, 2095 deselected`). GitHub
+Actions run [36662922482](https://github.com/Zubair815/TradingAgents/actions/runs/36662922482)
+is green for this exact commit on Python 3.10, 3.11, 3.12, and 3.13, including
+Ruff, clean-install, and Chromium E2E jobs.
+
+Release status: **READY FOR LOCAL DEMO VALIDATION**. Automated engineering gates
+pass, but the Windows + XM Demo checklist has not been executed. This status is
+not a trading-performance recommendation.
+
+## Forex decision-support safety
+
+The Forex platform produces `LONG`, `SHORT`, or `NO_TRADE` decision support and
+a deterministic risk/sizing result. The user alone decides whether to act and
+places, modifies, partially closes, or closes any order manually in MT5.
+TradingAgents' MT5 integration is read-only: it observes account state,
+positions, orders, deals, and manual changes for reconciliation and learning. It
+contains no automated broker-order submission path.
+
+Historical agent backtests, walk-forward reports, and ablation comparisons are
+descriptive and retain `validated_strategy_performance=false`. They are not proof
+of profitable or statistically validated trading performance. See
+[FINAL_REPORT.md](FINAL_REPORT.md) for the feature matrix and evidence, and
+[the XM Demo checklist](docs/XM_MT5_DEMO_ACCEPTANCE.md) for the remaining manual
+acceptance gate.
 
 ## News
 - [2026-09] **Interactive Web Dashboard**: Added a modern browser-based UI and FastAPI backend with real-time SSE progress streaming across all 13 pipeline nodes, interactive multi-section reports, secure browser session auth with optional API key protection, and unified history deduplication.
@@ -85,7 +109,9 @@ Our framework decomposes complex trading tasks into specialized roles.
 
 ### Risk Management and Portfolio Manager
 - Continuously evaluates portfolio risk by assessing market volatility, liquidity, and other risk factors. The risk management team evaluates and adjusts trading strategies, providing assessment reports to the Portfolio Manager for final decision.
-- The Portfolio Manager approves/rejects the transaction proposal. If approved, the order will be sent to the simulated exchange and executed.
+- The Portfolio Manager approves/rejects the generic research proposal. Generic
+  simulations may model execution; the Forex platform never submits a broker
+  order and requires the user to execute manually.
 
 <p align="center">
   <img src="assets/risk.png" width="70%" style="display: inline-block; margin: 0 2%;">
