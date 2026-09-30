@@ -98,6 +98,15 @@ from tradingagents.risk.sizing import (
 logger = logging.getLogger("tradingagents.web.forex")
 
 from web.forex_security import ForexRoute, verify_forex_auth  # noqa: E402
+from web.retention import (  # noqa: E402
+    DEFAULT_RETENTION_POLICY,
+    TERMINAL_STATUSES,
+    append_bounded,
+    oldest_excess_ids,
+    prune_tombstones,
+    record_timestamp,
+    timestamp,
+)
 
 router = APIRouter(prefix="/api/forex", tags=["forex"],
                    dependencies=[Depends(verify_forex_auth)], route_class=ForexRoute)
@@ -113,39 +122,111 @@ _metrics_mgr: ForexMetricsManager | None = None
 _learning_mgr: ForexLearningManager | None = None
 _mt5_observer: MT5Observer | None = None
 _forex_runtime = None
+_forex_analysis_threads: set[threading.Thread] = set()
 
-# In-memory stores for runs, events, and backtests
-_forex_runs: dict[str, dict[str, Any]] = {}
-_forex_run_events: dict[str, list[dict[str, Any]]] = {}
-_forex_completed_reports: dict[str, dict[str, Any]] = {}
-_backtest_runs: dict[str, dict[str, Any]] = {}
-_FOREX_RUN_TTL_SECONDS = 1800
+# These stores are deliberately non-authoritative. Trades, proposals, broker
+# deals, timeline events, lessons, and metrics evidence remain in SQLite.
+_forex_runs: dict[str, dict[str, Any]] = {}  # TRANSIENT UI run metadata
+_forex_run_events: dict[str, list[dict[str, Any]]] = {}  # TRANSIENT SSE buffers
+_forex_completed_reports: dict[str, dict[str, Any]] = {}  # CACHE/transient report copies
+_backtest_runs: dict[str, dict[str, Any]] = {}  # TRANSIENT result cache
+_expired_forex_runs: dict[str, dict[str, Any]] = {}
+_expired_backtests: dict[str, dict[str, Any]] = {}
+_FOREX_RETENTION_POLICY = DEFAULT_RETENTION_POLICY
+_last_forex_prune_at: float | None = None
 
 
-def _prune_expired_forex_runs() -> list[str]:
-    """Drop stale queued/running Forex jobs so the live run store remains bounded."""
-    now = time.time()
-    expired: list[str] = []
-    for run_id, run in list(_forex_runs.items()):
-        status = str(run.get("status", "")).lower()
-        if status in {"completed", "failed", "cancelled", "done"}:
-            continue
-        started = run.get("started_at")
-        if not started:
-            continue
-        try:
-            started_at = datetime.fromisoformat(str(started))
-        except ValueError:
-            expired.append(run_id)
-            continue
-        if started_at.tzinfo is None:
-            started_at = started_at.replace(tzinfo=timezone.utc)
-        if now - started_at.timestamp() > _FOREX_RUN_TTL_SECONDS:
-            expired.append(run_id)
-    for run_id in expired:
-        _forex_runs.pop(run_id, None)
-        _forex_run_events.pop(run_id, None)
-    return expired
+def _prune_expired_forex_runs(*, now: float | None = None) -> list[str]:
+    """Bound transient Forex analyses and backtests without touching journal truth."""
+    global _last_forex_prune_at
+    current = time.time() if now is None else now
+    with _lock:
+        expired: set[str] = set()
+        terminal_ids: list[str] = []
+        for run_id, run in list(_forex_runs.items()):
+            status = str(run.get("status", "")).lower()
+            is_terminal = status in TERMINAL_STATUSES
+            stamp = (
+                record_timestamp(run, terminal=True)
+                if is_terminal
+                else timestamp(run.get("last_activity_at")) or record_timestamp(run)
+            )
+            if is_terminal:
+                terminal_ids.append(run_id)
+                if stamp is None or current - stamp > _FOREX_RETENTION_POLICY.terminal_max_age_seconds:
+                    expired.add(run_id)
+            elif stamp is None or current - stamp > _FOREX_RETENTION_POLICY.stale_active_seconds:
+                expired.add(run_id)
+        expired.update(oldest_excess_ids(
+            _forex_runs,
+            [item_id for item_id in terminal_ids if item_id not in expired],
+            _FOREX_RETENTION_POLICY.terminal_max_count,
+            terminal=True,
+        ))
+        for run_id in sorted(expired):
+            run = _forex_runs.pop(run_id, None)
+            _forex_run_events.pop(run_id, None)
+            if run is None:
+                continue
+            _expired_forex_runs[run_id] = {
+                "expired_at": current,
+                "status": run.get("status", "expired"),
+            }
+            aliases = [
+                key for key, report in _forex_completed_reports.items()
+                if key == run_id or report.get("run_id") == run_id
+            ]
+            for key in aliases:
+                _forex_completed_reports.pop(key, None)
+
+        backtest_expired = {
+            item_id for item_id, item in _backtest_runs.items()
+            if (record_timestamp(item, terminal=True) is None)
+            or current - (record_timestamp(item, terminal=True) or current)
+            > _FOREX_RETENTION_POLICY.backtest_max_age_seconds
+        }
+        backtest_expired.update(oldest_excess_ids(
+            _backtest_runs,
+            [item_id for item_id in _backtest_runs if item_id not in backtest_expired],
+            _FOREX_RETENTION_POLICY.backtest_max_count,
+            terminal=True,
+        ))
+        for item_id in sorted(backtest_expired):
+            if _backtest_runs.pop(item_id, None) is not None:
+                _expired_backtests[item_id] = {"expired_at": current, "status": "expired"}
+        prune_tombstones(_expired_forex_runs, _FOREX_RETENTION_POLICY, current)
+        prune_tombstones(_expired_backtests, _FOREX_RETENTION_POLICY, current)
+        _last_forex_prune_at = current
+        return sorted(expired)
+
+
+def _forex_run_not_found(run_id: str) -> None:
+    if run_id in _expired_forex_runs:
+        raise HTTPException(status_code=410, detail="Run expired from transient cache")
+    raise HTTPException(status_code=404, detail="Run not found")
+
+
+def _backtest_not_found(backtest_id: str) -> None:
+    if backtest_id in _expired_backtests:
+        raise HTTPException(status_code=410, detail="Backtest expired from transient cache")
+    raise HTTPException(status_code=404, detail="Backtest run not found")
+
+
+def get_retention_diagnostics() -> dict[str, Any]:
+    """Return safe aggregate counts for local runtime observability."""
+    _prune_expired_forex_runs()
+    with _lock:
+        active = sum(
+            str(run.get("status", "")).lower() not in TERMINAL_STATUSES
+            for run in _forex_runs.values()
+        )
+        terminal = len(_forex_runs) - active
+        return {
+            "active_run_count": active,
+            "cached_completed_run_count": terminal,
+            "backtest_cache_count": len(_backtest_runs),
+            "last_prune_at": _last_forex_prune_at,
+        }
 
 
 def get_journal() -> ForexTradeJournal:
@@ -245,6 +326,12 @@ def set_forex_dependencies(
 def reset_forex_state() -> None:
     """Reset all in-memory runs, events, backtests, and dependency singletons."""
     global _journal, _journal_mgr, _analytics_mgr, _metrics_mgr, _learning_mgr, _mt5_observer, _forex_runtime
+    with _lock:
+        analysis_running = any(thread.is_alive() for thread in _forex_analysis_threads)
+    if analysis_running:
+        if _forex_runtime is not None:
+            _forex_runtime.disconnect(close_journal=False)
+        return  # Python threads cannot be killed safely; retain their journal dependencies.
     if _forex_runtime is not None:
         if not _forex_runtime.close():
             return  # Keep the authoritative runtime while a native call drains.
@@ -260,6 +347,9 @@ def reset_forex_state() -> None:
         _forex_run_events.clear()
         _forex_completed_reports.clear()
         _backtest_runs.clear()
+        _expired_forex_runs.clear()
+        _expired_backtests.clear()
+        _forex_analysis_threads.clear()
 
 
 _SETTINGS_KEYS = (
@@ -580,7 +670,12 @@ class RetrieveLessonsRequest(BaseModel):
 def _emit_fx_event(run_id: str, event_type: str, data: dict[str, Any]) -> None:
     """Record an SSE event for an active Forex analysis run."""
     evt = {"type": event_type, "data": data, "ts": time.time()}
-    _forex_run_events.setdefault(run_id, []).append(evt)
+    with _lock:
+        if run_id in _forex_runs:
+            _forex_runs[run_id]["last_activity_at"] = datetime.now(timezone.utc).isoformat()
+        events = _forex_run_events.setdefault(run_id, [])
+        evt["_seq"] = int(events[-1].get("_seq", -1)) + 1 if events else 0
+        append_bounded(events, evt, _FOREX_RETENTION_POLICY.event_max_count)
 
 
 def _safe_model_dump(obj: Any) -> Any:
@@ -1722,6 +1817,15 @@ def _run_forex_analysis(run_id: str, req: ForexAnalysisRequest) -> None:
         logger.error("Forex analysis failed for run %s (%s)", run_id, type(exc).__name__)
 
 
+def _forex_worker_entry(run_id: str, req: ForexAnalysisRequest) -> None:
+    """Track worker lifetime so shutdown never closes its journal underneath it."""
+    try:
+        _run_forex_analysis(run_id, req)
+    finally:
+        with _lock:
+            _forex_analysis_threads.discard(threading.current_thread())
+
+
 @router.post("/analyze")
 async def start_forex_analysis(
     req: ForexAnalysisRequest,
@@ -1763,6 +1867,7 @@ async def start_forex_analysis(
         "economic_blackout": getattr(req, "economic_blackout", True),
         "account_source": getattr(req, "account_source", "mt5"),
         "started_at": now_iso,
+        "last_activity_at": now_iso,
         "finished_at": None,
         "error": None,
         "signal": None,
@@ -1774,12 +1879,15 @@ async def start_forex_analysis(
     with _lock:
         _forex_runs[run_id] = run_entry
         _forex_run_events[run_id] = []
+        _prune_expired_forex_runs()
 
     worker = threading.Thread(
-        target=_run_forex_analysis,
+        target=_forex_worker_entry,
         args=(run_id, req),
         daemon=True,
     )
+    with _lock:
+        _forex_analysis_threads.add(worker)
     worker.start()
 
     return {
@@ -1808,26 +1916,30 @@ async def list_forex_runs():
             ts = 0.0
         return (float(ts), str(run.get("run_id", "")))
 
-    runs = sorted(_forex_runs.values(), key=_sort_key, reverse=True)
+    with _lock:
+        runs = sorted((dict(run) for run in _forex_runs.values()), key=_sort_key, reverse=True)
     return {"runs": runs, "count": len(runs)}
 
 
 @router.post("/runs/{run_id}/cancel")
 async def cancel_forex_run(run_id: str):
     """Mark a queued or running Forex job as cancelled so browser clients can stop waiting."""
-    if run_id not in _forex_runs:
-        raise HTTPException(status_code=404, detail="Run not found")
-    entry = _forex_runs[run_id]
-    status = str(entry.get("status", "")).lower()
-    if status in {"completed", "failed", "cancelled"}:
-        return {"run_id": run_id, "status": entry.get("status", "cancelled")}
-    entry["status"] = "cancelled"
-    entry["finished_at"] = datetime.now(timezone.utc).isoformat()
-    entry["error"] = "Cancelled by user"
-    _forex_run_events.setdefault(run_id, []).append({
-        "type": "cancelled",
-        "data": {"run_id": run_id, "status": "cancelled", "message": "Forex analysis cancelled by user"},
-        "ts": time.time(),
+    with _lock:
+        if run_id not in _forex_runs:
+            _forex_run_not_found(run_id)
+        entry = _forex_runs[run_id]
+        status = str(entry.get("status", "")).lower()
+        if status in TERMINAL_STATUSES:
+            return {"run_id": run_id, "status": entry.get("status", "cancelled")}
+        entry.update(
+            status="cancelled",
+            finished_at=datetime.now(timezone.utc).isoformat(),
+            error="Cancelled by user",
+        )
+    _emit_fx_event(run_id, "cancelled", {
+        "run_id": run_id,
+        "status": "cancelled",
+        "message": "Forex analysis cancelled by user",
     })
     return {"run_id": run_id, "status": "cancelled"}
 
@@ -1836,33 +1948,45 @@ async def cancel_forex_run(run_id: str):
 async def get_forex_run(run_id: str):
     """Get metadata and report for a specific Forex analysis run."""
     _prune_expired_forex_runs()
-    if run_id not in _forex_runs:
-        raise HTTPException(status_code=404, detail="Run not found")
-    report = _forex_completed_reports.get(run_id)
-    return {"run": _forex_runs[run_id], "report": report}
+    with _lock:
+        if run_id not in _forex_runs:
+            _forex_run_not_found(run_id)
+        return {"run": dict(_forex_runs[run_id]), "report": _forex_completed_reports.get(run_id)}
 
 
 @router.get("/runs/{run_id}/events")
 async def stream_forex_events(run_id: str, request: Request):
     """Server-Sent Events (SSE) streaming endpoint for live agent node progress."""
     _prune_expired_forex_runs()
-    if run_id not in _forex_runs:
-        raise HTTPException(status_code=404, detail="Run not found")
+    with _lock:
+        if run_id not in _forex_runs:
+            _forex_run_not_found(run_id)
 
     async def event_generator():
-        last_idx = 0
+        last_seq = -1
         while True:
             if await request.is_disconnected():
                 break
 
-            events = _forex_run_events.get(run_id, [])
-            while last_idx < len(events):
-                evt = events[last_idx]
+            _prune_expired_forex_runs()
+            with _lock:
+                run = _forex_runs.get(run_id)
+                events = list(_forex_run_events.get(run_id, []))
+            if run is None:
+                yield 'event: expired\ndata: {"status":"expired"}\n\n'
+                return
+            for index, evt in enumerate(events):
+                sequence = int(evt.get("_seq", index))
+                if sequence <= last_seq:
+                    continue
                 yield f"event: {evt['type']}\ndata: {json.dumps(evt['data'])}\n\n"
-                last_idx += 1
+                last_seq = sequence
 
                 if evt["type"] in ("complete", "error", "cancelled"):
                     return
+
+            if str(run.get("status", "")).lower() in TERMINAL_STATUSES:
+                return
 
             await asyncio.sleep(0.3)
 
@@ -1890,20 +2014,25 @@ async def stream_forex_events_alias(run_id: str, request: Request):
 @router.get("/analyze/{run_id}/report")
 async def get_forex_report_alias(run_id: str):
     """Compatibility alias for /runs/{run_id} report retrieval."""
-    if run_id not in _forex_runs:
-        raise HTTPException(status_code=404, detail="Run not found")
-    report = _forex_completed_reports.get(run_id)
+    _prune_expired_forex_runs()
+    with _lock:
+        if run_id not in _forex_runs:
+            _forex_run_not_found(run_id)
+        report = _forex_completed_reports.get(run_id)
+        status = _forex_runs[run_id].get("status", "running")
     if report is None:
-        return {"run_id": run_id, "status": _forex_runs[run_id].get("status", "running"), "report": None}
+        return {"run_id": run_id, "status": status, "report": None}
     return report
 
 
 @router.get("/analyze/{run_id}/status")
 async def get_forex_status_alias(run_id: str):
     """Compatibility alias for run status inspection."""
-    if run_id not in _forex_runs:
-        raise HTTPException(status_code=404, detail="Run not found")
-    return _forex_runs[run_id]
+    _prune_expired_forex_runs()
+    with _lock:
+        if run_id not in _forex_runs:
+            _forex_run_not_found(run_id)
+        return dict(_forex_runs[run_id])
 
 
 # ---------------------------------------------------------------------------
@@ -2005,7 +2134,7 @@ async def run_backtest(
             backtest_id = report.backtest_id
             report_dict = _safe_model_dump(report.to_dict())
 
-            _backtest_runs[backtest_id] = {
+            backtest_entry = {
                 **report_dict,
                 "run_type": "FOREX_BACKTEST",
                 "status": "completed",
@@ -2016,7 +2145,10 @@ async def run_backtest(
                 "notice": "Historical simulation with sourced candles. Strategy performance is not statistically validated.",
                 "created_at": datetime.now(timezone.utc).isoformat(),
             }
-            return _backtest_runs[backtest_id]
+            with _lock:
+                _backtest_runs[backtest_id] = backtest_entry
+                _prune_expired_forex_runs()
+            return backtest_entry
 
 
         data_source = "user_supplied" if req.candles else "synthetic"
@@ -2122,7 +2254,7 @@ async def run_backtest(
         result_dict = _safe_model_dump(result)
         markdown_rep = f"> {demo_notice}\n\n{result.render_markdown_report()}"
 
-        _backtest_runs[backtest_id] = {
+        backtest_entry = {
             **demo_metadata,
             "backtest_id": backtest_id,
             "run_type": "FOREX_BACKTEST",
@@ -2133,8 +2265,10 @@ async def run_backtest(
             "markdown_report": markdown_rep,
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
-
-        return _backtest_runs[backtest_id]
+        with _lock:
+            _backtest_runs[backtest_id] = backtest_entry
+            _prune_expired_forex_runs()
+        return backtest_entry
     except DataInsufficientError as exc:
         raise HTTPException(status_code=422, detail={
             "code": "HISTORICAL_DATA_UNAVAILABLE", "message": str(exc),
@@ -2152,8 +2286,11 @@ async def run_backtest(
 
 @router.get("/backtest/runs", response_model=BacktestRunListResponse)
 async def list_backtest_runs():
-    """List persisted backtest and validation runs using one canonical contract."""
-    runs = [_backtest_run_summary(run_id, run).model_dump() for run_id, run in _backtest_runs.items()]
+    """List retained transient backtest and validation runs using one contract."""
+    _prune_expired_forex_runs()
+    with _lock:
+        items = [(run_id, dict(run)) for run_id, run in _backtest_runs.items()]
+    runs = [_backtest_run_summary(run_id, run).model_dump() for run_id, run in items]
     return {"runs": runs, "count": len(runs)}
 
 
@@ -2242,7 +2379,7 @@ async def run_walk_forward(
         val_id = report.validation_id
         report_dict = _safe_model_dump(report.to_dict())
         # Store a summary into _backtest_runs for UI listing
-        _backtest_runs[val_id] = {
+        backtest_entry = {
             "backtest_id": val_id,
             "run_type": "FOREX_BACKTEST",
             "status": "completed",
@@ -2262,6 +2399,9 @@ async def run_walk_forward(
             "markdown_report": report_dict.get("markdown_summary") or report_dict.get("markdown_summary", ""),
             "validation_report": report_dict,
         }
+        with _lock:
+            _backtest_runs[val_id] = backtest_entry
+            _prune_expired_forex_runs()
 
         return report_dict
     except DataInsufficientError as exc:
@@ -2279,9 +2419,12 @@ async def run_walk_forward(
 @router.get("/backtest/{backtest_id}", response_model=BacktestRunDetail)
 async def get_backtest(backtest_id: str):
     """Retrieve full result scorecard, equity curve, and markdown report for a backtest."""
-    if backtest_id not in _backtest_runs:
-        raise HTTPException(status_code=404, detail="Backtest run not found")
-    return BacktestRunDetail.model_validate(_backtest_runs[backtest_id]).model_dump()
+    _prune_expired_forex_runs()
+    with _lock:
+        if backtest_id not in _backtest_runs:
+            _backtest_not_found(backtest_id)
+        run = dict(_backtest_runs[backtest_id])
+    return BacktestRunDetail.model_validate(run).model_dump()
 
 
 # ---------------------------------------------------------------------------
@@ -2365,7 +2508,9 @@ async def get_dashboard_overview(
         "total_r": round(today_r, 2),
     }
 
-    recent_analyses = list(_forex_runs.values())[-5:]
+    _prune_expired_forex_runs()
+    with _lock:
+        recent_analyses = [dict(run) for run in list(_forex_runs.values())[-5:]]
 
     upcoming_events: list[dict[str, Any]] = []
     try:

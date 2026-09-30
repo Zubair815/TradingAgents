@@ -40,6 +40,15 @@ from tradingagents.dataflows.config import get_config as get_runtime_config  # n
 from tradingagents.dataflows.utils import safe_ticker_component  # noqa: E402
 from tradingagents.default_config import DEFAULT_CONFIG  # noqa: E402
 from tradingagents.graph.trading_graph import TradingAgentsGraph  # noqa: E402
+from web.retention import (  # noqa: E402
+    DEFAULT_RETENTION_POLICY,
+    TERMINAL_STATUSES,
+    append_bounded,
+    oldest_excess_ids,
+    prune_tombstones,
+    record_timestamp,
+    timestamp,
+)
 
 logger = logging.getLogger("tradingagents.web")
 
@@ -118,38 +127,65 @@ def _local_browser(request: Request) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# In-memory run store (sufficient for a single-user local dashboard)
+# In-memory run store (single-user local dashboard)
 # ---------------------------------------------------------------------------
-_runs: dict[str, dict[str, Any]] = {}         # run_id -> run metadata
-_run_events: dict[str, list[dict]] = {}        # run_id -> ordered event list
-_completed_reports: dict[str, dict] = {}       # run_id -> final_state snapshot
-_RUN_TTL_SECONDS = 1800
+_runs: dict[str, dict[str, Any]] = {}          # TRANSIENT UI run metadata
+_run_events: dict[str, list[dict]] = {}        # TRANSIENT bounded SSE buffers
+_completed_reports: dict[str, dict] = {}       # CACHE; report tree on disk is authoritative
+_expired_runs: dict[str, dict[str, Any]] = {}
+_run_store_lock = threading.RLock()
+_RUN_RETENTION_POLICY = DEFAULT_RETENTION_POLICY
+_last_run_prune_at: float | None = None
 
 
-def _prune_expired_runs() -> list[str]:
-    """Remove stale queued/running entries so the in-memory run store stays bounded."""
-    now = time.time()
-    expired: list[str] = []
-    for run_id, run in list(_runs.items()):
-        status = str(run.get("status", "")).lower()
-        if status in {"completed", "failed", "cancelled", "done"}:
-            continue
-        started = run.get("started_at")
-        if not started:
-            continue
-        try:
-            started_at = datetime.fromisoformat(str(started))
-        except ValueError:
-            expired.append(run_id)
-            continue
-        if started_at.tzinfo is None:
-            started_at = started_at.replace(tzinfo=datetime.now().astimezone().tzinfo)
-        if now - started_at.timestamp() > _RUN_TTL_SECONDS:
-            expired.append(run_id)
-    for run_id in expired:
-        _runs.pop(run_id, None)
-        _run_events.pop(run_id, None)
-    return expired
+def _prune_expired_runs(*, now: float | None = None) -> list[str]:
+    """Bound transient equity runs by age and terminal-record count."""
+    global _last_run_prune_at
+    current = time.time() if now is None else now
+    with _run_store_lock:
+        expired: set[str] = set()
+        terminal_ids: list[str] = []
+        for run_id, run in list(_runs.items()):
+            status = str(run.get("status", "")).lower()
+            is_terminal = status in TERMINAL_STATUSES
+            stamp = (
+                record_timestamp(run, terminal=True)
+                if is_terminal
+                else timestamp(run.get("last_activity_at")) or record_timestamp(run)
+            )
+            if is_terminal:
+                terminal_ids.append(run_id)
+                if stamp is None or current - stamp > _RUN_RETENTION_POLICY.terminal_max_age_seconds:
+                    expired.add(run_id)
+            elif stamp is None or current - stamp > _RUN_RETENTION_POLICY.stale_active_seconds:
+                expired.add(run_id)
+        expired.update(oldest_excess_ids(
+            _runs,
+            [item_id for item_id in terminal_ids if item_id not in expired],
+            _RUN_RETENTION_POLICY.terminal_max_count,
+            terminal=True,
+        ))
+        for run_id in sorted(expired):
+            run = _runs.pop(run_id, None)
+            _run_events.pop(run_id, None)
+            if run is None:
+                continue
+            _expired_runs[run_id] = {"expired_at": current, "status": run.get("status", "expired")}
+            aliases = [
+                key for key, report in _completed_reports.items()
+                if key == run_id or report.get("run_id") == run_id
+            ]
+            for key in aliases:
+                _completed_reports.pop(key, None)
+        prune_tombstones(_expired_runs, _RUN_RETENTION_POLICY, current)
+        _last_run_prune_at = current
+        return sorted(expired)
+
+
+def _run_not_found(run_id: str) -> None:
+    if run_id in _expired_runs:
+        raise HTTPException(status_code=410, detail="Run expired from transient cache")
+    raise HTTPException(status_code=404, detail="Run not found")
 
 
 # ---------------------------------------------------------------------------
@@ -234,7 +270,12 @@ _TOTAL_NODES = 13  # unique pipeline stages
 def _emit(run_id: str, event_type: str, data: dict):
     """Append an SSE-ready event to the run's event stream."""
     evt = {"type": event_type, "data": data, "ts": time.time()}
-    _run_events.setdefault(run_id, []).append(evt)
+    with _run_store_lock:
+        if run_id in _runs:
+            _runs[run_id]["last_activity_at"] = datetime.now().astimezone().isoformat()
+        events = _run_events.setdefault(run_id, [])
+        evt["_seq"] = int(events[-1].get("_seq", -1)) + 1 if events else 0
+        append_bounded(events, evt, _RUN_RETENTION_POLICY.event_max_count)
 
 
 # ---------------------------------------------------------------------------
@@ -244,7 +285,10 @@ def _run_analysis(run_id: str, req: AnalysisRequest):
     """Execute analysis in a background thread, emitting progress events."""
     try:
         trade_date = req.date or datetime.now().strftime("%Y-%m-%d")
-        _runs[run_id]["date"] = trade_date
+        with _run_store_lock:
+            if run_id not in _runs:
+                return
+            _runs[run_id]["date"] = trade_date
 
         # Build config overrides
         config: dict[str, Any] = {}
@@ -263,7 +307,10 @@ def _run_analysis(run_id: str, req: AnalysisRequest):
         provider = config.get("llm_provider", DEFAULT_CONFIG.get("llm_provider", "openai"))
         quick = config.get("quick_think_llm", DEFAULT_CONFIG.get("quick_think_llm", ""))
         deep = config.get("deep_think_llm", DEFAULT_CONFIG.get("deep_think_llm", ""))
-        _runs[run_id].update(provider=provider, quick_model=quick, deep_model=deep)
+        with _run_store_lock:
+            if run_id not in _runs:
+                return
+            _runs[run_id].update(provider=provider, quick_model=quick, deep_model=deep)
 
         _emit(run_id, "status", {"status": "initializing", "message": "Building agent graph..."})
 
@@ -422,14 +469,18 @@ def _run_analysis(run_id: str, req: AnalysisRequest):
             "final_decision": final_state.get("final_trade_decision", ""),
             "report_path": str(report_path),
         }
-        _completed_reports[run_id] = report_data
-        _completed_reports[report_folder] = report_data
-
-        _runs[run_id]["status"] = "completed"
-        _runs[run_id]["signal"] = signal
-        _runs[run_id]["finished_at"] = datetime.now().isoformat()
-        _runs[run_id]["report_id"] = report_folder
-        _runs[run_id]["report_path"] = str(report_path)
+        with _run_store_lock:
+            if run_id not in _runs:
+                return
+            _completed_reports[run_id] = report_data
+            _completed_reports[report_folder] = report_data
+            _runs[run_id].update(
+                status="completed",
+                signal=signal,
+                finished_at=datetime.now().isoformat(),
+                report_id=report_folder,
+                report_path=str(report_path),
+            )
         _emit(run_id, "complete", {
             "signal": signal,
             "report_id": report_folder,
@@ -438,9 +489,13 @@ def _run_analysis(run_id: str, req: AnalysisRequest):
 
     except Exception as exc:
         error_msg = "The analysis provider failed. Please retry."
-        _runs[run_id]["status"] = "failed"
-        _runs[run_id]["error"] = error_msg
-        _runs[run_id]["finished_at"] = datetime.now().isoformat()
+        with _run_store_lock:
+            if run_id in _runs:
+                _runs[run_id].update(
+                    status="failed",
+                    error=error_msg,
+                    finished_at=datetime.now().isoformat(),
+                )
         _emit(run_id, "error", {"error": error_msg})
         logger.error("Analysis failed for run %s (%s)", run_id, type(exc).__name__)
 
@@ -558,26 +613,48 @@ async def get_config():
     }
 
 
+@app.get("/api/runtime/diagnostics")
+async def runtime_diagnostics(request: Request):
+    """Expose aggregate transient-cache health without configuration or secrets."""
+    verify_auth(request)
+    _prune_expired_runs()
+    with _run_store_lock:
+        active = sum(
+            str(run.get("status", "")).lower() not in TERMINAL_STATUSES
+            for run in _runs.values()
+        )
+        equities = {
+            "active_run_count": active,
+            "cached_completed_run_count": len(_runs) - active,
+            "last_prune_at": _last_run_prune_at,
+        }
+    from web.forex_routes import get_retention_diagnostics
+    return {"equities": equities, "forex": get_retention_diagnostics()}
+
+
 @app.post("/api/analyze")
 async def start_analysis(req: AnalysisRequest, request: Request):
     """Launch a new analysis run in a background thread."""
     verify_auth(request)
 
     run_id = str(uuid.uuid4())[:8]
-    _runs[run_id] = {
-        "run_id": run_id,
-        "ticker": req.ticker.upper(),
-        "date": req.date or datetime.now().strftime("%Y-%m-%d"),
-        "status": "queued",
-        "provider": req.provider or DEFAULT_CONFIG.get("llm_provider", "openai"),
-        "quick_model": req.quick_model or DEFAULT_CONFIG.get("quick_think_llm", ""),
-        "deep_model": req.deep_model or DEFAULT_CONFIG.get("deep_think_llm", ""),
-        "started_at": datetime.now().isoformat(),
-        "finished_at": None,
-        "error": None,
-        "signal": None,
-    }
-    _run_events[run_id] = []
+    with _run_store_lock:
+        _runs[run_id] = {
+            "run_id": run_id,
+            "ticker": req.ticker.upper(),
+            "date": req.date or datetime.now().strftime("%Y-%m-%d"),
+            "status": "queued",
+            "provider": req.provider or DEFAULT_CONFIG.get("llm_provider", "openai"),
+            "quick_model": req.quick_model or DEFAULT_CONFIG.get("quick_think_llm", ""),
+            "deep_model": req.deep_model or DEFAULT_CONFIG.get("deep_think_llm", ""),
+            "started_at": datetime.now().isoformat(),
+            "last_activity_at": datetime.now().isoformat(),
+            "finished_at": None,
+            "error": None,
+            "signal": None,
+        }
+        _run_events[run_id] = []
+        _prune_expired_runs()
 
     thread = threading.Thread(target=_run_analysis, args=(run_id, req), daemon=True)
     thread.start()
@@ -589,7 +666,8 @@ async def start_analysis(req: AnalysisRequest, request: Request):
 async def list_runs():
     """List all runs (most recent first)."""
     _prune_expired_runs()
-    runs = sorted(_runs.values(), key=lambda r: r["started_at"], reverse=True)
+    with _run_store_lock:
+        runs = sorted((dict(run) for run in _runs.values()), key=lambda r: r["started_at"], reverse=True)
     return {"runs": runs}
 
 
@@ -597,19 +675,14 @@ async def list_runs():
 async def cancel_run(run_id: str, request: Request):
     """Cancel a queued or in-flight run and keep the event stream deterministic."""
     verify_auth(request)
-    if run_id not in _runs:
-        raise HTTPException(status_code=404, detail="Run not found")
-    run = _runs[run_id]
-    if str(run.get("status", "")).lower() in {"completed", "failed", "cancelled"}:
-        return {"run_id": run_id, "status": run.get("status", "cancelled")}
-    run["status"] = "cancelled"
-    run["finished_at"] = datetime.now().isoformat()
-    run["error"] = "Cancelled by user"
-    _run_events.setdefault(run_id, []).append({
-        "type": "cancelled",
-        "data": {"run_id": run_id, "status": "cancelled", "message": "Run cancelled by user"},
-        "ts": time.time(),
-    })
+    with _run_store_lock:
+        if run_id not in _runs:
+            _run_not_found(run_id)
+        run = _runs[run_id]
+        if str(run.get("status", "")).lower() in TERMINAL_STATUSES:
+            return {"run_id": run_id, "status": run.get("status", "cancelled")}
+        run.update(status="cancelled", finished_at=datetime.now().isoformat(), error="Cancelled by user")
+    _emit(run_id, "cancelled", {"run_id": run_id, "status": "cancelled", "message": "Run cancelled by user"})
     return {"run_id": run_id, "status": "cancelled"}
 
 
@@ -617,9 +690,10 @@ async def cancel_run(run_id: str, request: Request):
 async def get_run(run_id: str):
     """Get run details."""
     _prune_expired_runs()
-    if run_id not in _runs:
-        raise HTTPException(status_code=404, detail="Run not found")
-    return _runs[run_id]
+    with _run_store_lock:
+        if run_id not in _runs:
+            _run_not_found(run_id)
+        return dict(_runs[run_id])
 
 
 def _load_on_disk_report(run_id: str) -> dict | None:
@@ -628,10 +702,9 @@ def _load_on_disk_report(run_id: str) -> dict | None:
     if not reports_dir.exists():
         return None
 
-    if run_id in _runs and _runs[run_id].get("report_id"):
-        clean_id = Path(_runs[run_id]["report_id"]).name
-    else:
-        clean_id = Path(run_id).name
+    with _run_store_lock:
+        report_id = _runs.get(run_id, {}).get("report_id")
+    clean_id = Path(report_id or run_id).name
     item_dir = reports_dir / clean_id
     if not item_dir.exists() or not item_dir.is_dir():
         return None
@@ -711,18 +784,25 @@ def _load_on_disk_report(run_id: str) -> dict | None:
 @app.get("/api/runs/{run_id}/report")
 async def get_report(run_id: str):
     """Get the full report for a completed run or saved report."""
-    if run_id in _completed_reports:
-        return _completed_reports[run_id]
-    if run_id in _runs and _runs[run_id].get("report_id"):
-        rep_id = _runs[run_id]["report_id"]
-        if rep_id in _completed_reports:
-            return _completed_reports[rep_id]
+    _prune_expired_runs()
+    with _run_store_lock:
+        cached = _completed_reports.get(run_id)
+        rep_id = _runs.get(run_id, {}).get("report_id")
+        aliased = _completed_reports.get(rep_id) if rep_id else None
+    if cached is not None:
+        return cached
+    if rep_id:
+        if aliased is not None:
+            return aliased
         disk_report = _load_on_disk_report(rep_id)
         if disk_report is not None:
             return disk_report
     disk_report = _load_on_disk_report(run_id)
     if disk_report is not None:
         return disk_report
+    with _run_store_lock:
+        if run_id in _expired_runs:
+            _run_not_found(run_id)
     raise HTTPException(status_code=404, detail="Report not available")
 
 
@@ -730,24 +810,36 @@ async def get_report(run_id: str):
 async def stream_events(run_id: str, request: Request):
     """SSE endpoint for live progress updates."""
     _prune_expired_runs()
-    if run_id not in _runs:
-        raise HTTPException(status_code=404, detail="Run not found")
+    with _run_store_lock:
+        if run_id not in _runs:
+            _run_not_found(run_id)
 
     async def event_generator():
-        last_idx = 0
+        last_seq = -1
         while True:
             if await request.is_disconnected():
                 break
 
-            events = _run_events.get(run_id, [])
-            while last_idx < len(events):
-                evt = events[last_idx]
+            _prune_expired_runs()
+            with _run_store_lock:
+                run = _runs.get(run_id)
+                events = list(_run_events.get(run_id, []))
+            if run is None:
+                yield 'event: expired\ndata: {"status":"expired"}\n\n'
+                return
+            for index, evt in enumerate(events):
+                sequence = int(evt.get("_seq", index))
+                if sequence <= last_seq:
+                    continue
                 yield f"event: {evt['type']}\ndata: {json.dumps(evt['data'])}\n\n"
-                last_idx += 1
+                last_seq = sequence
 
                 # Stop streaming after terminal events
                 if evt["type"] in ("complete", "error", "cancelled"):
                     return
+
+            if str(run.get("status", "")).lower() in TERMINAL_STATUSES:
+                return
 
             await asyncio.sleep(0.5)
 
@@ -765,6 +857,9 @@ async def stream_events(run_id: str, request: Request):
 @app.get("/api/history")
 async def get_history():
     """Return past analysis results from results_dir."""
+    _prune_expired_runs()
+    with _run_store_lock:
+        live_runs = [dict(run) for run in _runs.values()]
     results_dir = Path(DEFAULT_CONFIG.get("results_dir", ""))
     reports_dir = results_dir / "reports"
     history = []
@@ -797,7 +892,7 @@ async def get_history():
                         signal = parsed if parsed and parsed != "REVIEW" else None
 
                         live_run_id = None
-                        for r in _runs.values():
+                        for r in live_runs:
                             if r.get("report_id") == item.name or r.get("report_path") == str(report_file):
                                 live_run_id = r["run_id"]
                                 break

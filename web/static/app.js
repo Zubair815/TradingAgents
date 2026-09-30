@@ -3074,6 +3074,7 @@
           <div style="background:var(--bg-card); padding:1rem 1.25rem; border-radius:var(--radius-md); border-left:4px solid var(--cyan); border:1px solid var(--border); border-left-width:4px;">
             <strong style="color:var(--cyan); font-size:0.82rem; text-transform:uppercase; letter-spacing:0.04em;">Executive Thesis:</strong>
             <p style="margin:4px 0 0 0; font-size:0.88rem; color:var(--text-primary); line-height:1.5;">${escapeText(prop.trade_rationale_summary)}</p>
+            <span class="stat-sub">Model confidence: ${prop.confidence == null ? 'Unavailable' : escapeText(`${Number(prop.confidence).toFixed(1)}% raw score`)}</span>
           </div>
         ` : ''}
 

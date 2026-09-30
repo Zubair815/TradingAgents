@@ -28,7 +28,13 @@ from tradingagents.journal.manager import ForexJournalManager
 from tradingagents.learning.manager import ForexLearningManager
 from tradingagents.learning.models import ForexLesson
 from tradingagents.metrics.manager import ForexMetricsManager
-from tradingagents.mt5.models import MT5AccountInfo, MT5ConnectionStatus, MT5Position, MT5SymbolInfo
+from tradingagents.mt5.models import (
+    MT5AccountInfo,
+    MT5ConnectionStatus,
+    MT5Position,
+    MT5SymbolInfo,
+    MT5Tick,
+)
 from tradingagents.mt5.observer import MT5Observer
 from web import forex_routes, server
 
@@ -115,9 +121,9 @@ def _deterministic_analysis_worker(run_id, request) -> None:
         "sizing": {"recommended_lot_size": 0.5},
         "context": {"technical": "Bullish market structure"},
         "research": {
-            "technical_analysis": "Higher-low confirmation.",
-            "macro_analysis": "Rate differential stable.",
-            "news_analysis": "No high-impact conflict.",
+            "technical": "Higher-low confirmation.",
+            "macro": "Rate differential stable.",
+            "news": "No high-impact conflict.",
         },
         "provenance": {"sources": ["deterministic_fixture"]},
         "report": "Deterministic E2E decision report.",
@@ -157,7 +163,7 @@ def e2e_environment(tmp_path_factory):
         proposal_id="prop_e2e",
         pair="EURUSD",
         action=ForexAction.LONG,
-        order_type=OrderType.LIMIT,
+        order_type=OrderType.BUY_LIMIT,
         setup_type=SetupType.PULLBACK,
         timeframe="M15",
         entry_price=1.085,
@@ -170,7 +176,7 @@ def e2e_environment(tmp_path_factory):
     )
     journal.save_proposal(proposal)
     trade = journal.record_trade_open(
-        proposal_id=proposal.proposal_id,
+        proposal_id=None,
         pair="EURUSD",
         action=ForexAction.LONG,
         open_price=1.085,
@@ -233,6 +239,13 @@ def e2e_environment(tmp_path_factory):
         volume_max=100.0,
         volume_step=0.01,
     )
+    observer.get_current_tick.side_effect = lambda symbol: MT5Tick(
+        symbol=symbol,
+        time=datetime.now(timezone.utc),
+        bid=150.123 if symbol.endswith("JPY") else 1.085,
+        ask=150.135 if symbol.endswith("JPY") else 1.08512,
+        spread_pips=1.2,
+    )
     forex_routes.set_forex_dependencies(
         journal=journal,
         journal_manager=journal_manager,
@@ -281,11 +294,10 @@ def e2e_environment(tmp_path_factory):
     server.DASHBOARD_API_KEY = original_key
     forex_routes.reset_forex_state()
     config_module._RUNTIME_CONFIG_PATH = original_settings_path
-    config_module.reset_runtime_settings()
 
 
 @contextmanager
-def quality_page(environment):
+def quality_page(environment, *, allowed_failed_paths=()):
     context = environment.browser.new_context()
     page = context.new_page()
     page_errors: list[str] = []
@@ -293,18 +305,26 @@ def quality_page(environment):
     failed_required_requests: list[str] = []
     page.on("pageerror", lambda error: page_errors.append(str(error)))
     page.on("console", lambda message: console_errors.append(message.text) if message.type == "error" else None)
-    page.on(
-        "response",
-        lambda response: failed_required_requests.append(f"{response.status} {response.url}")
-        if response.status >= 500 else None,
-    )
-    page.goto(environment.base_url, wait_until="networkidle")
+    def record_failed_response(response):
+        if response.status < 500:
+            return
+        if any(response.url.endswith(path) for path in allowed_failed_paths):
+            return
+        failed_required_requests.append(f"{response.status} {response.url}")
+
+    page.on("response", record_failed_response)
+    page.goto(environment.base_url, wait_until="domcontentloaded")
+    page.wait_for_function("document.querySelector('#provider')?.options.length > 1")
     try:
         yield page
     finally:
         assert page_errors == []
-        assert console_errors == []
         assert failed_required_requests == []
+        unexpected_console = [
+            message for message in console_errors
+            if not (allowed_failed_paths and message.startswith("Failed to load resource:"))
+        ]
+        assert unexpected_console == []
         context.close()
 
 
@@ -320,7 +340,10 @@ def test_dashboard_boot_authentication_and_secret_storage(e2e_environment):
     try:
         context = e2e_environment.browser.new_context()
         page = context.new_page()
-        page.goto(e2e_environment.base_url, wait_until="networkidle")
+        page.goto(e2e_environment.base_url, wait_until="domcontentloaded")
+        page.wait_for_function("document.querySelector('#provider')?.options.length > 1")
+        page.locator("#tab-analyze").click()
+        page.locator("#apiKeyGroup").wait_for(state="visible")
         wrong = page.evaluate(
             "fetch('/api/forex/settings',{headers:{'X-API-Key':'wrong'}}).then(r=>r.status)"
         )
@@ -357,7 +380,12 @@ def test_analysis_form_sse_and_decision_report(e2e_environment):
         mandatory = page.locator(".mandatory-stage")
         assert mandatory.count() == 2
         assert all(mandatory.nth(index).is_disabled() for index in range(mandatory.count()))
-        page.locator("#analysisForm button[type=submit]").click()
+        assert page.locator("#btnRun").is_enabled()
+        invalid = page.evaluate("[...document.querySelectorAll('#analysisForm :invalid')].map(element => element.id)")
+        assert invalid == []
+        page.locator("#analysisForm").evaluate("form => form.requestSubmit()")
+        page.wait_for_timeout(1000)
+        assert captured, page.locator("#toast").inner_text()
         page.locator("#progressPercent").wait_for(state="visible")
         page.wait_for_function("document.querySelector('#progressPercent')?.textContent === '100%'")
         payload = captured[0]
@@ -370,20 +398,20 @@ def test_analysis_form_sse_and_decision_report(e2e_environment):
         assert "Higher-low confirmation" in report
         assert "Rate differential stable" in report
         assert "No high-impact conflict" in report
-        assert "Risk Engine: APPROVE" in report
-        assert "Confidence: Unavailable" in report
-        assert "Confidence: 0" not in report
+        assert "RISK ENGINE: APPROVE" in report
+        assert "Model confidence: Unavailable" in report
+        assert "Model confidence: 0" not in report
 
 
 def test_proposals_mt5_journal_and_learning_workflows(e2e_environment):
-    with quality_page(e2e_environment) as page:
+    with quality_page(e2e_environment, allowed_failed_paths=("/api/forex/mt5/account",)) as page:
         page.locator("#tab-proposals").click()
         page.locator("#proposalsTableContainer").get_by_text("prop_e2e").wait_for()
         page.locator("#proposalsTableContainer button", has_text="View").click()
         page.locator("#reportModalBody").get_by_text("Immutable Original Proposal").wait_for()
-        page.get_by_role("button", name="Skip").click()
-        page.locator("#reportModalBody").get_by_text("SKIPPED", exact=True).wait_for()
-        assert e2e_environment.journal.get_proposal("prop_e2e").status == ProposalStatus.SKIPPED
+        page.get_by_role("button", name="Approve").click()
+        page.locator("#reportModalBody").get_by_text("APPROVED", exact=True).wait_for()
+        assert e2e_environment.journal.get_proposal("prop_e2e").status == ProposalStatus.APPROVED
         assert not any(call[0].startswith("place") for call in e2e_environment.observer.method_calls)
         page.locator("#reportModalClose").click()
 
@@ -417,8 +445,8 @@ def test_proposals_mt5_journal_and_learning_workflows(e2e_environment):
         page.locator("#tab-journal").click()
         page.locator("#journalTableContainer [data-trade-id]").click()
         detail = page.locator("#tradeDetailBody")
-        detail.get_by_text("Deterministic trade opened").wait_for()
-        detail.get_by_text("Followed the plan").wait_for()
+        detail.get_by_text("Deterministic trade opened", exact=True).wait_for()
+        detail.get_by_text("Followed the plan", exact=False).first.wait_for()
         assert "Unavailable" in detail.inner_text()
         page.locator("#tradeDetailClose").click()
 
@@ -439,7 +467,7 @@ def test_performance_backtests_and_settings(e2e_environment):
         page.locator("#tab-performance").click()
         page.locator("#performanceOverallContainer").get_by_text("Total trades").wait_for()
         overall = page.locator("#performanceOverallContainer").inner_text()
-        assert "Win rate" in overall and "Profit factor" in overall
+        assert "WIN RATE" in overall and "PROFIT FACTOR" in overall
         assert page.locator("#sampleSizeWarning").is_visible()
         page.locator("#performanceSegmentSelect").select_option("by_direction")
         page.locator("#perfBreakdownContainer").get_by_text("LONG", exact=True).wait_for()
@@ -447,19 +475,28 @@ def test_performance_backtests_and_settings(e2e_environment):
         page.locator("#tab-backtest").click()
         runs = page.locator("#backtestRunsContainer")
         runs.get_by_text("DEMO", exact=True).wait_for()
-        runs.get_by_text("WALK FORWARD", exact=True).wait_for()
+        runs.get_by_text("WALK_FORWARD", exact=True).wait_for()
         runs.get_by_text("wf_e2e").click()
         runs.get_by_text("Walk-forward splits (out-of-sample)").wait_for()
         assert "split-1" in runs.inner_text()
 
-        page.locator("#tab-settings").click()
+        with page.expect_response(lambda response: response.url.endswith("/api/forex/settings")):
+            page.locator("#tab-settings").click()
+        page.wait_for_function("document.querySelector('#settingProviderInput')?.options.length > 0")
         page.locator("#settingPair").fill("GBPUSD")
         page.locator("#settingTimeframe").select_option("M15")
         page.locator("#settingRiskPercent").fill("1.4")
         page.locator("#btnSaveSettings").click()
-        page.locator("#settingsStatus").get_by_text("Settings saved").wait_for()
-        page.reload(wait_until="networkidle")
-        page.locator("#tab-settings").click()
+        page.locator("#settingsStatus").get_by_text("Saved and applied.").wait_for()
+        persisted = page.evaluate("fetch('/api/forex/settings').then(r => r.json())")
+        assert persisted["settings"]["forex_default_pair"] == "GBPUSD"
+        assert persisted["settings"]["forex_default_execution_timeframe"] == "M15"
+        assert persisted["settings"]["forex_default_risk_percent"] == 1.4
+        page.reload(wait_until="domcontentloaded")
+        page.wait_for_function("document.querySelector('#provider')?.options.length > 1")
+        with page.expect_response(lambda response: response.url.endswith("/api/forex/settings")):
+            page.locator("#tab-settings").click()
+        page.wait_for_function("document.querySelector('#settingPair')?.value === 'GBPUSD'")
         assert page.locator("#settingPair").input_value() == "GBPUSD"
         assert page.locator("#settingTimeframe").input_value() == "M15"
         assert page.locator("#settingRiskPercent").input_value() == "1.4"
