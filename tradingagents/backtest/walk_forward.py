@@ -183,16 +183,20 @@ class WalkForwardValidationReport:
     profit_factor_degradation: float
     robustness_verdict: str  # ROBUST, MARGINAL, OVERFITTED, TAINTED
     markdown_summary: str
+    source_provenance: dict[str, Any] = field(default_factory=dict)
+    validation_status: str = "PARTIALLY_VALIDATED"
     created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "validation_id": self.validation_id,
             "validated_strategy_performance": False,
-            "validation_status": "DEMO",
-            "validation_reasons": ["Descriptive split comparison; source provenance and statistical significance are unverified."],
+            "validation_status": self.validation_status,
+            "validation_reasons": ["Descriptive split comparison; statistical significance and predictive profitability are not established."],
             "pair": self.pair,
             "timeframe": self.timeframe,
+            "source_provenance": self.source_provenance,
+            "split_count": len(self.splits),
             "splits": [s.to_dict() for s in self.splits],
             "period_reports": {k: v.to_dict() for k, v in self.period_reports.items()},
             "walk_forward_efficiency_ratio": self.walk_forward_efficiency_ratio,
@@ -360,6 +364,7 @@ class ForexWalkForwardValidator:
         strategy_version: str | None = None,
         config_snapshot: dict[str, Any] | None = None,
         is_optimization_run: bool = False,
+        pair: str = "EURUSD",
     ) -> PeriodPerformanceReport:
         """Run backtesting strictly isolated to a single period window with invariant checks."""
         p_type = period_window.period_type
@@ -390,14 +395,22 @@ class ForexWalkForwardValidator:
         proposals_schedule: dict[datetime, list[ForexTraderProposal]] = {}
         if agent_pipeline_callable is not None:
             history: list[ForexBar] = []
-            for c in period_candles:
+            interval = max(1, int(cfg_snap.get("sampling_interval") or 1))
+            max_points = cfg_snap.get("max_analysis_points")
+            analyses = 0
+            for index, c in enumerate(period_candles):
                 history.append(c)
-                p = agent_pipeline_callable("EURUSD", c.timestamp, list(history))
+                if index % interval or (max_points is not None and analyses >= int(max_points)):
+                    continue
+                analyses += 1
+                p = agent_pipeline_callable(
+                    normalize_forex_pair(pair), c.close_time or c.timestamp, list(history)
+                )
                 if p:
                     proposals_schedule[c.timestamp] = [p]
 
         result = engine.run_candles(
-            pair="EURUSD",
+            pair=normalize_forex_pair(pair),
             candles=period_candles,
             proposals_schedule=proposals_schedule if proposals_schedule else None,
         )
@@ -429,6 +442,8 @@ class ForexWalkForwardValidator:
         val_ratio: float = 0.20,
         oos_ratio: float = 0.30,
         include_forward_demo: bool = True,
+        source_provenance: dict[str, Any] | None = None,
+        validation_status: str = "PARTIALLY_VALIDATED",
     ) -> WalkForwardValidationReport:
         """Execute complete walk-forward and out-of-sample validation matrix."""
         norm_pair = normalize_forex_pair(pair)
@@ -447,49 +462,72 @@ class ForexWalkForwardValidator:
 
         period_reports: dict[str, PeriodPerformanceReport] = {}
 
-        # Primary validation runs across the designated periods in the first / primary split
-        primary_split = splits[0]
-        periods_to_test = [primary_split.development]
-        if primary_split.validation:
-            periods_to_test.append(primary_split.validation)
-        periods_to_test.append(primary_split.out_of_sample)
-        if primary_split.forward_demo:
-            periods_to_test.append(primary_split.forward_demo)
+        if agent_pipeline_callable is None:
+            # Backward-compatible engine-only exploratory mode. Production routes
+            # must inject the real pipeline and label this path DEMO.
+            def empty_pipeline(_pair, _cutoff, _history):
+                return None
 
-        for p_win in periods_to_test:
-            rep = self.run_period_backtest(
-                candles=candles,
-                period_window=p_win,
-                backtest_config=backtest_config,
-                agent_pipeline_callable=agent_pipeline_callable,
-                strategy_version=self.strategy_version,
-                config_snapshot=self.config_snapshot,
-                is_optimization_run=False,
-            )
-            period_reports[p_win.period_type.value] = rep
+            agent_pipeline_callable = empty_pipeline
+            validation_status = "DEMO"
+
+        for split in splits:
+            periods_to_test = [split.development]
+            if split.validation:
+                periods_to_test.append(split.validation)
+            periods_to_test.append(split.out_of_sample)
+            if split.forward_demo:
+                periods_to_test.append(split.forward_demo)
+
+            for p_win in periods_to_test:
+                rep = self.run_period_backtest(
+                    candles=candles,
+                    period_window=p_win,
+                    backtest_config=backtest_config,
+                    agent_pipeline_callable=agent_pipeline_callable,
+                    strategy_version=self.strategy_version,
+                    config_snapshot=self.config_snapshot,
+                    is_optimization_run=False,
+                    pair=norm_pair,
+                )
+                period_reports[f"{split.split_id}:{p_win.period_type.value}"] = rep
+
+        # Preserve the single-split lookup contract while multi-split keys remain unique.
+        if len(splits) == 1:
+            prefix = f"{splits[0].split_id}:"
+            period_reports.update({k.removeprefix(prefix): v for k, v in list(period_reports.items())})
 
         # Compute Institutional Walk-Forward Efficiency (WFE) and Robustness
-        dev_rep = period_reports.get(EvaluationPeriodType.DEVELOPMENT.value)
-        oos_rep = period_reports.get(EvaluationPeriodType.OUT_OF_SAMPLE.value)
+        dev_reports = [
+            period_reports[f"{s.split_id}:{EvaluationPeriodType.DEVELOPMENT.value}"]
+            for s in splits
+        ]
+        oos_reports = [
+            period_reports[f"{s.split_id}:{EvaluationPeriodType.OUT_OF_SAMPLE.value}"]
+            for s in splits
+        ]
+        dev_rep = dev_reports[0] if dev_reports else None
+        oos_rep = oos_reports[0] if oos_reports else None
 
         wfe_ratio = 0.0
         pf_degradation = 0.0
         robustness = "OVERFITTED"
 
         if dev_rep and oos_rep:
-            if oos_rep.is_tainted:
+            if any(r.is_tainted for r in oos_reports):
                 robustness = "TAINTED"
             else:
-                dev_ret = max(0.0001, dev_rep.result.total_return_pct)
-                oos_ret = oos_rep.result.total_return_pct
+                dev_ret = max(0.0001, sum(r.result.total_return_pct for r in dev_reports))
+                oos_ret = sum(r.result.total_return_pct for r in oos_reports)
                 wfe_ratio = round((oos_ret / dev_ret) if dev_ret > 0 else 0.0, 3)
 
-                dev_pf = dev_rep.result.profit_factor
-                oos_pf = oos_rep.result.profit_factor
+                dev_pf = sum(r.result.profit_factor for r in dev_reports) / len(dev_reports)
+                oos_pf = sum(r.result.profit_factor for r in oos_reports) / len(oos_reports)
                 pf_degradation = round(((dev_pf - oos_pf) / dev_pf) * 100.0, 1) if dev_pf > 0 else 0.0
 
                 # Classification rules
-                if oos_pf >= 1.3 and wfe_ratio >= 0.60 and oos_rep.result.expectancy_r > 0.15:
+                oos_expectancy = sum(r.result.expectancy_r for r in oos_reports) / len(oos_reports)
+                if oos_pf >= 1.3 and wfe_ratio >= 0.60 and oos_expectancy > 0.15:
                     robustness = "ROBUST"
                 elif oos_pf >= 1.05 and wfe_ratio >= 0.40:
                     robustness = "MARGINAL"
@@ -516,6 +554,8 @@ class ForexWalkForwardValidator:
             profit_factor_degradation=pf_degradation,
             robustness_verdict=robustness,
             markdown_summary=md_summary,
+            source_provenance=dict(source_provenance or {}),
+            validation_status=validation_status,
         )
 
     def _render_markdown_summary(
@@ -552,15 +592,11 @@ class ForexWalkForwardValidator:
             "| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |",
         ]
 
-        for p_name in [
-            EvaluationPeriodType.DEVELOPMENT.value,
-            EvaluationPeriodType.VALIDATION.value,
-            EvaluationPeriodType.OUT_OF_SAMPLE.value,
-            EvaluationPeriodType.FORWARD_DEMO.value,
-        ]:
-            rep = period_reports.get(p_name)
-            if not rep:
-                continue
+        rows = [
+            (key, rep) for key, rep in period_reports.items()
+            if ":" in key or len(period_reports) <= 4
+        ]
+        for p_name, rep in rows:
             r = rep.result
             status_txt = "⚠️ TAINTED" if rep.is_tainted else "✅ VALID"
             date_range = f"`{rep.start_date}` to `{rep.end_date}`"

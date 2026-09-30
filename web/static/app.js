@@ -183,6 +183,7 @@
     btCapital:           $('#btCapital'),
     btMaxPoints:         $('#btMaxPoints'),
     btSpread:            $('#btSpread'),
+    btSplits:            $('#btSplits'),
     backtestEstimate:    $('#backtestEstimate'),
     btnLaunchBacktest:   $('#btnLaunchBacktest'),
     btnRefreshBacktests: $('#btnRefreshBacktests'),
@@ -489,8 +490,26 @@
           const timeframe = DOM.btTimeframe ? DOM.btTimeframe.value : 'H1';
           const date_from = DOM.btStartDate ? (DOM.btStartDate.value || null) : null;
           const date_to = DOM.btEndDate ? (DOM.btEndDate.value || null) : null;
-          const payload = { pair, timeframe, date_from, date_to, count: 300 };
-          const res = await apiFetch('/api/forex/backtest/walkforward', {
+          const max_analysis_points = DOM.btMaxPoints ? Number(DOM.btMaxPoints.value) : 10;
+          const n_splits = DOM.btSplits ? Number(DOM.btSplits.value) : 1;
+          const payload = { pair, timeframe, date_from, date_to, count: 300,
+            max_analysis_points, spread_pips: DOM.btSpread ? Number(DOM.btSpread.value) : 1.5,
+            initial_balance: DOM.btCapital ? Number(DOM.btCapital.value) : 100000,
+            analyst_selection: ['forex_technical', 'forex_macro', 'forex_news'],
+            provider: DOM.settingProviderInput ? DOM.settingProviderInput.value || null : null,
+            quick_model: DOM.settingQuickModelInput ? DOM.settingQuickModelInput.value || null : null,
+            deep_model: DOM.settingDeepModelInput ? DOM.settingDeepModelInput.value || null : null };
+          const estimateRes = await apiFetch('/api/forex/backtest/estimate', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ pair, timeframe, count: 300, max_analysis_points,
+              analyst_count: 3, workflow: 'WALK_FORWARD', n_splits }),
+          });
+          if (estimateRes.ok) {
+            const estimate = await estimateRes.json();
+            if (Number(estimate.estimated_cost_usd || 0) >= 1 &&
+                !confirm(`Walk-forward estimate: ${estimate.expected_analyses_count} analyses, ${estimate.estimated_llm_calls} LLM calls, $${Number(estimate.estimated_cost_usd).toFixed(2)}. Proceed?`)) return;
+          }
+          const res = await apiFetch(`/api/forex/backtest/walkforward?n_splits=${encodeURIComponent(n_splits)}`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
           });
           if (!res.ok) {
@@ -512,16 +531,37 @@
       DOM.btnRunAblation.addEventListener('click', async () => {
         try {
           const pair = DOM.btPair ? DOM.btPair.value : 'EURUSD';
-          const res = await apiFetch('/api/forex/analytics/ablation', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pair }),
+          const timeframe = DOM.btTimeframe ? DOM.btTimeframe.value : 'H1';
+          const date_from = DOM.btStartDate ? (DOM.btStartDate.value || null) : null;
+          const date_to = DOM.btEndDate ? (DOM.btEndDate.value || null) : null;
+          const max_analysis_points = DOM.btMaxPoints ? Number(DOM.btMaxPoints.value) : 10;
+          const estimateRes = await apiFetch('/api/forex/backtest/estimate', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ pair, timeframe, count: 300, max_analysis_points,
+              analyst_count: 3, workflow: 'ABLATION', variant_count: 10 }),
+          });
+          let confirm_expensive = false;
+          if (estimateRes.ok) {
+            const estimate = await estimateRes.json();
+            if (Number(estimate.estimated_cost_usd || 0) >= 1) {
+              confirm_expensive = confirm(`Historical ablation estimate: ${estimate.expected_analyses_count} analyses, ${estimate.estimated_llm_calls} LLM calls, $${Number(estimate.estimated_cost_usd).toFixed(2)}. Every variant uses the same verified candles and PIT rules. Proceed?`);
+              if (!confirm_expensive) return;
+            }
+          }
+          const res = await apiFetch('/api/forex/backtest/ablation', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ pair, timeframe, date_from, date_to, max_analysis_points,
+              spread_pips: DOM.btSpread ? Number(DOM.btSpread.value) : 1.5,
+              initial_balance: DOM.btCapital ? Number(DOM.btCapital.value) : 100000,
+              confirm_expensive }),
           });
           if (!res.ok) {
             const err = await res.json().catch(() => ({}));
             throw new Error(apiErrorMessage(err, 'Ablation failed'));
           }
           const data = await res.json();
-          renderAblationStudy(data.ablation_study || {});
-          showToast('Ablation study complete', 'success');
+          renderAblationStudy(data || {});
+          showToast('Historical multi-agent ablation complete', 'success');
         } catch (e) {
           showToast(e.message || 'Ablation failed', 'error');
         }
@@ -695,10 +735,28 @@
 
   // ---- Price & Precision Helpers ----
   function formatForexPrice(price, symbol, digits) {
-    if (price == null || price === '' || isNaN(Number(price))) return '-';
+    if (price == null || price === '' || !Number.isFinite(Number(price))) return 'Unavailable';
     const num = Number(price);
     const d = digits != null ? digits : (symbol && String(symbol).toUpperCase().includes('JPY') ? 3 : 5);
     return num.toFixed(d);
+  }
+
+  function actionBadgeClass(action) {
+    const value = String(action || 'UNKNOWN').toUpperCase();
+    if (value === 'LONG' || value === 'BUY') return 'bullish';
+    if (value === 'SHORT' || value === 'SELL') return 'bearish';
+    if (value === 'REJECT' || value === 'REJECTED') return 'reject';
+    return 'neutral';
+  }
+
+  function availableMetric(value, suffix = '', digits = 2) {
+    return value == null || value === '' || !Number.isFinite(Number(value))
+      ? 'Unavailable'
+      : `${Number(value).toFixed(digits)}${suffix}`;
+  }
+
+  function renderLoadError(container, label) {
+    if (container) container.innerHTML = `<div class="empty-state"><div class="empty-state-title">Unable to load ${escapeText(label)}</div><div class="empty-state-desc">The previous values may be stale. Retry when the local service is available.</div></div>`;
   }
 
   function maskAccountLogin(login) {
@@ -860,7 +918,10 @@
   async function loadMT5Positions() {
     try {
       const res = await apiFetch('/api/forex/mt5/positions');
-      if (!res.ok) return;
+      if (!res.ok) {
+        renderLoadError(DOM.mt5PositionsContainer, 'MT5 positions');
+        return;
+      }
       const data = await res.json();
       const positions = data.positions || [];
 
@@ -1047,6 +1108,7 @@
       const data = await res.json();
       renderDashboardOverview(data);
     } catch (_) {
+      renderLoadError(DOM.mt5PositionsContainer, 'MT5 positions');
       showMT5Unavailable();
     }
   }
@@ -1223,10 +1285,10 @@
                 <tr>
                   <td style="font-family:var(--font-mono); font-size:0.75rem; color:var(--text-muted);">${escapeText(String(p.proposal_id || '').slice(0, 8))}</td>
                   <td style="font-weight:700; color:var(--cyan);">${escapeText(p.pair)}</td>
-                  <td><span class="signal-badge ${p.action === 'LONG' ? 'bullish' : 'bearish'}" style="font-size:0.7rem; padding:2px 8px;">${escapeText(p.action)}</span></td>
-                  <td style="font-family:var(--font-mono);">${Number(p.entry_price || 0).toFixed(5)}</td>
-                  <td style="font-family:var(--font-mono);">${Number(p.stop_loss || 0).toFixed(5)}</td>
-                  <td style="font-family:var(--font-mono);">${Number(p.take_profit_1 || 0).toFixed(5)}</td>
+                  <td><span class="signal-badge ${actionBadgeClass(p.action)}" style="font-size:0.7rem; padding:2px 8px;">${escapeText(p.action || 'UNKNOWN')}</span></td>
+                  <td style="font-family:var(--font-mono);">${formatForexPrice(p.entry_price, p.pair, p.digits)}</td>
+                  <td style="font-family:var(--font-mono);">${formatForexPrice(p.stop_loss, p.pair, p.digits)}</td>
+                  <td style="font-family:var(--font-mono);">${formatForexPrice(p.take_profit_1, p.pair, p.digits)}</td>
                   <td><span class="status-cell ${escapeText(p.status)}">${escapeText(p.status)}</span></td>
                 </tr>
               `).join('')}
@@ -1239,22 +1301,22 @@
     const todayRes = trading.today_result || {};
     if (DOM.dashTodayTradesCount) DOM.dashTodayTradesCount.textContent = todayRes.trade_count != null ? todayRes.trade_count : 0;
     if (DOM.dashTodayPnl) {
-      const pnl = Number(todayRes.net_profit || 0);
-      DOM.dashTodayPnl.textContent = `${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}`;
-      DOM.dashTodayPnl.style.color = pnl >= 0 ? 'var(--green)' : 'var(--red)';
+      const pnl = todayRes.net_profit == null ? null : Number(todayRes.net_profit);
+      DOM.dashTodayPnl.textContent = pnl == null ? 'Unavailable' : `${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}`;
+      DOM.dashTodayPnl.style.color = pnl == null ? 'var(--text-muted)' : (pnl >= 0 ? 'var(--green)' : 'var(--red)');
     }
     if (DOM.dashTodayR) {
-      const r = Number(todayRes.total_r || 0);
-      DOM.dashTodayR.textContent = `${r >= 0 ? '+' : ''}${r.toFixed(2)}R`;
-      DOM.dashTodayR.style.color = r >= 0 ? 'var(--cyan)' : 'var(--red)';
+      const r = todayRes.total_r == null ? null : Number(todayRes.total_r);
+      DOM.dashTodayR.textContent = r == null ? 'Unavailable' : `${r >= 0 ? '+' : ''}${r.toFixed(2)}R`;
+      DOM.dashTodayR.style.color = r == null ? 'var(--text-muted)' : (r >= 0 ? 'var(--cyan)' : 'var(--red)');
     }
 
     // 5. Performance Metrics & Sample Guard
     const perf = data.performance || {};
-    if (DOM.dashExpectancy) DOM.dashExpectancy.textContent = `${Number(perf.expectancy || 0).toFixed(2)}R`;
-    if (DOM.dashProfitFactor) DOM.dashProfitFactor.textContent = Number(perf.profit_factor || 0).toFixed(2);
-    if (DOM.dashAvgR) DOM.dashAvgR.textContent = `${Number(perf.average_r || 0).toFixed(2)}R`;
-    if (DOM.dashMaxDD) DOM.dashMaxDD.textContent = `${Number(perf.max_drawdown_pct || 0).toFixed(1)}%`;
+    if (DOM.dashExpectancy) DOM.dashExpectancy.textContent = availableMetric(perf.expectancy, 'R');
+    if (DOM.dashProfitFactor) DOM.dashProfitFactor.textContent = availableMetric(perf.profit_factor);
+    if (DOM.dashAvgR) DOM.dashAvgR.textContent = availableMetric(perf.average_r, 'R');
+    if (DOM.dashMaxDD) DOM.dashMaxDD.textContent = availableMetric(perf.max_drawdown_pct, '%', 1);
 
     if (DOM.dashSampleWarning) {
       if (perf.is_sample_size_adequate === false && perf.sample_warning) {
@@ -1321,7 +1383,10 @@
     if (!DOM.dashPositionsContainer) return;
     try {
       const res = await apiFetch('/api/forex/mt5/positions');
-      if (!res.ok) return;
+      if (!res.ok) {
+        renderLoadError(DOM.dashPositionsContainer, 'positions');
+        return;
+      }
       const data = await res.json();
       const positions = data.positions || [];
       if (positions.length === 0) {
@@ -1366,14 +1431,19 @@
           </tbody>
         </table>
       `;
-    } catch (_) {}
+    } catch (_) {
+      renderLoadError(DOM.dashPositionsContainer, 'positions');
+    }
   }
 
   async function loadDashboardProposals() {
     if (!DOM.dashProposalsContainer) return;
     try {
       const res = await apiFetch('/api/forex/proposals?limit=5');
-      if (!res.ok) return;
+      if (!res.ok) {
+        renderLoadError(DOM.dashProposalsContainer, 'proposals');
+        return;
+      }
       const data = await res.json();
       const proposals = data.proposals || [];
       if (proposals.length === 0) {
@@ -1404,23 +1474,29 @@
               <tr>
                 <td style="font-family:var(--font-mono); font-size:0.75rem; color:var(--text-muted);">${escapeText(p.proposal_id.slice(0, 8))}</td>
                 <td style="font-weight:700; color:var(--cyan);">${escapeText(p.pair)}</td>
-                <td><span class="signal-badge ${p.action === 'LONG' ? 'bullish' : 'bearish'}" style="font-size:0.7rem; padding:2px 8px;">${escapeText(p.action)}</span></td>
-                <td style="font-family:var(--font-mono);">${Number(p.entry_price).toFixed(5)}</td>
-                <td style="font-family:var(--font-mono);">${Number(p.stop_loss).toFixed(5)}</td>
-                <td style="font-family:var(--font-mono);">${Number(p.take_profit_1).toFixed(5)}</td>
+                <td><span class="signal-badge ${actionBadgeClass(p.action)}" style="font-size:0.7rem; padding:2px 8px;">${escapeText(p.action || 'UNKNOWN')}</span></td>
+                <td style="font-family:var(--font-mono);">${formatForexPrice(p.entry_price, p.pair, p.digits)}</td>
+                <td style="font-family:var(--font-mono);">${formatForexPrice(p.stop_loss, p.pair, p.digits)}</td>
+                <td style="font-family:var(--font-mono);">${formatForexPrice(p.take_profit_1, p.pair, p.digits)}</td>
                 <td><span class="status-cell ${escapeText(p.status)}">${escapeText(p.status)}</span></td>
               </tr>
             `).join('')}
           </tbody>
         </table>
       `;
-    } catch (_) {}
+    } catch (_) {
+      renderLoadError(DOM.dashProposalsContainer, 'proposals');
+    }
   }
 
   async function loadDashboardAnalytics() {
     try {
       const res = await apiFetch('/api/forex/analytics/dashboard');
-      if (!res.ok) return;
+      if (!res.ok) {
+        if (DOM.dashProfitFactor) DOM.dashProfitFactor.textContent = 'Unavailable';
+        if (DOM.dashMaxDD) DOM.dashMaxDD.textContent = 'Unavailable';
+        return;
+      }
       const data = await res.json();
       const m = data.metrics || {};
       if (m.win_rate != null && DOM.dashWinRate) DOM.dashWinRate.textContent = `${(Number(m.win_rate) * 100).toFixed(1)}%`;
@@ -1428,14 +1504,20 @@
       if (m.profit_factor != null && DOM.dashProfitFactor) DOM.dashProfitFactor.textContent = Number(m.profit_factor).toFixed(2);
       if (m.total_r_multiple != null && DOM.dashTotalR) DOM.dashTotalR.textContent = `${Number(m.total_r_multiple).toFixed(1)}R`;
       if (m.max_drawdown_pct != null && DOM.dashMaxDD) DOM.dashMaxDD.textContent = `${Number(m.max_drawdown_pct).toFixed(1)}%`;
-    } catch (_) {}
+    } catch (_) {
+      if (DOM.dashProfitFactor) DOM.dashProfitFactor.textContent = 'Unavailable';
+      if (DOM.dashMaxDD) DOM.dashMaxDD.textContent = 'Unavailable';
+    }
   }
 
   async function loadDashboardLessons() {
     if (!DOM.dashLessonsContainer) return;
     try {
       const res = await apiFetch('/api/forex/learning/lessons');
-      if (!res.ok) return;
+      if (!res.ok) {
+        renderLoadError(DOM.dashLessonsContainer, 'lessons');
+        return;
+      }
       const data = await res.json();
       const lessons = (data.lessons || []).slice(0, 2);
       if (lessons.length === 0) {
@@ -1463,7 +1545,9 @@
           </div>
         </div>
       `).join('');
-    } catch (_) {}
+    } catch (_) {
+      renderLoadError(DOM.dashLessonsContainer, 'lessons');
+    }
   }
 
   // ---- Proposals View ----
@@ -1486,7 +1570,10 @@
       if (timeframe) url += `&timeframe=${encodeURIComponent(timeframe)}`;
 
       const res = await apiFetch(url);
-      if (!res.ok) return;
+      if (!res.ok) {
+        renderLoadError(DOM.proposalsTableContainer, 'proposals');
+        return;
+      }
       const data = await res.json();
       const props = data.proposals || [];
 
@@ -1524,10 +1611,10 @@
           <tbody>
             ${props.map(p => {
               const actionStr = (p.action || 'NO_TRADE').toUpperCase();
-              const actionClass = actionStr === 'LONG' ? 'bullish' : actionStr === 'SHORT' ? 'bearish' : 'neutral';
+              const actionClass = actionBadgeClass(actionStr);
               const createdStr = (p.created_at_utc || p.created_at || '').slice(0, 19).replace('T', ' ');
               const lotSize = p.suggested_lot_size != null ? Number(p.suggested_lot_size).toFixed(2) : (p.recommended_lot_size != null ? Number(p.recommended_lot_size).toFixed(2) : '-');
-              const riskPct = p.suggested_risk_percent != null ? Number(p.suggested_risk_percent).toFixed(1) : (p.risk_percent != null ? Number(p.risk_percent).toFixed(1) : '1.0');
+              const riskPct = p.suggested_risk_percent != null ? Number(p.suggested_risk_percent).toFixed(1) : (p.risk_percent != null ? Number(p.risk_percent).toFixed(1) : null);
 
               return `
                 <tr style="cursor:pointer;" onclick="showProposalDetailModal('${escapeText(p.proposal_id)}')">
@@ -1537,11 +1624,11 @@
                   <td><span class="signal-badge ${actionClass}" style="font-size:0.7rem; padding:2px 8px;">${escapeText(actionStr)}</span></td>
                   <td style="font-family:var(--font-mono); font-size:0.8rem;">${escapeText(p.timeframe || '-')}</td>
                   <td style="font-size:0.78rem;">${escapeText(p.setup_type || '-')}</td>
-                  <td style="font-family:var(--font-mono);">${p.entry_price ? Number(p.entry_price).toFixed(5) : '-'}</td>
-                  <td style="font-family:var(--font-mono); color:var(--red);">${p.stop_loss ? Number(p.stop_loss).toFixed(5) : '-'}</td>
-                  <td style="font-family:var(--font-mono); color:var(--green);">${p.take_profit_1 ? Number(p.take_profit_1).toFixed(5) : '-'}</td>
+                  <td style="font-family:var(--font-mono);">${formatForexPrice(p.entry_price, p.pair, p.digits)}</td>
+                  <td style="font-family:var(--font-mono); color:var(--red);">${formatForexPrice(p.stop_loss, p.pair, p.digits)}</td>
+                  <td style="font-family:var(--font-mono); color:var(--green);">${formatForexPrice(p.take_profit_1, p.pair, p.digits)}</td>
                   <td style="font-family:var(--font-mono); color:var(--cyan);">${p.risk_reward_ratio ? `${Number(p.risk_reward_ratio).toFixed(2)}:1` : '-'}</td>
-                  <td style="font-family:var(--font-mono);">${riskPct}%</td>
+                  <td style="font-family:var(--font-mono);">${riskPct == null ? 'Unavailable' : `${riskPct}%`}</td>
                   <td style="font-family:var(--font-mono); font-weight:700;">${lotSize}</td>
                   <td><span class="status-cell ${escapeText(p.status)}">${escapeText(p.status)}</span></td>
                   <td style="text-align:right;">
@@ -1555,7 +1642,9 @@
           </tbody>
         </table>
       `;
-    } catch (_) {}
+    } catch (_) {
+      renderLoadError(DOM.proposalsTableContainer, 'proposals');
+    }
   }
 
   window.showProposalDetailModal = async function(proposalId) {
@@ -1611,22 +1700,22 @@
           <div class="proposal-meta-grid">
             <div class="proposal-meta-item">
               <span class="proposal-meta-label">Entry Level</span>
-              <span class="proposal-meta-value">${orig.entry_price ? Number(orig.entry_price).toFixed(5) : '-'}</span>
-              <span class="proposal-meta-sub">${orig.order_type || 'LIMIT'} • ${orig.timeframe || 'H1'}</span>
+              <span class="proposal-meta-value">${formatForexPrice(orig.entry_price, orig.pair || prop.pair, orig.digits)}</span>
+              <span class="proposal-meta-sub">${escapeText(orig.order_type || 'Unavailable')} • ${escapeText(orig.timeframe || 'Unavailable')}</span>
             </div>
             <div class="proposal-meta-item">
               <span class="proposal-meta-label">Stop Loss</span>
-              <span class="proposal-meta-value" style="color:var(--red);">${orig.stop_loss ? Number(orig.stop_loss).toFixed(5) : '-'}</span>
-              <span class="proposal-meta-sub">${orig.sl_pips ? `${orig.sl_pips} pips` : 'Hard risk floor'}</span>
+              <span class="proposal-meta-value" style="color:var(--red);">${formatForexPrice(orig.stop_loss, orig.pair || prop.pair, orig.digits)}</span>
+              <span class="proposal-meta-sub">${orig.sl_pips != null ? `${orig.sl_pips} pips` : 'Unavailable'}</span>
             </div>
             <div class="proposal-meta-item">
               <span class="proposal-meta-label">Take Profit 1</span>
-              <span class="proposal-meta-value" style="color:var(--green);">${orig.take_profit_1 ? Number(orig.take_profit_1).toFixed(5) : '-'}</span>
-              <span class="proposal-meta-sub">${orig.tp_pips ? `${orig.tp_pips} pips` : 'Target 1'}</span>
+              <span class="proposal-meta-value" style="color:var(--green);">${formatForexPrice(orig.take_profit_1, orig.pair || prop.pair, orig.digits)}</span>
+              <span class="proposal-meta-sub">${orig.tp_pips != null ? `${orig.tp_pips} pips` : 'Unavailable'}</span>
             </div>
             <div class="proposal-meta-item">
               <span class="proposal-meta-label">Take Profit 2</span>
-              <span class="proposal-meta-value" style="color:var(--green);">${orig.take_profit_2 ? Number(orig.take_profit_2).toFixed(5) : 'None'}</span>
+              <span class="proposal-meta-value" style="color:var(--green);">${formatForexPrice(orig.take_profit_2, orig.pair || prop.pair, orig.digits)}</span>
               <span class="proposal-meta-sub">Runner target</span>
             </div>
             <div class="proposal-meta-item">
@@ -1637,7 +1726,7 @@
             <div class="proposal-meta-item">
               <span class="proposal-meta-label">Suggested Sizing</span>
               <span class="proposal-meta-value">${orig.suggested_lot_size != null ? `${Number(orig.suggested_lot_size).toFixed(2)} lots` : '-'}</span>
-              <span class="proposal-meta-sub">${orig.suggested_risk_percent != null ? `${orig.suggested_risk_percent}% risk` : '1.0% equity'}</span>
+              <span class="proposal-meta-sub">${orig.suggested_risk_percent != null ? `${orig.suggested_risk_percent}% risk` : 'Risk unavailable'}</span>
             </div>
           </div>
           ${orig.trade_rationale_summary ? `
@@ -1661,16 +1750,16 @@
           <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.75rem;">
             <span style="font-size:0.85rem; color:var(--text-secondary);">Risk Decision:</span>
             <span class="signal-badge" style="background:${risk.decision === 'APPROVE' ? 'rgba(0,230,118,0.15)' : 'rgba(255,82,82,0.15)'}; color:${risk.decision === 'APPROVE' ? 'var(--green)' : 'var(--red)'}; font-size:0.82rem; padding:4px 12px; font-weight:700;">
-              ${escapeText(risk.decision || 'AUDITED')}
+              ${escapeText(risk.decision || 'UNAVAILABLE')}
             </span>
           </div>
           <div style="display:flex; flex-direction:column; gap:4px;">
-            ${(risk.risk_checks_passed || ['Verified Risk:Reward threshold (>= 1.5R)', 'Stop-loss distance verified within risk limits', 'Account equity protection ceiling respected']).map(c => `
+            ${(risk.risk_checks_passed || []).map(c => `
               <div class="risk-check-item">
                 <span class="risk-check-icon pass">✓</span>
                 <span>${escapeText(c)}</span>
               </div>
-            `).join('')}
+            `).join('') || '<div class="risk-check-item"><span>Risk checks unavailable</span></div>'}
             ${(risk.risk_violations || []).map(v => `
               <div class="risk-check-item">
                 <span class="risk-check-icon fail">✗</span>
@@ -1730,7 +1819,7 @@
               </div>
               <div class="proposal-meta-item">
                 <span class="proposal-meta-label">Open Price</span>
-                <span class="proposal-meta-value">${Number(exec.open_price).toFixed(5)}</span>
+                <span class="proposal-meta-value">${formatForexPrice(exec.open_price, exec.pair || prop.pair, exec.digits)}</span>
               </div>
               <div class="proposal-meta-item">
                 <span class="proposal-meta-label">Volume</span>
@@ -1758,15 +1847,15 @@
             <div class="proposal-meta-grid">
               <div class="proposal-meta-item">
                 <span class="proposal-meta-label">Pips Gained</span>
-                <span class="proposal-meta-value" style="color:${(outcome.pips_gained || 0) >= 0 ? 'var(--green)' : 'var(--red)'};">${Number(outcome.pips_gained || 0).toFixed(1)}</span>
+                <span class="proposal-meta-value">${availableMetric(outcome.pips_gained, '', 1)}</span>
               </div>
               <div class="proposal-meta-item">
                 <span class="proposal-meta-label">R Multiple</span>
-                <span class="proposal-meta-value" style="color:${(outcome.r_multiple || 0) >= 0 ? 'var(--green)' : 'var(--red)'};">${Number(outcome.r_multiple || 0).toFixed(2)}R</span>
+                <span class="proposal-meta-value">${availableMetric(outcome.r_multiple, 'R')}</span>
               </div>
               <div class="proposal-meta-item">
                 <span class="proposal-meta-label">Net Profit</span>
-                <span class="proposal-meta-value" style="color:${(outcome.net_profit || 0) >= 0 ? 'var(--green)' : 'var(--red)'};">$${Number(outcome.net_profit || 0).toFixed(2)}</span>
+                <span class="proposal-meta-value">${outcome.net_profit == null ? 'Unavailable' : `$${Number(outcome.net_profit).toFixed(2)}`}</span>
               </div>
               <div class="proposal-meta-item">
                 <span class="proposal-meta-label">Exit Reason</span>
@@ -1802,7 +1891,7 @@
             </div>
           ` : `
             <div style="font-size:0.82rem; color:var(--text-muted); font-style:italic;">
-              No failure memory patterns matched this setup. Proposal executed under default institutional guardrails.
+              Lesson context unavailable or no lessons were persisted for this proposal.
             </div>
           `}
         </div>
@@ -1836,7 +1925,10 @@
     if (!DOM.mt5OrdersContainer) return;
     try {
       const res = await apiFetch('/api/forex/mt5/orders');
-      if (!res.ok) return;
+      if (!res.ok) {
+        renderLoadError(DOM.mt5OrdersContainer, 'MT5 orders');
+        return;
+      }
       const data = await res.json();
       const orders = data.orders || [];
       if (orders.length === 0) {
@@ -1879,14 +1971,19 @@
           </tbody>
         </table>
       `;
-    } catch (_) {}
+    } catch (_) {
+      renderLoadError(DOM.mt5OrdersContainer, 'MT5 orders');
+    }
   }
 
   async function loadMT5Deals() {
     if (!DOM.mt5DealsContainer) return;
     try {
       const res = await apiFetch('/api/forex/mt5/deals');
-      if (!res.ok) return;
+      if (!res.ok) {
+        renderLoadError(DOM.mt5DealsContainer, 'MT5 deals');
+        return;
+      }
       const data = await res.json();
       const deals = data.deals || [];
       if (deals.length === 0) {
@@ -1932,7 +2029,9 @@
           </tbody>
         </table>
       `;
-    } catch (_) {}
+    } catch (_) {
+      renderLoadError(DOM.mt5DealsContainer, 'MT5 deals');
+    }
   }
 
   async function connectMT5() {
@@ -2611,6 +2710,10 @@
         return;
       }
       const data = await res.json();
+      if (data.mode === 'HISTORICAL_AGENT_ABLATION' && data.result) {
+        renderAblationStudy(data.result);
+        return;
+      }
       const container = DOM.backtestRunsContainer;
       const header = `Backtest: ${escapeText(String(data.backtest_id || backtestId))} - ${escapeText(data.pair || '')} ${escapeText(data.timeframe || '')}`;
       const result = data.result || {};
@@ -3007,16 +3110,9 @@
     const decisionColor = decisionAction === 'APPROVE' ? 'var(--green)' : decisionAction === 'REJECT' ? 'var(--red)' : 'var(--amber)';
 
     // Risk Checks List
-    const defaultChecks = [
-      'Minimum Risk:Reward threshold satisfied (>= 1.5R)',
-      'Stop-loss distance within maximum permissible risk parameters',
-      'Economic calendar high-impact blackout cleared',
-      'Account equity risk allocation within conservative ceiling (<= 2.0%)',
-      'Required margin verified against free margin headroom'
-    ];
     const passedChecks = (risk.risk_checks_passed && risk.risk_checks_passed.length > 0)
       ? risk.risk_checks_passed
-      : (decisionAction === 'APPROVE' ? defaultChecks : []);
+      : [];
 
     const violations = risk.risk_violations || [];
     const modifications = risk.modifications_required || [];
@@ -3028,10 +3124,10 @@
 
     // Entry Zone
     let entryZoneStr = '-';
-    if (prop.entry_zone_low && prop.entry_zone_high) {
-      entryZoneStr = `${Number(prop.entry_zone_low).toFixed(5)} – ${Number(prop.entry_zone_high).toFixed(5)}`;
-    } else if (prop.entry_price) {
-      entryZoneStr = Number(prop.entry_price).toFixed(5);
+    if (prop.entry_zone_low != null && prop.entry_zone_high != null) {
+      entryZoneStr = `${formatForexPrice(prop.entry_zone_low, data.pair, prop.digits)} – ${formatForexPrice(prop.entry_zone_high, data.pair, prop.digits)}`;
+    } else if (prop.entry_price != null) {
+      entryZoneStr = formatForexPrice(prop.entry_price, data.pair, prop.digits);
     }
 
     // Estimated Margin
@@ -3055,11 +3151,11 @@
               <h2 style="font-size:1.25rem; font-weight:800; color:var(--text-bright); margin:0;">
                 <span style="color:var(--cyan);">${escapeText(data.pair || 'FOREX')}</span>
                 <span style="font-size:0.85rem; font-weight:500; color:var(--text-secondary); margin-left:8px;">
-                  Setup: ${escapeText(prop.setup_type || 'INSTITUTIONAL_CONFLUENCE')}
+                  Setup: ${escapeText(prop.setup_type || 'Unavailable')}
                 </span>
               </h2>
               <div style="font-size:0.75rem; color:var(--text-muted); font-family:var(--font-mono); margin-top:2px;">
-                Order: ${escapeText(prop.order_type || 'LIMIT')} • Run ID: ${escapeText(data.run_id || '-')}
+                Order: ${escapeText(prop.order_type || 'Unavailable')} • Run ID: ${escapeText(data.run_id || '-')}
               </div>
             </div>
           </div>
@@ -3087,22 +3183,22 @@
           <div class="proposal-meta-grid">
             <div class="proposal-meta-item">
               <span class="proposal-meta-label">Entry Level</span>
-              <span class="proposal-meta-value">${prop.entry_price ? Number(prop.entry_price).toFixed(5) : '-'}</span>
+              <span class="proposal-meta-value">${formatForexPrice(prop.entry_price, data.pair, prop.digits)}</span>
               <span class="proposal-meta-sub">Zone: ${escapeText(entryZoneStr)}</span>
             </div>
             <div class="proposal-meta-item">
               <span class="proposal-meta-label">Stop Loss</span>
-              <span class="proposal-meta-value" style="color:var(--red);">${prop.stop_loss ? Number(prop.stop_loss).toFixed(5) : '-'}</span>
+              <span class="proposal-meta-value" style="color:var(--red);">${formatForexPrice(prop.stop_loss, data.pair, prop.digits)}</span>
               <span class="proposal-meta-sub">${prop.sl_pips ? `${prop.sl_pips} pips risk` : 'Mandatory protection'}</span>
             </div>
             <div class="proposal-meta-item">
               <span class="proposal-meta-label">Take Profit 1</span>
-              <span class="proposal-meta-value" style="color:var(--green);">${prop.take_profit_1 ? Number(prop.take_profit_1).toFixed(5) : '-'}</span>
+              <span class="proposal-meta-value" style="color:var(--green);">${formatForexPrice(prop.take_profit_1, data.pair, prop.digits)}</span>
               <span class="proposal-meta-sub">${prop.tp_pips ? `${prop.tp_pips} pips primary` : 'Primary target'}</span>
             </div>
             <div class="proposal-meta-item">
               <span class="proposal-meta-label">Take Profit 2</span>
-              <span class="proposal-meta-value" style="color:var(--green);">${prop.take_profit_2 ? Number(prop.take_profit_2).toFixed(5) : 'Runner / None'}</span>
+              <span class="proposal-meta-value" style="color:var(--green);">${formatForexPrice(prop.take_profit_2, data.pair, prop.digits)}</span>
               <span class="proposal-meta-sub">Secondary target</span>
             </div>
             <div class="proposal-meta-item">
@@ -3112,7 +3208,7 @@
             </div>
             <div class="proposal-meta-item">
               <span class="proposal-meta-label">Risk Allocation</span>
-              <span class="proposal-meta-value">${prop.suggested_risk_percent != null ? `${prop.suggested_risk_percent}%` : (risk.max_risk_percent != null ? `${risk.max_risk_percent}%` : '1.0%')}</span>
+              <span class="proposal-meta-value">${prop.suggested_risk_percent != null ? `${prop.suggested_risk_percent}%` : (risk.max_risk_percent != null ? `${risk.max_risk_percent}%` : 'Unavailable')}</span>
               <span class="proposal-meta-sub">Account equity %</span>
             </div>
             <div class="proposal-meta-item">
@@ -3251,6 +3347,7 @@
                   <span>${escapeText(check)}</span>
                 </div>
               `).join('')}
+              ${passedChecks.length === 0 ? '<div class="risk-check-item"><span>Risk checks unavailable</span></div>' : ''}
               ${violations.map(viol => `
                 <div class="risk-check-item">
                   <span class="risk-check-icon fail">✗</span>

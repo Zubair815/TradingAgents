@@ -1,8 +1,9 @@
 # TradingAgents final system acceptance report
 
 - Audit date: 2026-09-30
-- Commit: `ae2a7d555c7ec859d005cca8fac6c29562b6cee3` (`Version1.6`)
-- Working tree at audit start: clean
+- Commit at audit start: `53bdf53160d70dd6797c73d96b166cbba00a0185` (`Version1.7`)
+- Working tree at audit start: contained the completed, uncommitted validation-engine integration
+- Final release-evidence patch: uncommitted; it has no commit SHA until the maintainer commits it
 - Release status: **READY FOR LOCAL DEMO VALIDATION**
 
 This status means the automated engineering gates pass. It is not a trading
@@ -58,8 +59,8 @@ There is no automated Forex broker-order submission path.
 | Gate | Result |
 | --- | --- |
 | `ruff check .` | PASS |
-| `pytest -q` | PASS — 2,094 passed, 5 skipped, 20 warnings, 88 subtests |
-| `pytest -q -m e2e` | PASS — 4 passed, 2,095 deselected |
+| `pytest -q -m "not e2e"` | PASS — 2,096 passed, 5 skipped, 5 deselected, 20 warnings, 88 subtests |
+| `pytest -q -m e2e` | PASS — 5 passed |
 | `python -m compileall tradingagents web cli` | PASS |
 | JavaScript syntax checks | PASS |
 | `git diff --check` | PASS |
@@ -72,8 +73,10 @@ There is no automated Forex broker-order submission path.
 | GitHub Chromium E2E | PASS |
 | GitHub Ruff | PASS |
 
-GitHub evidence: [CI run 36662922482](https://github.com/Zubair815/TradingAgents/actions/runs/36662922482),
-completed successfully for the exact audited commit. The five local skips are
+Latest GitHub evidence for the base commit: [CI run 36664347641](https://github.com/Zubair815/TradingAgents/actions/runs/36664347641),
+completed successfully for `53bdf53160d70dd6797c73d96b166cbba00a0185` on 2026-09-30.
+It does not cover the uncommitted final working-tree patch; final GitHub CI is
+therefore pending commit and push. The five local skips are
 three POSIX-mode checks on Windows, optional Bedrock without `langchain_aws`, and
 an optional live DeepSeek call without credentials. No mandatory browser test
 was skipped.
@@ -180,8 +183,10 @@ the release from local-demo readiness to full live-environment acceptance.
 
 ## Release truth
 
-All repository-local and GitHub automated engineering gates pass for the audited
-commit. The remaining gate is the explicitly manual Windows + XM Demo acceptance
-run. Therefore the objective release classification is:
+All repository-local automated engineering gates pass for the current working
+tree. GitHub CI is green for the base commit and must be rerun after this final
+patch is committed and pushed. The remaining environment gate is the explicitly
+manual Windows + XM Demo acceptance run. Therefore the objective local release
+classification is:
 
 **READY FOR LOCAL DEMO VALIDATION**

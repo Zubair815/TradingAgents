@@ -24,14 +24,16 @@
 The current workspace was verified with the repository's supported Windows virtual environment:
 
 ```powershell
-D:\TradingAgents\.venv\Scripts\python.exe -m pytest -q
+D:\TradingAgents\.venv\Scripts\python.exe -m pytest -q -m "not e2e"
 ```
 
-Result: `2094 passed, 5 skipped, 0 failed, 20 warnings, 88 subtests passed` in
-143.57s. Local Chromium E2E also passed (`4 passed, 2095 deselected`). GitHub
-Actions run [36662922482](https://github.com/Zubair815/TradingAgents/actions/runs/36662922482)
-is green for this exact commit on Python 3.10, 3.11, 3.12, and 3.13, including
-Ruff, clean-install, and Chromium E2E jobs.
+Result on 2026-09-30: `2096 passed, 5 skipped, 5 deselected, 0 failed, 20 warnings,
+88 subtests passed`. Local Chromium E2E also passed (`5 passed`). GitHub Actions
+run [36664347641](https://github.com/Zubair815/TradingAgents/actions/runs/36664347641)
+is green for base commit `53bdf53160d70dd6797c73d96b166cbba00a0185`
+(`Version1.7`) on Python 3.10, 3.11, 3.12, and 3.13, including Ruff,
+clean-install, and Chromium E2E jobs. The final working-tree polish is uncommitted,
+so its GitHub CI remains pending until commit and push.
 
 Release status: **READY FOR LOCAL DEMO VALIDATION**. Automated engineering gates
 pass, but the Windows + XM Demo checklist has not been executed. This status is

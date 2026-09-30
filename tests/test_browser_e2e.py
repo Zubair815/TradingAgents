@@ -94,6 +94,25 @@ def _seed_backtests() -> None:
                     ],
                 },
             },
+            "ablation_e2e": {
+                **common,
+                "backtest_id": "ablation_e2e",
+                "mode": "HISTORICAL_AGENT_ABLATION",
+                "result": {
+                    "study_id": "ablation_e2e",
+                    "pair": "USDJPY",
+                    "timeframe": "H1",
+                    "sample_size_warning": "No statistically meaningful winner.",
+                    "validation_reasons": ["Comparative historical evidence only."],
+                    "variants": [{
+                        "variant_id": "tech_only", "name": "Technical Only",
+                        "description": "Fixture", "analyses_performed": 2,
+                        "trade_count": 0, "win_rate_pct": 0.0, "profit_factor": 0.0,
+                        "total_net_profit": 0.0, "estimated_llm_cost_usd": 0.01,
+                        "latency_seconds": 0.1, "sample_size_adequate": False,
+                    }],
+                },
+            },
         }
     )
 
@@ -460,6 +479,51 @@ def test_proposals_mt5_journal_and_learning_workflows(e2e_environment):
         page.locator("#lessonsContainer [data-trade-id]").click()
         assert page.locator("#view-journal").is_visible()
         page.locator("#tradeDetailBody").get_by_text("Followed the plan").wait_for()
+
+
+def test_truthful_forex_rendering_and_validation_contracts(e2e_environment):
+    with quality_page(e2e_environment) as page:
+        def proposals(route):
+            route.fulfill(json={"proposals": [
+                {"proposal_id": "jpy_no_trade", "pair": "USDJPY", "action": "NO_TRADE",
+                 "entry_price": None, "stop_loss": 150.1234, "take_profit_1": 0,
+                 "status": "PROPOSED", "timeframe": "H1", "setup_type": None,
+                 "risk_reward_ratio": None, "suggested_risk_percent": None},
+            ]})
+
+        page.route("**/api/forex/proposals?*", proposals)
+        page.route("**/api/forex/proposals/jpy_no_trade", lambda route: route.fulfill(json={
+            "proposal": {"proposal_id": "jpy_no_trade", "pair": "USDJPY", "action": "NO_TRADE",
+                         "entry_price": None, "stop_loss": 150.1234, "take_profit_1": 0,
+                         "status": "PROPOSED"},
+            "risk_review": {}, "lessons": [], "matched_execution": None,
+        }))
+        page.locator("#tab-proposals").click()
+        page.locator("#btnRefreshProposals").click()
+        row = page.locator("#proposalsTableContainer tr", has_text="jpy_no_trade")
+        row.wait_for()
+        text = row.inner_text()
+        assert "150.123" in text
+        assert "Unavailable" in text
+        assert "0.000" in text
+        assert "0.00000" not in text
+        assert "neutral" in row.locator(".signal-badge").get_attribute("class")
+        row.get_by_role("button", name="View").click()
+        detail = page.locator("#reportModalBody")
+        detail.get_by_text("Risk checks unavailable").wait_for()
+        assert "Verified Risk:Reward" not in detail.inner_text()
+        assert "Account equity protection" not in detail.inner_text()
+        page.locator("#reportModalClose").click()
+
+        page.locator("#tab-backtest").click()
+        page.locator('[data-backtest-id="wf_e2e"]').click()
+        page.get_by_text("split-1", exact=True).wait_for()
+        assert "EURUSD" in page.locator("#backtestRunsContainer").inner_text()
+        awaitable = page.locator("#btnRefreshBacktests")
+        awaitable.click()
+        page.locator('[data-backtest-id="ablation_e2e"]').click()
+        page.get_by_text("Technical Only", exact=True).wait_for()
+        assert "No statistically meaningful winner" in page.locator("#backtestRunsContainer").inner_text()
 
 
 def test_performance_backtests_and_settings(e2e_environment):

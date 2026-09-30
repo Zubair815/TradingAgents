@@ -50,6 +50,10 @@ from tradingagents.agents.schemas_forex import (
 )
 from tradingagents.analytics.manager import ForexAnalyticsManager
 from tradingagents.analytics.metrics import calculate_deep_metrics
+from tradingagents.backtest.ablation import (
+    ForexAblationRunner,
+    create_standard_ablation_matrix,
+)
 from tradingagents.backtest.agent_backtester import (
     AgentBacktestConfig,
     HistoricalForexAgentBacktester,
@@ -58,6 +62,10 @@ from tradingagents.backtest.agent_backtester import (
 from tradingagents.backtest.forex_engine import (
     ForexBacktestConfig,
     ForexBacktestEngine,
+)
+from tradingagents.backtest.historical_pipeline import (
+    HistoricalForexPipelineConfig,
+    create_historical_forex_pipeline,
 )
 from tradingagents.backtest.walk_forward import ForexWalkForwardValidator
 from tradingagents.database.journal import ForexTradeJournal
@@ -592,9 +600,19 @@ class ForexBacktestEstimateRequest(BaseModel):
     sampling_interval: int = Field(default=1, ge=1)
     max_analysis_points: int | None = Field(default=None, ge=1)
     analyst_count: int = Field(default=3, ge=1)
+    workflow: Literal["BACKTEST", "WALK_FORWARD", "ABLATION"] = "BACKTEST"
+    n_splits: int = Field(default=1, ge=1, le=10)
+    variant_count: int = Field(default=1, ge=1, le=20)
 
 
-BacktestMode = Literal["DEMO", "HISTORICAL_AGENT_BACKTEST", "WALK_FORWARD"]
+class ForexAblationRequest(ForexBacktestRequest):
+    quick_model_b: str | None = Field(default=None, description="Optional second quick model")
+    provider_b: str | None = Field(default=None, description="Provider for the optional second model")
+    min_sample_size: int = Field(default=30, ge=5)
+    confirm_expensive: bool = Field(default=False)
+
+
+BacktestMode = Literal["DEMO", "HISTORICAL_AGENT_BACKTEST", "WALK_FORWARD", "HISTORICAL_AGENT_ABLATION"]
 
 
 class BacktestRunSummary(BaseModel):
@@ -2051,7 +2069,18 @@ async def estimate_backtest_costs(
         max_analysis_points=req.max_analysis_points,
         analyst_count=req.analyst_count,
     )
-    return estimate.to_dict()
+    result = estimate.to_dict()
+    multiplier = req.n_splits * 3 if req.workflow == "WALK_FORWARD" else 1
+    if req.workflow == "ABLATION":
+        multiplier = req.variant_count
+    result["workflow"] = req.workflow
+    result["multiplier"] = multiplier
+    for key in ("expected_analyses_count", "estimated_llm_calls", "estimated_tokens"):
+        if key in result:
+            result[key] *= multiplier
+    if "estimated_cost_usd" in result:
+        result["estimated_cost_usd"] = round(result["estimated_cost_usd"] * multiplier, 4)
+    return result
 
 
 @router.post("/backtest/run")
@@ -2126,10 +2155,7 @@ async def run_backtest(
                     auto_record_trades=False,
                 )
 
-            agent_backtester = HistoricalForexAgentBacktester(
-                config=agent_cfg,
-                graph_factory=graph_f,
-            )
+            agent_backtester = HistoricalForexAgentBacktester(config=agent_cfg, graph_factory=graph_f)
             report = agent_backtester.run(candles=candle_objs, market_data_provenance=provenance)
             backtest_id = report.backtest_id
             report_dict = _safe_model_dump(report.to_dict())
@@ -2353,9 +2379,47 @@ async def run_walk_forward(
 
         validator = ForexWalkForwardValidator(
             strategy_version="v1.0.0",
-            config_snapshot={"timeframe": req.timeframe, "provider": req.provider},
+            config_snapshot={
+                "pair": norm_pair,
+                "timeframe": req.timeframe,
+                "date_from": req.date_from,
+                "date_to": req.date_to,
+                "analyst_selection": req.analyst_selection or ["forex_technical", "forex_macro", "forex_news"],
+                "provider": req.provider or "openai",
+                "quick_model": req.quick_model or "gpt-4.1-mini",
+                "deep_model": req.deep_model or "gpt-4.1",
+                "research_depth": req.research_depth,
+                "sampling_interval": req.sampling_interval,
+                "max_analysis_points": req.max_analysis_points,
+                "costs": {
+                    "spread_pips": req.spread_pips,
+                    "slippage_pips": req.slippage_pips,
+                    "commission_per_lot_usd": req.commission_per_lot_usd,
+                    "swap_per_day_usd": req.swap_per_day_usd,
+                    "leverage": req.leverage,
+                },
+            },
             strict_oos_guard=True,
         )
+        if req.demo_mode:
+            # Explicit demo runs still execute a callable; they do not masquerade as
+            # the historical graph because their candles have no verified provenance.
+            def pipeline_callable(_pair, _cutoff, _history):
+                return None
+        else:
+            pipeline_callable = create_historical_forex_pipeline(
+                HistoricalForexPipelineConfig(
+                    pair=norm_pair,
+                    timeframe=req.timeframe,
+                    analyst_selection=req.analyst_selection or ["forex_technical", "forex_macro", "forex_news"],
+                    provider=req.provider or "openai",
+                    quick_model=req.quick_model or "gpt-4.1-mini",
+                    deep_model=req.deep_model or "gpt-4.1",
+                    research_depth=req.research_depth,
+                    token_limits=req.token_limits,
+                ),
+                provenance,
+            )
         report = validator.validate(
             candles=candle_objs,
             pair=norm_pair,
@@ -2367,13 +2431,16 @@ async def run_walk_forward(
                 default_spread_pips=req.spread_pips,
                 default_slippage_pips=req.slippage_pips,
                 commission_per_lot_usd=req.commission_per_lot_usd,
+                swap_per_day_usd=req.swap_per_day_usd,
                 conservative_stops=req.conservative_stops,
                 max_open_trades=req.max_open_trades,
                 execution_timeframe=req.timeframe,
             ),
-            agent_pipeline_callable=None,
+            agent_pipeline_callable=pipeline_callable,
             n_splits=n_splits,
             include_forward_demo=True,
+            source_provenance=provenance,
+            validation_status="DEMO" if req.demo_mode else "PARTIALLY_VALIDATED",
         )
 
         val_id = report.validation_id
@@ -2416,6 +2483,134 @@ async def run_walk_forward(
         }) from exc
 
 
+@router.post("/backtest/ablation")
+async def run_historical_agent_ablation(req: ForexAblationRequest):
+    """Run real historical graph variants over one identical verified candle set."""
+    try:
+        if req.demo_mode or req.candles is not None:
+            raise DataInsufficientError(
+                "Historical agent ablation requires verified provider candles; "
+                "caller-supplied or synthetic candles are not accepted by this endpoint."
+            )
+        norm_pair = normalize_forex_pair(req.pair)
+        from tradingagents.backtest.historical_data import load_historical_candles
+
+        candles, provenance = load_historical_candles(
+            norm_pair, req.timeframe, req.date_from, req.date_to
+        )
+        variants = create_standard_ablation_matrix(
+            quick_model_a=req.quick_model or "gpt-4.1-mini",
+            quick_model_b=req.quick_model_b or req.quick_model or "gpt-4.1-mini",
+            base_provider=req.provider or "openai",
+            sampling_interval=req.sampling_interval,
+            max_analysis_points=req.max_analysis_points,
+        )
+        if req.quick_model_b is None:
+            variants = [v for v in variants if v.variant_id != "model_quick_b"]
+        elif req.provider_b:
+            for variant in variants:
+                if variant.variant_id == "model_quick_b":
+                    variant.provider = req.provider_b
+
+        analysis_points = min(
+            len(candles) // req.sampling_interval,
+            req.max_analysis_points or len(candles),
+        )
+        estimated_calls = sum(v.estimate_calls_per_point() * analysis_points for v in variants)
+        estimated_tokens = estimated_calls * 1200
+        estimated_cost = round((estimated_tokens / 1000.0) * 0.003, 2)
+        estimate = {
+            "variant_count": len(variants),
+            "analysis_points_per_variant": analysis_points,
+            "estimated_llm_calls": estimated_calls,
+            "estimated_tokens": estimated_tokens,
+            "estimated_cost_usd": estimated_cost,
+        }
+        if estimated_cost >= 1.0 and not req.confirm_expensive:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "COST_CONFIRMATION_REQUIRED",
+                    "message": "Explicit confirmation is required for this historical ablation estimate.",
+                    "estimate": estimate,
+                },
+            )
+
+        bt_config = ForexBacktestConfig(
+            initial_balance=req.initial_balance,
+            account_currency=req.account_currency,
+            leverage=req.leverage,
+            default_spread_pips=req.spread_pips,
+            default_slippage_pips=req.slippage_pips,
+            commission_per_lot_usd=req.commission_per_lot_usd,
+            swap_per_day_usd=req.swap_per_day_usd,
+            conservative_stops=req.conservative_stops,
+            max_open_trades=req.max_open_trades,
+            execution_timeframe=req.timeframe,
+        )
+
+        def pipeline_factory(variant):
+            return create_historical_forex_pipeline(
+                HistoricalForexPipelineConfig(
+                    pair=norm_pair,
+                    timeframe=req.timeframe,
+                    analyst_selection=list(variant.analyst_selection),
+                    provider=variant.provider,
+                    quick_model=variant.quick_model,
+                    deep_model=variant.deep_model or req.deep_model or "gpt-4.1",
+                    research_depth=req.research_depth,
+                    token_limits=req.token_limits,
+                    debate_enabled=variant.enable_debate,
+                    memory_enabled=variant.enable_memory,
+                ),
+                provenance,
+            )
+
+        report = ForexAblationRunner(
+            pair=norm_pair,
+            timeframe=req.timeframe,
+            backtest_config=bt_config,
+            min_sample_size=req.min_sample_size,
+        ).run_ablation(
+            candles=candles,
+            variants=variants,
+            pipeline_factory=pipeline_factory,
+            market_data_provenance=provenance,
+            historical=True,
+        )
+        result = _safe_model_dump(report.to_dict())
+        result["estimate"] = estimate
+        result["source_provenance"] = provenance
+        entry = {
+            "backtest_id": report.study_id,
+            "run_type": "FOREX_BACKTEST",
+            "status": "completed",
+            "mode": "HISTORICAL_AGENT_ABLATION",
+            "pair": norm_pair,
+            "timeframe": req.timeframe,
+            "data_source": provenance["source"],
+            "validation_status": report.validation_status,
+            "validated_strategy_performance": False,
+            "notice": "Historical multi-agent ablation; comparative and not statistically validated.",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "result": result,
+        }
+        with _lock:
+            _backtest_runs[report.study_id] = entry
+            _prune_expired_forex_runs()
+        return result
+    except HTTPException:
+        raise
+    except DataInsufficientError as exc:
+        raise HTTPException(status_code=422, detail={
+            "code": "HISTORICAL_DATA_UNAVAILABLE", "message": str(exc),
+        }) from exc
+    except Exception as exc:
+        logger.error("Historical agent ablation failed (%s)", type(exc).__name__)
+        raise HTTPException(status_code=400, detail={
+            "code": "HISTORICAL_ABLATION_FAILED",
+            "message": "Historical ablation did not complete; no successful result was saved.",
+        }) from exc
 @router.get("/backtest/{backtest_id}", response_model=BacktestRunDetail)
 async def get_backtest(backtest_id: str):
     """Retrieve full result scorecard, equity curve, and markdown report for a backtest."""

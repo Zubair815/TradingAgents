@@ -438,7 +438,12 @@ class ForexGraphSetup:
             if i < len(plan.specs) - 1:
                 workflow.add_edge(current_clear, plan.specs[i + 1].agent_node)
             else:
-                workflow.add_edge(current_clear, "Bull Researcher")
+                next_node = (
+                    "Bull Researcher"
+                    if (self.config or {}).get("historical_debate_enabled", True)
+                    else "Research Manager"
+                )
+                workflow.add_edge(current_clear, next_node)
 
         # Debate Loop
         for debate_node in ("Bull Researcher", "Bear Researcher"):
@@ -666,7 +671,10 @@ class ForexTradingAgentsGraph:
 
         from tradingagents.dataflows.forex_context import historical_market_context
         historical = getattr(self, "config", {}).get("historical_backtest") or historical_market_context() is not None
-        if not historical and learning_mgr is not None and hasattr(learning_mgr, "retriever"):
+        historical_memory = bool(
+            historical and getattr(self, "config", {}).get("historical_memory_enabled", False)
+        )
+        if (not historical or historical_memory) and learning_mgr is not None and hasattr(learning_mgr, "retriever"):
             try:
                 retrieved = learning_mgr.retriever.retrieve_lessons(
                     pair=canon_pair,
@@ -674,6 +682,16 @@ class ForexTradingAgentsGraph:
                     limit=5,
                     min_relevance=0.35,
                 )
+                if historical_memory:
+                    def known_by_cutoff(item):
+                        created = datetime.fromisoformat(
+                            item.lesson.created_at.replace("Z", "+00:00")
+                        )
+                        if created.tzinfo is None:
+                            created = created.replace(tzinfo=timezone.utc)
+                        return created <= cutoff
+
+                    retrieved = [item for item in retrieved if known_by_cutoff(item)]
                 applied_lesson_ids = [item.lesson.lesson_id for item in retrieved]
                 past_ctx = learning_mgr.retriever.format_lessons_for_prompt(retrieved)
             except Exception as exc:

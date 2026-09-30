@@ -59,6 +59,7 @@ from tradingagents.backtest.forex_engine import (
     ForexBacktestEngine,
     ForexBacktestResult,
 )
+from tradingagents.backtest.historical_data import validate_historical_input
 from tradingagents.database.journal import ForexTradeJournal
 from tradingagents.database.models import TradeExitReason
 from tradingagents.dataflows.forex_data import ForexBar
@@ -332,13 +333,13 @@ class ForexAblationReport:
     sample_size_warning: str | None
     component_rankings: list[tuple[str, float]]
     markdown_summary: str
+    data_source: str = "unverified"
+    validation_status: str = "EXPLORATORY"
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "study_id": self.study_id,
-            "validated_strategy_performance": False,
-            "validation_status": "DEMO",
-            "validation_reasons": ["Exploratory comparison of caller-supplied data; rankings are not statistical validation."],
+            "validation_reasons": ["Comparative historical evidence only; rankings are not statistical validation."],
             "pair": self.pair,
             "timeframe": self.timeframe,
             "start_date": self.start_date,
@@ -353,6 +354,9 @@ class ForexAblationReport:
             "component_rankings": self.component_rankings,
             "variants": [v.to_dict() for v in self.variants],
             "markdown_summary": self.markdown_summary,
+            "data_source": self.data_source,
+            "validation_status": self.validation_status,
+            "validated_strategy_performance": False,
         }
 
 
@@ -390,6 +394,8 @@ class ForexAblationRunner:
         baseline_variant_id: str = "baseline_full",
         pipeline_factory: Callable[[AblationConfigVariant], Callable[[str, datetime, list[ForexBar]], ForexTraderProposal | None]] | None = None,
         custom_variant_evaluator: Callable[[AblationConfigVariant, Sequence[ForexBar], Sequence[ForexBar] | None], tuple[ForexBacktestResult, int, float]] | None = None,
+        market_data_provenance: dict[str, Any] | None = None,
+        historical: bool = False,
     ) -> ForexAblationReport:
         """Run controlled ablation experiment across variants over identical candles.
 
@@ -405,6 +411,16 @@ class ForexAblationRunner:
             raise ValueError("No historical candles provided for ablation experiment.")
 
         sorted_candles = sorted(candles, key=lambda c: c.timestamp)
+        provenance: dict[str, Any] = {}
+        if historical:
+            provenance = validate_historical_input(
+                sorted_candles,
+                market_data_provenance,
+                self.pair,
+                self.timeframe,
+            )
+            if pipeline_factory is None:
+                raise ValueError("historical ablation requires a real variant pipeline factory")
         total_bars = len(sorted_candles)
         start_date = sorted_candles[0].timestamp.strftime("%Y-%m-%d %H:%M")
         end_date = sorted_candles[-1].timestamp.strftime("%Y-%m-%d %H:%M")
@@ -438,7 +454,7 @@ class ForexAblationRunner:
                 pipeline_callable = pipeline_factory(var)
                 ag_cfg = AgentBacktestConfig(
                     pair=self.pair,
-                    mode="DEMO",  # Caller-supplied experiment candles are unverified.
+                    mode="HISTORICAL_AGENT_BACKTEST" if historical else "DEMO",
                     timeframe=self.timeframe,
                     sampling_interval=var.sampling_interval,
                     max_analysis_points=var.max_analysis_points,
@@ -453,6 +469,7 @@ class ForexAblationRunner:
                     candles=sorted_candles,
                     lower_tf_candles=lower_tf_candles,
                     agent_pipeline_callable=pipeline_callable,
+                    market_data_provenance=provenance if historical else None,
                 )
                 b_res = rep.result or ForexBacktestEngine(config=self.backtest_config)._build_empty_result()
                 analyses_done = rep.analyses_performed
@@ -585,6 +602,8 @@ class ForexAblationRunner:
             sample_size_warning=sample_size_warning,
             component_rankings=component_rankings,
             markdown_summary=markdown_summary,
+            data_source=provenance.get("source", "unverified"),
+            validation_status="PARTIALLY_VALIDATED" if historical else "EXPLORATORY",
         )
 
     def _simulate_variant_run(
