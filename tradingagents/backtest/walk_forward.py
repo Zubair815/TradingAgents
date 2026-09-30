@@ -24,7 +24,7 @@ import json
 import logging
 import uuid
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import Enum
 from typing import Any
@@ -35,6 +35,7 @@ from tradingagents.backtest.forex_engine import (
     ForexBacktestEngine,
     ForexBacktestResult,
 )
+from tradingagents.database.models import TradeExitReason
 from tradingagents.dataflows.forex_data import ForexBar
 from tradingagents.forex.domain import normalize_forex_pair
 
@@ -355,6 +356,50 @@ class ForexWalkForwardValidator:
 
         return splits
 
+    def estimate_analysis_structure(
+        self,
+        candles: Sequence[ForexBar],
+        *,
+        n_splits: int = 1,
+        sampling_interval: int = 1,
+        max_analysis_points: int | None = None,
+        dev_ratio: float = 0.50,
+        val_ratio: float = 0.20,
+        oos_ratio: float = 0.30,
+        include_forward_demo: bool = True,
+    ) -> dict[str, int]:
+        """Count the exact periods and callback points used by ``validate``."""
+        splits = self.generate_splits(
+            candles,
+            n_splits=n_splits,
+            dev_ratio=dev_ratio,
+            val_ratio=val_ratio,
+            oos_ratio=oos_ratio,
+            include_forward_demo=include_forward_demo,
+        )
+        interval = max(1, int(sampling_interval))
+        period_count = 0
+        analysis_points = 0
+        for split in splits:
+            periods = [split.development]
+            if split.validation is not None:
+                periods.append(split.validation)
+            periods.append(split.out_of_sample)
+            if split.forward_demo is not None:
+                periods.append(split.forward_demo)
+            for period in periods:
+                bars = sum(period.contains(candle.timestamp) for candle in candles)
+                points = (bars + interval - 1) // interval
+                if max_analysis_points is not None:
+                    points = min(points, int(max_analysis_points))
+                analysis_points += points
+                period_count += 1
+        return {
+            "split_count": len(splits),
+            "period_count": period_count,
+            "expected_analyses_count": analysis_points,
+        }
+
     def run_period_backtest(
         self,
         candles: Sequence[ForexBar],
@@ -384,39 +429,69 @@ class ForexWalkForwardValidator:
             taint_reason = "Optimization attempted on Out-of-Sample period; results are TAINTED and no longer strictly OOS."
             logger.error("Walk-Forward Integrity Alert: %s", taint_reason)
 
-        # Filter candles to period boundary
-        period_candles = [c for c in candles if period_window.contains(c.timestamp)]
+        # Evaluation is restricted to this window, but the agent may use real bars
+        # that closed before the window as warm-up context.  Warm-up bars are never
+        # submitted to the execution engine, so they cannot create period trades.
+        sorted_candles = sorted(candles, key=lambda candle: candle.timestamp)
+        period_candles = [c for c in sorted_candles if period_window.contains(c.timestamp)]
         if not period_candles:
             raise ValueError(f"No candles found within period window {period_window.to_dict()}")
 
         cfg = backtest_config or ForexBacktestConfig()
         engine = ForexBacktestEngine(config=cfg)
 
-        proposals_schedule: dict[datetime, list[ForexTraderProposal]] = {}
-        if agent_pipeline_callable is not None:
-            history: list[ForexBar] = []
-            interval = max(1, int(cfg_snap.get("sampling_interval") or 1))
-            max_points = cfg_snap.get("max_analysis_points")
-            analyses = 0
-            for index, c in enumerate(period_candles):
-                history.append(c)
-                if index % interval or (max_points is not None and analyses >= int(max_points)):
-                    continue
-                analyses += 1
-                p = agent_pipeline_callable(
-                    normalize_forex_pair(pair), c.close_time or c.timestamp, list(history)
-                )
-                if p:
-                    proposals_schedule[c.timestamp] = [p]
+        norm_pair = normalize_forex_pair(pair)
+        history = [c for c in sorted_candles if c.timestamp < period_window.start_time]
+        interval = max(1, int(cfg_snap.get("sampling_interval") or 1))
+        max_points = cfg_snap.get("max_analysis_points")
+        analyses = 0
 
-        result = engine.run_candles(
-            pair=normalize_forex_pair(pair),
-            candles=period_candles,
-            proposals_schedule=proposals_schedule if proposals_schedule else None,
-        )
+        for index, candle in enumerate(period_candles):
+            # First process the newly-arrived bar.  This permits pending orders
+            # created by an earlier decision to trigger, but never lets a decision
+            # made after this bar closed inspect this bar retroactively for fills.
+            engine.step(candle=candle, pair=norm_pair)
+            history.append(candle)
+
+            if agent_pipeline_callable is None:
+                continue
+            if index % interval or (max_points is not None and analyses >= int(max_points)):
+                continue
+
+            analyses += 1
+            decision_time = candle.close_time or candle.timestamp
+            snapshot_setter = getattr(agent_pipeline_callable, "set_account_snapshot", None)
+            if callable(snapshot_setter):
+                snapshot_setter(engine.account_snapshot())
+            proposal = agent_pipeline_callable(norm_pair, decision_time, list(history))
+            if proposal is None:
+                continue
+
+            # MARKET orders use the first price that exists at the decision time:
+            # the completed bar close.  LIMIT/STOP orders are only queued here and
+            # cannot inspect this completed bar's high/low.
+            execution_bar = replace(
+                candle,
+                timestamp=decision_time,
+                open=candle.close,
+                high=candle.close,
+                low=candle.close,
+            )
+            engine.execute_proposal(proposal, execution_bar)
+
+        if engine.open_trades:
+            last_bar = period_candles[-1]
+            exit_time = last_bar.close_time or last_bar.timestamp
+            for trade in list(engine.open_trades):
+                engine._settle_trade(trade, last_bar.close, exit_time, TradeExitReason.MANUAL)
+            engine.open_trades = []
+            engine.equity = engine.balance
 
         start_str = period_candles[0].timestamp.strftime("%Y-%m-%d %H:%M")
-        end_str = period_candles[-1].timestamp.strftime("%Y-%m-%d %H:%M")
+        end_time = period_candles[-1].close_time or period_candles[-1].timestamp
+        result = engine._build_result(start_str, end_time.strftime("%Y-%m-%d %H:%M"))
+
+        end_str = end_time.strftime("%Y-%m-%d %H:%M")
 
         return PeriodPerformanceReport(
             period_type=p_type,

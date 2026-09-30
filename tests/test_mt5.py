@@ -545,6 +545,7 @@ class TestMT5ObserverAccount:
         assert profile.balance == 100000.0
         assert profile.equity == 102500.0
         assert profile.free_margin == 100500.0
+        assert profile.used_margin == 2000.0
         assert profile.currency == "USD"
         assert profile.leverage == 100.0
         assert profile.margin_call_level == 100.0

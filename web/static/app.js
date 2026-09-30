@@ -76,6 +76,7 @@
     deepModel:      $('#deepModel'),
     analystToggles: $$('#analystToggles .analyst-toggle'),
     btnRun:         $('#btnRun'),
+    btnCancelAnalysis: $('#btnCancelAnalysis'),
     pipelineCard:   $('#pipelineCard'),
     pipelineContent:$('#pipelineContent'),
     reportContent:  $('#reportContent'),
@@ -325,6 +326,7 @@
 
     DOM.provider.addEventListener('change', updateModelSelects);
     DOM.form.addEventListener('submit', handleSubmit);
+    if (DOM.btnCancelAnalysis) DOM.btnCancelAnalysis.addEventListener('click', cancelActiveAnalysis);
     DOM.reportModalClose.addEventListener('click', closeReportModal);
     DOM.reportOverlay.addEventListener('click', (e) => {
       if (e.target === DOM.reportOverlay) closeReportModal();
@@ -506,8 +508,10 @@
           });
           if (estimateRes.ok) {
             const estimate = await estimateRes.json();
-            if (Number(estimate.estimated_cost_usd || 0) >= 1 &&
-                !confirm(`Walk-forward estimate: ${estimate.expected_analyses_count} analyses, ${estimate.estimated_llm_calls} LLM calls, $${Number(estimate.estimated_cost_usd).toFixed(2)}. Proceed?`)) return;
+            if (Number(estimate.estimated_cost_usd || 0) >= 1) {
+              if (!confirm(`Walk-forward estimate: ${estimate.expected_analyses_count} analyses, ${estimate.estimated_llm_calls} LLM calls, $${Number(estimate.estimated_cost_usd).toFixed(2)}. Proceed?`)) return;
+              payload.confirm_expensive = true;
+            }
           }
           const res = await apiFetch(`/api/forex/backtest/walkforward?n_splits=${encodeURIComponent(n_splits)}`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
@@ -1094,7 +1098,8 @@
   // ---- Subsystem Loaders for Reorganized Dashboard (Phase 25) ----
   async function loadDashboardOverview() {
     try {
-      const res = await apiFetch('/api/forex/dashboard/overview');
+      const pair = DOM.forexPair?.value || 'EURUSD';
+      const res = await apiFetch(`/api/forex/dashboard/overview?pair=${encodeURIComponent(pair)}`);
       if (!res.ok) {
         await Promise.allSettled([
           loadMT5Account(),
@@ -2592,6 +2597,7 @@
 
       currentRunId = data.run_id;
       activePipelineType = 'forex';
+      if (DOM.btnCancelAnalysis) DOM.btnCancelAnalysis.style.display = 'block';
       showPipeline(pair, `${timeframe} • ${riskPct}% Risk`, FOREX_PIPELINE_NODES);
       connectForexSSE(data.run_id, pair);
       showToast(`Forex analysis started for ${pair}`, 'success');
@@ -2599,6 +2605,22 @@
     } catch (err) {
       showToast(err.message, 'error');
       resetRunButton();
+    }
+  }
+
+  async function cancelActiveAnalysis() {
+    if (!currentRunId || activePipelineType !== 'forex') return;
+    if (DOM.btnCancelAnalysis) DOM.btnCancelAnalysis.disabled = true;
+    try {
+      const response = await apiFetch(`/api/forex/runs/${encodeURIComponent(currentRunId)}/cancel`, {
+        method: 'POST',
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(apiErrorMessage(data, 'Cancellation failed'));
+      showToast('Analysis cancellation requested', 'info');
+    } catch (error) {
+      if (DOM.btnCancelAnalysis) DOM.btnCancelAnalysis.disabled = false;
+      showToast(error.message || 'Cancellation failed', 'error');
     }
   }
 
@@ -2663,8 +2685,9 @@
           DOM.backtestEstimate.innerHTML = `<strong>Pre-launch estimate</strong><br>Analyses: ${escapeText(analyses)} · LLM calls: ${escapeText(calls)} · Tokens: ${escapeText(tokens)} · Estimated cost: $${escapeText(Number(cost).toFixed(2))}<br>Sampling interval: ${escapeText(payload.sampling_interval)} bars · Maximum analysis points: ${escapeText(payload.max_analysis_points ?? 'Uncapped')}`;
         }
         // require confirmation for large jobs
-        if (calls > 50 || cost > 5) {
+        if (cost >= 1) {
           proceed = confirm(`Estimated analyses: ${analyses}\nEstimated LLM calls: ${calls}\nEstimated tokens: ${tokens}\nEstimated cost: $${Number(cost).toFixed(2)}\nSampling interval: ${payload.sampling_interval}\nMaximum analysis points: ${payload.max_analysis_points ?? 'Uncapped'}\n\nProceed with backtest?`);
+          if (proceed) payload.confirm_expensive = true;
         }
         // show a small summary in pipeline area
         showToast(`Estimate: ${calls} analyses, ${tokens} tokens, $${Number(cost||0).toFixed(2)}`, 'info');
@@ -2761,6 +2784,7 @@
         <div class="card-header"><h3 class="card-title">Ablation Study: ${escapeText(study.pair || 'Unavailable')}</h3></div>
         <div style="padding:12px">
           <div class="info-banner">${escapeText(study.sample_size_warning || 'Exploratory comparison only; no variant is statistically validated.')}</div>
+          <p><strong>Selection status:</strong> ${escapeText(study.selection_status || 'DESCRIPTIVE_ONLY')} · <strong>Best observed:</strong> ${escapeText(study.best_observed_variant_name || 'Unavailable')} · Observed historical result only; not predictive or statistically validated.</p>
           <div style="overflow:auto"><table class="data-table"><thead><tr><th>Variant</th><th>Sample</th><th>Trades</th><th>Win rate</th><th>Profit factor</th><th>Net result</th><th>Cost</th><th>Latency</th><th>Sample adequate</th></tr></thead><tbody>
             ${variants.map(variant => `<tr><td title="${escapeText(variant.description)}">${escapeText(variant.name || variant.variant_id)}</td><td>${escapeText(variant.analyses_performed ?? 'Unavailable')}</td><td>${escapeText(variant.trade_count ?? 'Unavailable')}</td><td>${variant.win_rate_pct != null ? `${escapeText(variant.win_rate_pct)}%` : 'Unavailable'}</td><td>${escapeText(variant.profit_factor ?? 'Unavailable')}</td><td>${variant.total_net_profit != null ? `$${escapeText(Number(variant.total_net_profit).toFixed(2))}` : 'Unavailable'}</td><td>${variant.estimated_llm_cost_usd != null ? `$${escapeText(Number(variant.estimated_llm_cost_usd).toFixed(4))}` : 'Unavailable'}</td><td>${variant.latency_seconds != null ? `${escapeText(variant.latency_seconds)}s` : 'Unavailable'}</td><td>${escapeText(variant.sample_size_adequate)}</td></tr>`).join('')}
           </tbody></table></div>
@@ -2945,6 +2969,18 @@
       } catch (_) {
         showToast('Forex analysis stream error', 'error');
       }
+    });
+
+    eventSource.addEventListener('cancelled', () => {
+      if (eventSource) {
+        eventSource.close();
+        eventSource = null;
+      }
+      const pct = document.getElementById('progressPercent');
+      if (pct) pct.textContent = 'Cancelled';
+      resetRunButton();
+      showToast('Forex analysis cancelled', 'info');
+      loadRuns();
     });
 
     eventSource.onerror = () => {
@@ -3258,17 +3294,17 @@
             </div>
             <div class="proposal-meta-item">
               <span class="proposal-meta-label">Current Spread</span>
-              <span class="proposal-meta-value">${ctx.spread_pips != null ? `${ctx.spread_pips} pips` : '1.5 pips'}</span>
+              <span class="proposal-meta-value">${ctx.spread_pips != null ? `${ctx.spread_pips} pips` : 'Unavailable'}</span>
               <span class="proposal-meta-sub">Within threshold</span>
             </div>
             <div class="proposal-meta-item">
               <span class="proposal-meta-label">Volatility (ATR)</span>
-              <span class="proposal-meta-value">${ctx.volatility_atr != null ? `${ctx.volatility_atr} pips` : '45.0 pips'}</span>
+              <span class="proposal-meta-value">${ctx.volatility_atr != null ? `${ctx.volatility_atr} pips` : 'Unavailable'}</span>
               <span class="proposal-meta-sub">Expected session range</span>
             </div>
             <div class="proposal-meta-item">
               <span class="proposal-meta-label">News / Event Risk</span>
-              <span class="proposal-meta-value" style="color:${ctx.news_risk === 'CLEARED' ? 'var(--green)' : 'var(--amber)'};">${escapeText(ctx.news_risk || 'CLEARED')}</span>
+              <span class="proposal-meta-value" style="color:${ctx.news_risk === 'CLEARED' ? 'var(--green)' : 'var(--amber)'};">${escapeText(ctx.news_risk || 'Unavailable')}</span>
               <span class="proposal-meta-sub">Economic blackout status</span>
             </div>
           </div>
@@ -3615,6 +3651,12 @@
       <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
       Launch Analysis
     `;
+    if (DOM.btnCancelAnalysis) {
+      DOM.btnCancelAnalysis.style.display = 'none';
+      DOM.btnCancelAnalysis.disabled = false;
+    }
+    currentRunId = null;
+    activePipelineType = null;
   }
 
   // ---- Formatting Helpers ----

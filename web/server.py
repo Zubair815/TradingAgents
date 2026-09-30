@@ -36,6 +36,12 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+# ``python -m web.server`` executes this module as ``__main__``.  Register its
+# canonical name before importing Forex routes so their auth dependency cannot
+# import a second server module with a different per-process session secret.
+if __name__ == "__main__":
+    sys.modules.setdefault("web.server", sys.modules[__name__])
+
 from tradingagents.dataflows.config import get_config as get_runtime_config  # noqa: E402
 from tradingagents.dataflows.utils import safe_ticker_component  # noqa: E402
 from tradingagents.default_config import DEFAULT_CONFIG  # noqa: E402

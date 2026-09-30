@@ -4,6 +4,7 @@ import json
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -14,6 +15,7 @@ from tradingagents.backtest.agent_backtester import (
     AgentBacktestConfig,
     HistoricalForexAgentBacktester,
 )
+from tradingagents.backtest.forex_engine import ForexBacktestConfig
 from tradingagents.backtest.historical_data import (
     HistoricalDataUnavailable,
     candle_frame,
@@ -283,3 +285,70 @@ def test_historical_graph_never_retrieves_future_learned_context():
     state = graph.create_run_state("EURUSD", "2025-01-06T01:00:00Z")
     graph.learning_manager.retriever.retrieve_lessons.assert_not_called()
     assert state["applied_lesson_ids"] == []
+
+
+def test_historical_memory_uses_only_lessons_known_by_cutoff():
+    from tradingagents.graph.forex_graph import ForexTradingAgentsGraph
+    from tradingagents.graph.propagation import Propagator
+
+    graph = object.__new__(ForexTradingAgentsGraph)
+    graph.config = {"historical_backtest": True, "historical_memory_enabled": True}
+    graph.journal = None
+    graph.learning_manager = MagicMock()
+    graph.propagator = Propagator()
+    past = SimpleNamespace(
+        lesson=SimpleNamespace(lesson_id="lesson-a", created_at="2025-01-01T00:00:00Z")
+    )
+    future = SimpleNamespace(
+        lesson=SimpleNamespace(lesson_id="lesson-b", created_at="2025-03-01T00:00:00Z")
+    )
+    graph.learning_manager.retriever.retrieve_lessons.return_value = [past, future]
+    graph.learning_manager.retriever.format_lessons_for_prompt.return_value = "lesson-a"
+
+    state = graph.create_run_state("EURUSD", "2025-02-01T00:00:00Z")
+
+    assert state["applied_lesson_ids"] == ["lesson-a"]
+    formatted = graph.learning_manager.retriever.format_lessons_for_prompt.call_args.args[0]
+    assert formatted == [past]
+
+
+def test_historical_pipeline_receives_evolving_account_snapshot():
+    bars, meta = sourced_bars(3)
+
+    class SnapshotAgent:
+        def __init__(self):
+            self.snapshots = []
+            self.calls = 0
+
+        def set_account_snapshot(self, snapshot):
+            self.snapshots.append(snapshot)
+
+        def __call__(self, pair, _cutoff, _history):
+            self.calls += 1
+            if self.calls == 1:
+                return ForexTraderProposal(
+                    pair=pair,
+                    action="LONG",
+                    order_type="MARKET",
+                    stop_loss=1.0800,
+                    take_profit_1=1.0900,
+                    suggested_lot_size=1.0,
+                    reasoning="Account evolution regression",
+                )
+            return None
+
+    agent = SnapshotAgent()
+    config = AgentBacktestConfig(
+        timeframe="H1",
+        backtest_config=ForexBacktestConfig(initial_balance=10000.0, leverage=500.0),
+    )
+    HistoricalForexAgentBacktester(config=config).run(
+        bars,
+        market_data_provenance=meta,
+        agent_pipeline_callable=agent,
+    )
+
+    assert agent.snapshots[0].balance == 10000.0
+    assert agent.snapshots[0].leverage == 500.0
+    assert agent.snapshots[1].balance < agent.snapshots[0].balance
+    assert agent.snapshots[1].free_margin <= agent.snapshots[1].equity

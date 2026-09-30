@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -207,6 +207,7 @@ def create_forex_portfolio_manager(
     llm: Any | None = None,
     journal: ForexTradeJournal | None = None,
     auto_record_trades: bool = False,
+    cancellation_check: Callable[[], bool] | None = None,
 ):
     """Factory for the Forex Portfolio Manager node.
 
@@ -219,6 +220,8 @@ def create_forex_portfolio_manager(
     def forex_portfolio_manager_node(
         state: dict[str, Any], name: str = "Portfolio Manager"
     ) -> dict[str, Any]:
+        if cancellation_check is not None and cancellation_check():
+            raise RuntimeError("analysis cancelled")
         raw_pair = state.get("company_of_interest", "EURUSD")
         pair = normalize_forex_pair(raw_pair)
         curr_date = state.get("trade_date")
@@ -260,6 +263,8 @@ def create_forex_portfolio_manager(
                     "Confirm the authorized action, volume, key levels, and risk parameters."
                 )
                 res = llm.invoke(prompt)
+                if cancellation_check is not None and cancellation_check():
+                    raise RuntimeError("analysis cancelled")
                 content = getattr(res, "content", str(res)).strip()
                 if content:
                     final_summary = f"{rendered_decision}\n\n### Executive Portfolio Brief\n{content}"
@@ -267,6 +272,8 @@ def create_forex_portfolio_manager(
                 logger.warning("Portfolio Manager LLM synthesis failed (%s); using risk decision rendering", exc)
 
         proposal_id = None
+        if cancellation_check is not None and cancellation_check():
+            raise RuntimeError("analysis cancelled")
         # SQLite Journal Auto-Logging
         if journal is not None and proposal is not None:
             try:
@@ -330,6 +337,7 @@ class ForexGraphSetup:
         sizing_result_holder: dict[str, PositionSizingResult] | None = None,
         journal: ForexTradeJournal | None = None,
         auto_record_trades: bool = False,
+        cancellation_check: Callable[[], bool] | None = None,
         config: dict | None = None,
     ):
         _require_manual_execution(auto_record_trades)
@@ -346,6 +354,7 @@ class ForexGraphSetup:
         self.sizing_result_holder = sizing_result_holder
         self.journal = journal
         self.auto_record_trades = auto_record_trades
+        self.cancellation_check = cancellation_check
         self.config = config
 
     def _bind_config(self, node):
@@ -396,6 +405,7 @@ class ForexGraphSetup:
             llm=self.deep_thinking_llm,
             journal=self.journal,
             auto_record_trades=self.auto_record_trades,
+            cancellation_check=self.cancellation_check,
         )
 
         workflow = StateGraph(AgentState)
@@ -481,8 +491,10 @@ class ForexTradingAgentsGraph:
         sizing_constraints: BrokerExecutionConstraints | None = None,
         sizing_method: PositionSizingMethod = PositionSizingMethod.FIXED_RISK_PERCENT,
         journal: ForexTradeJournal | None = None,
+        learning_manager: Any = None,
         db_path: str | Path | None = None,
         auto_record_trades: bool = False,
+        cancellation_check: Callable[[], bool] | None = None,
         quick_thinking_llm: Any = None,
         deep_thinking_llm: Any = None,
         checkpointer: Any = None,
@@ -509,7 +521,9 @@ class ForexTradingAgentsGraph:
             self.journal = ForexTradeJournal(db_path=db_path)
         else:
             self.journal = ForexTradeJournal(db_path=":memory:")
+        self.learning_manager = learning_manager
         self.auto_record_trades = auto_record_trades
+        self.cancellation_check = cancellation_check
 
         # LLMs
         llm_kwargs = self._get_provider_kwargs()
@@ -584,6 +598,7 @@ class ForexTradingAgentsGraph:
             sizing_result_holder=self.sizing_result_holder,
             journal=self.journal,
             auto_record_trades=self.auto_record_trades,
+            cancellation_check=self.cancellation_check,
             config=self.config,
         )
 

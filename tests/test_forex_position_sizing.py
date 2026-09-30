@@ -45,6 +45,17 @@ from tradingagents.forex import (
 # ---------------------------------------------------------------------------
 
 
+def test_missing_free_margin_derives_from_supplied_equity_not_default_balance():
+    account = ForexAccountProfile(balance=50.0, equity=45.0, used_margin=15.0)
+    assert account.free_margin == 30.0
+    assert account.free_margin != 10000.0
+
+
+def test_explicit_small_account_free_margin_is_preserved():
+    account = ForexAccountProfile(balance=50.0, equity=45.0, free_margin=30.0, leverage=1000)
+    assert account.model_dump()["free_margin"] == 30.0
+
+
 class TestFixedRiskPercentSizing:
     def test_standard_eurusd_one_percent_risk(self):
         engine = ForexPositionSizingEngine()

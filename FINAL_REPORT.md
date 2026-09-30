@@ -1,8 +1,8 @@
 # TradingAgents final system acceptance report
 
 - Audit date: 2026-09-30
-- Commit at audit start: `53bdf53160d70dd6797c73d96b166cbba00a0185` (`Version1.7`)
-- Working tree at audit start: contained the completed, uncommitted validation-engine integration
+- Commit at audit start: `18cdbea0806eb631911dd332a5f0211c45a65d92` (`Version1.8`)
+- Working tree at audit start: clean
 - Final release-evidence patch: uncommitted; it has no commit SHA until the maintainer commits it
 - Release status: **READY FOR LOCAL DEMO VALIDATION**
 
@@ -59,8 +59,8 @@ There is no automated Forex broker-order submission path.
 | Gate | Result |
 | --- | --- |
 | `ruff check .` | PASS |
-| `pytest -q -m "not e2e"` | PASS — 2,096 passed, 5 skipped, 5 deselected, 20 warnings, 88 subtests |
-| `pytest -q -m e2e` | PASS — 5 passed |
+| `pytest -q -m "not e2e"` | PASS — 2,109 passed, 5 skipped, 6 deselected, 20 warnings, 88 subtests |
+| `pytest -q -m e2e` | PASS — 6 passed |
 | `python -m compileall tradingagents web cli` | PASS |
 | JavaScript syntax checks | PASS |
 | `git diff --check` | PASS |
@@ -73,8 +73,8 @@ There is no automated Forex broker-order submission path.
 | GitHub Chromium E2E | PASS |
 | GitHub Ruff | PASS |
 
-Latest GitHub evidence for the base commit: [CI run 36664347641](https://github.com/Zubair815/TradingAgents/actions/runs/36664347641),
-completed successfully for `53bdf53160d70dd6797c73d96b166cbba00a0185` on 2026-09-30.
+Latest GitHub evidence for the base commit: [CI run 36667732822](https://github.com/Zubair815/TradingAgents/actions/runs/36667732822),
+completed successfully for `18cdbea0806eb631911dd332a5f0211c45a65d92` on 2026-09-30.
 It does not cover the uncommitted final working-tree patch; final GitHub CI is
 therefore pending commit and push. The five local skips are
 three POSIX-mode checks on Windows, optional Bedrock without `langchain_aws`, and
@@ -128,7 +128,7 @@ an implemented path whose real-world or statistical acceptance remains limited.
 | Learning UI | COMPLETE | Lesson filters, evidence, rule text, and source-trade navigation are E2E tested. |
 | Settings | COMPLETE | Safe allowlisted persistence/reset, secret status, and reload behavior are E2E tested. |
 | Authentication | COMPLETE | Protected Forex router, in-memory key, HttpOnly cookie, strict origin/cookie policy, and sanitized errors are tested. |
-| E2E | COMPLETE | Four mandatory real-Chromium workflows pass locally and in GitHub Actions. |
+| E2E | COMPLETE | Six mandatory real-Chromium workflows pass locally; the five-test base gate passed in GitHub Actions. |
 | Runtime retention | COMPLETE | Age/count bounds, event caps, locks, tombstones, SSE exit, and journal preservation are stress tested. |
 | Documentation | COMPLETE | README, this evidence report, phase integrity docs, and XM checklist reflect the audited commit. |
 
@@ -160,9 +160,13 @@ Real historical mode disables fallback, rejects uploaded/unverified candles,
 requires explicit date coverage and completed candles, applies a shared
 point-in-time cutoff, excludes future lessons, constrains news/calendar evidence
 to what was historically known, and includes spread, slippage, commission, swap,
-margin, and execution assumptions. Walk-forward partitions preserve OOS boundaries
-and taint optimization that accesses OOS data. Ablation variants share the input
-dataset and baseline comparison. All performance outputs keep
+margin, and execution assumptions. Completed-bar decisions execute no earlier
+than their decision time, pending orders cannot use the decision candle, and
+walk-forward partitions receive real pre-period warm-up bars without pre-period
+trades. The evolving simulator account is supplied to historical sizing.
+Walk-forward partitions preserve OOS boundaries and taint optimization that
+accesses OOS data. Ablation variants share the input dataset and baseline
+comparison; historical rankings remain descriptive only. All performance outputs keep
 `validated_strategy_performance=false`.
 
 ## Live XM status

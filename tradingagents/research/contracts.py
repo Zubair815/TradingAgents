@@ -49,6 +49,7 @@ class AnalysisRequest(Record):
     quick_model: str | None = None
     deep_model: str | None = None
     account_balance: float = Field(default=100000.0, gt=0)
+    account_free_margin: float | None = Field(default=None, ge=0)
     risk_percent: float = Field(default=1.0, gt=0, le=5.0)
     higher_timeframes: tuple[str, ...] = ("D1", "H4")
     account_currency: str = "USD"

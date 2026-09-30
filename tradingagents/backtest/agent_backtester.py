@@ -303,6 +303,9 @@ class HistoricalForexAgentBacktester:
 
                 # 1. User/Test-injected callable
                 if agent_pipeline_callable is not None:
+                    snapshot_setter = getattr(agent_pipeline_callable, "set_account_snapshot", None)
+                    if callable(snapshot_setter):
+                        snapshot_setter(engine.account_snapshot())
                     if historical:
                         with historical_market_scope(pair, candle_frame(pit_candles, provenance), cutoff):
                             proposal = agent_pipeline_callable(pair, cutoff, pit_candles)

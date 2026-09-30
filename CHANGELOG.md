@@ -8,6 +8,25 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ## [Unreleased]
 
+### Final Forex correctness remediation
+
+- Eliminate walk-forward same-bar-open lookahead; completed-bar decisions execute
+  at the close and pending orders cannot inspect the decision candle retroactively.
+- Supply legitimate pre-period warm-up history without permitting warm-up trades.
+- Propagate evolving simulated account state into every historical graph decision.
+- Use MT5 balance, equity, used margin, free margin, currency, and leverage for live
+  sizing; missing free margin no longer becomes an unrelated `$10,000` value.
+- Inject a frozen historical lesson source, filter lessons by decision cutoff, and
+  expose applied lesson IDs without persisting evaluation proposals to that source.
+- Add cooperative analysis cancellation with terminal-state and pre-persistence
+  guards, exact walk-forward period estimates, and server-side cost confirmation.
+- Keep historical ablation rankings descriptive (`DESCRIPTIVE_ONLY`) rather than
+  declaring statistical winners from trade count alone.
+- Make dashboard economic events follow the selected pair and render missing risk
+  context as unavailable instead of fabricated defaults.
+- Fix `python -m web.server` session authentication so Forex routes share the same
+  per-process session secret.
+
 ### Forex Phase 2 data integrity
 
 - Default Forex candles to MT5 with broker metadata and explicitly enabled Yahoo fallback.

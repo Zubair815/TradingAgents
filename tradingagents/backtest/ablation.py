@@ -287,6 +287,7 @@ class AblationVariantMetric:
     delta_cost_usd: float = 0.0
     delta_latency_sec: float = 0.0
     result: ForexBacktestResult | None = None
+    audit_metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -311,6 +312,7 @@ class AblationVariantMetric:
             "delta_avg_r": self.delta_avg_r,
             "delta_cost_usd": self.delta_cost_usd,
             "delta_latency_sec": self.delta_latency_sec,
+            "audit_metadata": self.audit_metadata,
         }
 
 
@@ -335,6 +337,9 @@ class ForexAblationReport:
     markdown_summary: str
     data_source: str = "unverified"
     validation_status: str = "EXPLORATORY"
+    best_observed_variant_id: str | None = None
+    best_observed_variant_name: str | None = None
+    selection_status: str = "DESCRIPTIVE_ONLY"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -350,6 +355,9 @@ class ForexAblationReport:
             "winner_declared": self.winner_declared,
             "winning_variant_id": self.winning_variant_id,
             "winning_variant_name": self.winning_variant_name,
+            "best_observed_variant_id": self.best_observed_variant_id,
+            "best_observed_variant_name": self.best_observed_variant_name,
+            "selection_status": self.selection_status,
             "sample_size_warning": self.sample_size_warning,
             "component_rankings": self.component_rankings,
             "variants": [v.to_dict() for v in self.variants],
@@ -442,6 +450,7 @@ class ForexAblationRunner:
         # Execute each variant over the identical dataset
         for var in variant_list:
             t0 = time.perf_counter()
+            variant_audit: dict[str, Any] = {}
 
             if custom_variant_evaluator is not None:
                 # Direct test/custom evaluator
@@ -477,6 +486,7 @@ class ForexAblationRunner:
                 calls_per_pt = var.estimate_calls_per_point()
                 total_calls = analyses_done * calls_per_pt
                 est_cost = round((total_calls * var.avg_tokens_per_call / 1000.0) * var.cost_per_1k_tokens, 4)
+                variant_audit = dict(getattr(pipeline_callable, "audit_metadata", {}) or {})
             else:
                 # Fallback: run engine with default pipeline simulation
                 sim_res, analyses_done, est_cost = self._simulate_variant_run(
@@ -504,6 +514,7 @@ class ForexAblationRunner:
                 analyses_performed=analyses_done,
                 sample_size_adequate=is_adequate,
                 result=b_res,
+                audit_metadata=variant_audit,
             )
 
             if var.variant_id == baseline_id:
@@ -548,6 +559,11 @@ class ForexAblationRunner:
         winning_variant_name: str | None = None
         sample_size_warning: str | None = None
 
+        def composite_score(x: AblationVariantMetric) -> float:
+            return (x.expectancy_r * 2.0) + min(x.profit_factor, 5.0) - (x.max_drawdown_pct / 10.0)
+
+        best_observed = max(variant_metrics, key=composite_score)
+
         if max_trades < self.min_sample_size:
             sample_size_warning = (
                 f"Sample size warning: Maximum trade count (N={max_trades}) is below statistical "
@@ -558,9 +574,6 @@ class ForexAblationRunner:
             # Only consider variants with adequate sample sizes
             qualified = [m for m in variant_metrics if m.sample_size_adequate]
             if qualified:
-                def composite_score(x: AblationVariantMetric) -> float:
-                    return (x.expectancy_r * 2.0) + min(x.profit_factor, 5.0) - (x.max_drawdown_pct / 10.0)
-
                 best = max(qualified, key=composite_score)
                 winner_declared = True
                 winning_variant_id = best.variant_id
@@ -570,6 +583,18 @@ class ForexAblationRunner:
                     f"Sample size warning: No variant achieved the minimum {self.min_sample_size} "
                     f"trades required for audited selection."
                 )
+
+        if historical:
+            winner_declared = False
+            winning_variant_id = None
+            winning_variant_name = None
+            descriptive = (
+                "Historical rankings are descriptive only; trade count alone does not establish "
+                "statistical significance or predictive performance."
+            )
+            sample_size_warning = (
+                f"{sample_size_warning} {descriptive}" if sample_size_warning else descriptive
+            )
 
         markdown_summary = self._render_markdown_report(
             study_id=study_id,
@@ -604,6 +629,11 @@ class ForexAblationRunner:
             markdown_summary=markdown_summary,
             data_source=provenance.get("source", "unverified"),
             validation_status="PARTIALLY_VALIDATED" if historical else "EXPLORATORY",
+            best_observed_variant_id=best_observed.variant_id,
+            best_observed_variant_name=best_observed.name,
+            selection_status="DESCRIPTIVE_ONLY" if historical else (
+                "SELECTED_WITH_SAMPLE_GATE" if winner_declared else "INSUFFICIENT_SAMPLE"
+            ),
         )
 
     def _simulate_variant_run(

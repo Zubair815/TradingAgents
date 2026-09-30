@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from tradingagents.database.journal import ForexTradeJournal
+from tradingagents.research.contracts import AnalysisRequest
 from web import forex_routes, server
 from web.retention import RetentionPolicy
 
@@ -46,6 +50,7 @@ def isolated_transient_stores(monkeypatch):
         forex_routes._backtest_runs.clear()
         forex_routes._expired_forex_runs.clear()
         forex_routes._expired_backtests.clear()
+        forex_routes._forex_cancellations.clear()
     yield policy
     with server._run_store_lock:
         server._runs.clear()
@@ -59,6 +64,7 @@ def isolated_transient_stores(monkeypatch):
         forex_routes._backtest_runs.clear()
         forex_routes._expired_forex_runs.clear()
         forex_routes._expired_backtests.clear()
+        forex_routes._forex_cancellations.clear()
 
 
 def test_stale_active_pruned_but_recent_active_retained(isolated_transient_stores):
@@ -90,6 +96,53 @@ def test_run_cancel_endpoint_sets_terminal_state(isolated_transient_stores):
     assert server._runs[run_id]["status"] == "cancelled"
     assert server._runs[run_id]["finished_at"]
     assert server._run_events[run_id][-1]["type"] == "cancelled"
+
+
+def test_forex_cancel_is_cooperative_terminal_and_never_persists_success(
+    isolated_transient_stores,
+):
+    run_id = "fx-cancel-cooperative"
+    started = _iso(time.time())
+    forex_routes._forex_runs[run_id] = {
+        "run_id": run_id,
+        "status": "queued",
+        "started_at": started,
+        "last_activity_at": started,
+    }
+    forex_routes._forex_run_events[run_id] = []
+    forex_routes._forex_cancellations[run_id] = threading.Event()
+    provider_returned = threading.Event()
+    graph = MagicMock()
+
+    def stream(*_args, **_kwargs):
+        yield {"forex_technical_report": "done"}
+        provider_returned.wait(timeout=2)
+        yield {"forex_macro_report": "should not be processed"}
+
+    graph.stream.side_effect = stream
+    worker = threading.Thread(
+        target=forex_routes._run_forex_analysis,
+        args=(run_id, AnalysisRequest(account_source="manual")),
+    )
+    with patch("web.forex_routes.ForexTradingAgentsGraph", return_value=graph):
+        worker.start()
+        deadline = time.time() + 2
+        while not forex_routes._forex_run_events[run_id] and time.time() < deadline:
+            time.sleep(0.01)
+        first = asyncio.run(forex_routes.cancel_forex_run(run_id))
+        second = asyncio.run(forex_routes.cancel_forex_run(run_id))
+        provider_returned.set()
+        worker.join(timeout=2)
+
+    assert first["status"] == second["status"] == "cancelled"
+    assert forex_routes._forex_runs[run_id]["status"] == "cancelled"
+    assert run_id not in forex_routes._forex_completed_reports
+    terminal_events = [
+        event["type"]
+        for event in forex_routes._forex_run_events[run_id]
+        if event["type"] in {"complete", "error", "cancelled"}
+    ]
+    assert terminal_events == ["cancelled"]
 
 
 def test_terminal_count_eviction_releases_events_and_report_aliases(isolated_transient_stores):

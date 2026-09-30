@@ -56,6 +56,7 @@ class MT5AccountInfo(BaseModel):
             balance=self.balance,
             equity=self.equity,
             free_margin=self.margin_free,
+            used_margin=self.margin,
             currency=self.currency,
             leverage=float(self.leverage),
             margin_call_level=self.margin_so_call,

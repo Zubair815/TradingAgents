@@ -103,6 +103,8 @@ def _seed_backtests() -> None:
                     "pair": "USDJPY",
                     "timeframe": "H1",
                     "sample_size_warning": "No statistically meaningful winner.",
+                    "selection_status": "DESCRIPTIVE_ONLY",
+                    "best_observed_variant_name": "Technical Only",
                     "validation_reasons": ["Comparative historical evidence only."],
                     "variants": [{
                         "variant_id": "tech_only", "name": "Technical Only",
@@ -420,6 +422,32 @@ def test_analysis_form_sse_and_decision_report(e2e_environment):
         assert "RISK ENGINE: APPROVE" in report
         assert "Model confidence: Unavailable" in report
         assert "Model confidence: 0" not in report
+
+
+def test_analysis_cancellation_is_terminal_in_browser(e2e_environment):
+    def cancellable_worker(run_id, _request):
+        deadline = time.time() + 5
+        while time.time() < deadline and not forex_routes._forex_cancel_requested(run_id):
+            time.sleep(0.02)
+
+    original_worker = forex_routes._run_forex_analysis
+    forex_routes._run_forex_analysis = cancellable_worker
+    try:
+        with quality_page(e2e_environment) as page:
+            page.locator("#tab-analyze").click()
+            page.locator("#analysisForm").evaluate("form => form.requestSubmit()")
+            cancel = page.locator("#btnCancelAnalysis")
+            cancel.wait_for(state="visible")
+            cancel.click()
+            page.get_by_text("Forex analysis cancelled", exact=True).wait_for()
+            assert cancel.is_hidden()
+            cancelled = page.evaluate(
+                "fetch('/api/forex/runs').then(r=>r.json()).then(d=>d.runs.find(x=>x.status==='cancelled'))"
+            )
+            assert cancelled["status"] == "cancelled"
+            assert cancelled["finished_at"]
+    finally:
+        forex_routes._run_forex_analysis = original_worker
 
 
 def test_proposals_mt5_journal_and_learning_workflows(e2e_environment):

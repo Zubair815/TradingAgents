@@ -1081,6 +1081,8 @@ class TestForexAnalysisRuns:
         mock_acc = MagicMock()
         mock_acc.balance = 87654.0
         mock_acc.equity = 87900.0
+        mock_acc.margin = 150.0
+        mock_acc.margin_free = 87750.0
         mock_acc.currency = "USD"
         mock_acc.leverage = 100
         mock_conn.get_account_info.return_value = mock_acc
@@ -1123,6 +1125,9 @@ class TestForexAnalysisRuns:
 
             call_kwargs = factory.call_args[1]
             assert call_kwargs["sizing_account"].balance == 87654.0
+            assert call_kwargs["sizing_account"].equity == 87900.0
+            assert call_kwargs["sizing_account"].used_margin == 150.0
+            assert call_kwargs["sizing_account"].free_margin == 87750.0
             assert call_kwargs["risk_limits"].min_risk_reward_ratio == 2.2
             assert call_kwargs["risk_limits"].max_spread_pips == 1.9
             assert call_kwargs["risk_limits"].enforce_news_blackout is True
@@ -1267,7 +1272,7 @@ class TestForexAnalysisRuns:
         assert rep["sizing"]["recommended_lot_size"] == 1.5
         assert rep["context"]["execution_timeframe"] == "M15"
         assert rep["context"]["context_timeframes"] == ["H1", "H4", "D1"]
-        assert rep["context"]["news_risk"] == "CLEARED"
+        assert rep["context"]["news_risk"] is None
         assert rep["research"]["technical"] == "Bullish trend on H1 and H4."
         assert rep["research"]["macro"] == "Fed neutral, ECB dovish."
         assert rep["research"]["news"] == "No high-impact economic news in 2 hours."
@@ -2070,6 +2075,17 @@ class TestDashboardOverview:
         assert perf["is_sample_size_adequate"] is False
         assert "Sample size warning" in perf["sample_warning"]
         assert "30" in perf["sample_warning"]
+
+    @pytest.mark.parametrize("pair", ["EURUSD", "USDJPY", "GBPUSD"])
+    def test_dashboard_events_follow_requested_pair(self, client, pair):
+        with patch(
+            "tradingagents.forex.calendar.get_calendar_events_for_pair",
+            return_value=[],
+        ) as calendar:
+            res = client.get(f"/api/forex/dashboard/overview?pair={pair}")
+        assert res.status_code == 200
+        assert res.json()["pair"] == pair
+        assert calendar.call_args.kwargs["symbol"] == pair
 
     def test_dashboard_overview_connected_with_positions(self, client, isolated_forex_env):
         from tradingagents.agents.schemas_forex import ForexAction

@@ -28,7 +28,7 @@ from collections.abc import Sequence
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from tradingagents.agents.schemas_forex import ForexAction, ForexTraderProposal
 from tradingagents.forex.domain import ForexPair, get_forex_pair
@@ -129,7 +129,8 @@ class ForexAccountProfile(BaseModel):
 
     balance: float = Field(default=10000.0, gt=0.0, description="Account cash balance")
     equity: float = Field(default=10000.0, gt=0.0, description="Current account equity")
-    free_margin: float = Field(default=10000.0, ge=0.0, description="Available free margin for new trades")
+    free_margin: float | None = Field(default=None, ge=0.0, description="Available free margin for new trades")
+    used_margin: float = Field(default=0.0, ge=0.0, description="Margin currently committed to open positions")
     currency: str = Field(default="USD", description="Account base deposit currency (e.g. USD, EUR, GBP)")
     leverage: float = Field(default=100.0, ge=1.0, description="Account leverage ratio (e.g. 100 for 1:100)")
     max_account_risk_percent: float = Field(
@@ -152,6 +153,12 @@ class ForexAccountProfile(BaseModel):
     )
     margin_call_level: float = Field(default=100.0, description="Broker margin call level (%)")
     stop_out_level: float = Field(default=50.0, description="Broker liquidation stop-out level (%)")
+
+    @model_validator(mode="after")
+    def derive_free_margin(self):
+        if self.free_margin is None:
+            self.free_margin = max(0.0, self.equity - self.used_margin)
+        return self
 
 
 class BrokerExecutionConstraints(BaseModel):

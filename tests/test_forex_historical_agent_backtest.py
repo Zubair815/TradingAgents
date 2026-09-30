@@ -397,6 +397,27 @@ def test_api_estimate_backtest_costs():
     assert "estimated_cost_usd" in data
 
 
+def test_walk_forward_estimate_uses_actual_four_period_structure():
+    client = TestClient(app)
+    client.get("/")
+    res = client.post(
+        "/api/forex/backtest/estimate",
+        json={
+            "workflow": "WALK_FORWARD",
+            "count": 100,
+            "sampling_interval": 10,
+            "n_splits": 1,
+            "analyst_count": 3,
+        },
+    )
+    assert res.status_code == 200
+    data = res.json()
+    assert data["split_count"] == 1
+    assert data["period_count"] == 4
+    assert data["expected_analyses_count"] == 11
+    assert data["estimated_llm_calls"] == 66
+
+
 def test_api_run_backtest_historical_agent_mode():
     """Verify POST /api/forex/backtest/run with mode=HISTORICAL_AGENT_BACKTEST."""
     client = TestClient(app)

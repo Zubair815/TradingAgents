@@ -35,7 +35,7 @@ from tradingagents.forex.pips import (
     pip_value_in_account_currency,
 )
 from tradingagents.metrics.mfe_mae import parse_utc_timestamp
-from tradingagents.risk.sizing import calculate_required_margin
+from tradingagents.risk.sizing import ForexAccountProfile, calculate_required_margin
 
 logger = logging.getLogger(__name__)
 
@@ -314,6 +314,19 @@ class ForexBacktestEngine:
             total_margin += m
         return total_margin
 
+    def account_snapshot(self) -> ForexAccountProfile:
+        """Return the objective simulated account truth at the current event time."""
+        used_margin = self._calculate_used_margin()
+        return ForexAccountProfile(
+            balance=self.balance,
+            equity=self.equity,
+            free_margin=max(0.0, self.equity - used_margin),
+            used_margin=used_margin,
+            currency=self.config.account_currency,
+            leverage=self.config.leverage,
+            max_account_risk_percent=self.config.max_account_risk_percent,
+        )
+
     def _update_open_positions_excursions(self, candle: ForexBar, pair: str) -> None:
         """Update intrabar MFE/MAE excursions for all open positions on this pair."""
         pip_sz = pip_size_for(pair)
@@ -526,8 +539,11 @@ class ForexBacktestEngine:
                 still_pending.append(po)
                 continue
 
-            # Don't trigger on the exact same bar it was placed if created on this bar
-            if po.created_time == candle.timestamp:
+            # A pending order cannot trigger before it exists.  Equality is valid:
+            # a completed-bar decision time is also the next bar's open time, and
+            # the engine's process-before-create ordering prevents retroactive use
+            # of the decision candle itself.
+            if candle.timestamp < po.created_time:
                 still_pending.append(po)
                 continue
 

@@ -32,7 +32,7 @@ import os
 import threading
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -131,6 +131,7 @@ _learning_mgr: ForexLearningManager | None = None
 _mt5_observer: MT5Observer | None = None
 _forex_runtime = None
 _forex_analysis_threads: set[threading.Thread] = set()
+_forex_cancellations: dict[str, threading.Event] = {}
 
 # These stores are deliberately non-authoritative. Trades, proposals, broker
 # deals, timeline events, lessons, and metrics evidence remain in SQLite.
@@ -174,6 +175,7 @@ def _prune_expired_forex_runs(*, now: float | None = None) -> list[str]:
         for run_id in sorted(expired):
             run = _forex_runs.pop(run_id, None)
             _forex_run_events.pop(run_id, None)
+            _forex_cancellations.pop(run_id, None)
             if run is None:
                 continue
             _expired_forex_runs[run_id] = {
@@ -335,6 +337,15 @@ def reset_forex_state() -> None:
     """Reset all in-memory runs, events, backtests, and dependency singletons."""
     global _journal, _journal_mgr, _analytics_mgr, _metrics_mgr, _learning_mgr, _mt5_observer, _forex_runtime
     with _lock:
+        for cancel_event in _forex_cancellations.values():
+            cancel_event.set()
+        analysis_threads = list(_forex_analysis_threads)
+    # Cooperative workers normally drain immediately.  Keep this wait bounded;
+    # a native/provider call cannot be killed safely and retains its dependencies.
+    for thread in analysis_threads:
+        if thread is not threading.current_thread() and thread.is_alive():
+            thread.join(timeout=0.25)
+    with _lock:
         analysis_running = any(thread.is_alive() for thread in _forex_analysis_threads)
     if analysis_running:
         if _forex_runtime is not None:
@@ -358,6 +369,7 @@ def reset_forex_state() -> None:
         _expired_forex_runs.clear()
         _expired_backtests.clear()
         _forex_analysis_threads.clear()
+        _forex_cancellations.clear()
 
 
 _SETTINGS_KEYS = (
@@ -591,6 +603,7 @@ class ForexBacktestRequest(BaseModel):
         default=None, description="Optional custom OHLCV candle records"
     )
     count: int = Field(default=300, ge=20, le=5000, description="Generated candle count for the synthetic demo")
+    confirm_expensive: bool = Field(default=False)
 
 
 class ForexBacktestEstimateRequest(BaseModel):
@@ -609,7 +622,6 @@ class ForexAblationRequest(ForexBacktestRequest):
     quick_model_b: str | None = Field(default=None, description="Optional second quick model")
     provider_b: str | None = Field(default=None, description="Provider for the optional second model")
     min_sample_size: int = Field(default=30, ge=5)
-    confirm_expensive: bool = Field(default=False)
 
 
 BacktestMode = Literal["DEMO", "HISTORICAL_AGENT_BACKTEST", "WALK_FORWARD", "HISTORICAL_AGENT_ABLATION"]
@@ -713,6 +725,17 @@ def _safe_model_dump(obj: Any) -> Any:
     if isinstance(obj, datetime):
         return obj.isoformat()
     return obj
+
+
+def _forex_cancel_requested(run_id: str) -> bool:
+    """Return cancellation state without exposing the mutable Event."""
+    with _lock:
+        event = _forex_cancellations.get(run_id)
+        run = _forex_runs.get(run_id)
+        return bool(
+            (event is not None and event.is_set())
+            or (run is not None and str(run.get("status", "")).lower() == "cancelled")
+        )
 
 
 def _normalize_proposal_dict(data: dict[str, Any]) -> dict[str, Any]:
@@ -1532,6 +1555,8 @@ def _run_forex_analysis(run_id: str, req: ForexAnalysisRequest) -> None:
     """Execute Forex agent analysis pipeline in a background worker thread."""
     try:
         with _lock:
+            if _forex_cancel_requested(run_id):
+                return
             if run_id in _forex_runs:
                 _forex_runs[run_id]["status"] = "running"
 
@@ -1547,6 +1572,9 @@ def _run_forex_analysis(run_id: str, req: ForexAnalysisRequest) -> None:
             },
         )
 
+        if _forex_cancel_requested(run_id):
+            return
+
         config: dict[str, Any] = {}
         if req.provider:
             config["llm_provider"] = req.provider
@@ -1561,23 +1589,57 @@ def _run_forex_analysis(run_id: str, req: ForexAnalysisRequest) -> None:
         eff_equity = float(req.account_balance)
         eff_currency = getattr(req, "account_currency", "USD") or "USD"
         eff_leverage = 100.0
+        eff_used_margin = 0.0
+        eff_free_margin = getattr(req, "account_free_margin", None)
 
-        if getattr(req, "account_source", "mt5") == "mt5":
-            mt5_obs = get_mt5_observer()
-            if mt5_obs and getattr(mt5_obs, "connection", None) and hasattr(mt5_obs.connection, "is_connected") and mt5_obs.connection.is_connected():
+        requested_source = getattr(req, "account_source", "mt5")
+        source_was_explicit = "account_source" in req.model_fields_set
+        mt5_obs = get_mt5_observer() if requested_source == "mt5" else None
+        mt5_connected = bool(
+            mt5_obs
+            and getattr(mt5_obs, "connection", None)
+            and hasattr(mt5_obs.connection, "is_connected")
+            and mt5_obs.connection.is_connected()
+        )
+        effective_account_source = (
+            "mt5" if requested_source == "mt5" and (source_was_explicit or mt5_connected) else "manual"
+        )
+
+        if effective_account_source == "mt5":
+            if mt5_connected:
                 try:
                     acc = mt5_obs.connection.get_account_info()
-                    if acc and getattr(acc, "balance", None):
+                    if acc and getattr(acc, "balance", None) is not None:
                         eff_balance = float(acc.balance)
-                        eff_equity = float(getattr(acc, "equity", eff_balance) or eff_balance)
+                        eff_equity = float(getattr(acc, "equity", eff_balance))
                         eff_currency = str(getattr(acc, "currency", eff_currency) or eff_currency)
-                        eff_leverage = float(getattr(acc, "leverage", 100.0) or 100.0)
-                except Exception:
-                    pass
+                        eff_leverage = float(getattr(acc, "leverage", 100.0))
+                        margin_value = getattr(acc, "margin", None)
+                        free_value = getattr(acc, "margin_free", None)
+                        eff_used_margin = float(margin_value) if margin_value is not None else 0.0
+                        if free_value is not None:
+                            eff_free_margin = float(free_value)
+                        elif margin_value is not None:
+                            eff_free_margin = max(0.0, eff_equity - eff_used_margin)
+                        else:
+                            raise DataInsufficientError("MT5 free margin is unavailable")
+                    else:
+                        raise DataInsufficientError("MT5 account snapshot is unavailable")
+                except DataInsufficientError:
+                    raise
+                except Exception as exc:
+                    raise DataInsufficientError("MT5 account snapshot is unavailable") from exc
+            else:
+                raise DataInsufficientError("MT5 account is not connected")
+        elif eff_free_margin is None:
+            # Manual account mode assumes no existing margin unless explicitly supplied.
+            eff_free_margin = eff_equity
 
         account = ForexAccountProfile(
             balance=eff_balance,
             equity=eff_equity,
+            free_margin=eff_free_margin,
+            used_margin=eff_used_margin,
             currency=eff_currency,
             leverage=eff_leverage,
         )
@@ -1603,8 +1665,12 @@ def _run_forex_analysis(run_id: str, req: ForexAnalysisRequest) -> None:
             risk_limits=risk_limits,
             sizing_account=account,
             journal=journal,
+            cancellation_check=lambda: _forex_cancel_requested(run_id),
             debug=True,
         )
+
+        if _forex_cancel_requested(run_id):
+            return
 
         seen_stages: set[str] = set()
 
@@ -1617,6 +1683,8 @@ def _run_forex_analysis(run_id: str, req: ForexAnalysisRequest) -> None:
             execution_timeframe=exec_tf,
             context_timeframes=ctx_tfs,
         ):
+            if _forex_cancel_requested(run_id):
+                return
             if not isinstance(chunk, dict):
                 continue
 
@@ -1706,6 +1774,9 @@ def _run_forex_analysis(run_id: str, req: ForexAnalysisRequest) -> None:
                     },
                 )
 
+        if _forex_cancel_requested(run_id):
+            return
+
         final_state = graph.get_state() or {}
         signal = graph.process_signal(final_state)
         proposal = graph.get_last_proposal()
@@ -1718,6 +1789,9 @@ def _run_forex_analysis(run_id: str, req: ForexAnalysisRequest) -> None:
             or not isinstance(risk_decision, ForexRiskDecision)
         ):
             raise RuntimeError("Forex analysis returned incomplete proposal or risk decision evidence")
+
+        if _forex_cancel_requested(run_id):
+            return
 
         report_path = None
         try:
@@ -1760,10 +1834,10 @@ def _run_forex_analysis(run_id: str, req: ForexAnalysisRequest) -> None:
             "context": {
                 "execution_timeframe": exec_tf,
                 "context_timeframes": list(ctx_tfs),
-                "session": final_state.get("market_session") or "Active Market Session",
-                "spread_pips": float(getattr(risk_decision, "spread_pips", None) or 1.5),
-                "volatility_atr": float(getattr(risk_decision, "atr_pips", None) or 45.0),
-                "news_risk": "CLEARED" if getattr(req, "economic_blackout", True) else "UNCHECKED",
+                "session": final_state.get("market_session"),
+                "spread_pips": getattr(risk_decision, "spread_pips", None),
+                "volatility_atr": getattr(risk_decision, "atr_pips", None),
+                "news_risk": final_state.get("news_risk"),
             },
             "research": {
                 "technical": final_state.get("forex_technical_report", ""),
@@ -1776,6 +1850,22 @@ def _run_forex_analysis(run_id: str, req: ForexAnalysisRequest) -> None:
             "memory": {
                 "historical_lessons": applied_lessons,
             },
+            "account_snapshot": {
+                "source": effective_account_source,
+                "balance": account.balance,
+                "equity": account.equity,
+                "free_margin": account.free_margin,
+                "used_margin": account.used_margin,
+                "currency": account.currency,
+                "leverage": account.leverage,
+                "risk_percent": req.risk_percent,
+                "free_margin_assumption": (
+                    "manual_no_existing_margin"
+                    if effective_account_source != "mt5"
+                    and getattr(req, "account_free_margin", None) is None
+                    else None
+                ),
+            },
             "provenance": {
                 "sources": ["Forex Market Feed (OHLCV)", "Economic Calendar", "Central Bank Intelligence"],
                 "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -1783,7 +1873,12 @@ def _run_forex_analysis(run_id: str, req: ForexAnalysisRequest) -> None:
             },
         }
 
+        if _forex_cancel_requested(run_id):
+            return
+
         with _lock:
+            if _forex_cancel_requested(run_id):
+                return
             _forex_completed_reports[run_id] = report_payload
             if report_id:
                 _forex_completed_reports[report_id] = report_payload
@@ -1814,6 +1909,8 @@ def _run_forex_analysis(run_id: str, req: ForexAnalysisRequest) -> None:
     except Exception as exc:
         error_msg = "The Forex analysis provider failed. Please retry."
         with _lock:
+            if _forex_cancel_requested(run_id):
+                return
             if run_id in _forex_runs:
                 _forex_runs[run_id].update(
                     status="failed",
@@ -1897,6 +1994,7 @@ async def start_forex_analysis(
     with _lock:
         _forex_runs[run_id] = run_entry
         _forex_run_events[run_id] = []
+        _forex_cancellations[run_id] = threading.Event()
         _prune_expired_forex_runs()
 
     worker = threading.Thread(
@@ -1941,7 +2039,7 @@ async def list_forex_runs():
 
 @router.post("/runs/{run_id}/cancel")
 async def cancel_forex_run(run_id: str):
-    """Mark a queued or running Forex job as cancelled so browser clients can stop waiting."""
+    """Request cooperative cancellation and make CANCELLED terminal."""
     with _lock:
         if run_id not in _forex_runs:
             _forex_run_not_found(run_id)
@@ -1949,6 +2047,8 @@ async def cancel_forex_run(run_id: str):
         status = str(entry.get("status", "")).lower()
         if status in TERMINAL_STATUSES:
             return {"run_id": run_id, "status": entry.get("status", "cancelled")}
+        cancel_event = _forex_cancellations.setdefault(run_id, threading.Event())
+        cancel_event.set()
         entry.update(
             status="cancelled",
             finished_at=datetime.now(timezone.utc).isoformat(),
@@ -2063,14 +2163,40 @@ async def estimate_backtest_costs(
     request: Request,
 ):
     """Estimate expected AI invocations and token usage before launching an agent backtest."""
+    structure: dict[str, int] | None = None
+    total_bars = req.count
+    sampling_interval = req.sampling_interval
+    max_points = req.max_analysis_points
+    if req.workflow == "WALK_FORWARD" and req.count >= 10:
+        start = datetime(2000, 1, 1, tzinfo=timezone.utc)
+        synthetic = [
+            ForexBar(
+                timestamp=start + timedelta(hours=index),
+                open=1.0,
+                high=1.0,
+                low=1.0,
+                close=1.0,
+                volume=0.0,
+            )
+            for index in range(req.count)
+        ]
+        structure = ForexWalkForwardValidator().estimate_analysis_structure(
+            synthetic,
+            n_splits=req.n_splits,
+            sampling_interval=req.sampling_interval,
+            max_analysis_points=req.max_analysis_points,
+        )
+        total_bars = structure["expected_analyses_count"]
+        sampling_interval = 1
+        max_points = None
     estimate = estimate_agent_analyses(
-        total_bars=req.count,
-        sampling_interval=req.sampling_interval,
-        max_analysis_points=req.max_analysis_points,
+        total_bars=total_bars,
+        sampling_interval=sampling_interval,
+        max_analysis_points=max_points,
         analyst_count=req.analyst_count,
     )
     result = estimate.to_dict()
-    multiplier = req.n_splits * 3 if req.workflow == "WALK_FORWARD" else 1
+    multiplier = 1
     if req.workflow == "ABLATION":
         multiplier = req.variant_count
     result["workflow"] = req.workflow
@@ -2080,6 +2206,8 @@ async def estimate_backtest_costs(
             result[key] *= multiplier
     if "estimated_cost_usd" in result:
         result["estimated_cost_usd"] = round(result["estimated_cost_usd"] * multiplier, 4)
+    if structure is not None:
+        result.update(structure)
     return result
 
 
@@ -2140,25 +2268,60 @@ async def run_backtest(
                 research_depth=req.research_depth,
                 backtest_config=bt_cfg,
             )
-
-            def graph_f():
-                return ForexTradingAgentsGraph(
-                    config={
-                        "llm_provider": agent_cfg.provider,
-                        "quick_think_llm": agent_cfg.quick_model,
-                        "deep_think_llm": agent_cfg.deep_model,
-                        "max_tokens": agent_cfg.token_limits,
-                        "max_debate_rounds": 3 if agent_cfg.research_depth == "deep" else 1,
-                        "historical_backtest": True,
+            estimate = estimate_agent_analyses(
+                total_bars=len(candle_objs),
+                sampling_interval=req.sampling_interval,
+                max_analysis_points=req.max_analysis_points,
+                analyst_count=len(agent_cfg.analyst_selection),
+            ).to_dict()
+            estimate["cost_kind"] = "ESTIMATE"
+            if estimate["estimated_cost_usd"] >= 1.0 and not req.confirm_expensive:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "COST_CONFIRMATION_REQUIRED",
+                        "message": "Explicit confirmation is required for this historical backtest estimate.",
+                        "estimate": estimate,
                     },
-                    selected_analysts=agent_cfg.analyst_selection,
-                    auto_record_trades=False,
                 )
-
-            agent_backtester = HistoricalForexAgentBacktester(config=agent_cfg, graph_factory=graph_f)
-            report = agent_backtester.run(candles=candle_objs, market_data_provenance=provenance)
+            pipeline_callable = create_historical_forex_pipeline(
+                HistoricalForexPipelineConfig(
+                    pair=norm_pair,
+                    timeframe=req.timeframe,
+                    analyst_selection=agent_cfg.analyst_selection,
+                    provider=agent_cfg.provider,
+                    quick_model=agent_cfg.quick_model,
+                    deep_model=agent_cfg.deep_model,
+                    research_depth=agent_cfg.research_depth,
+                    token_limits=agent_cfg.token_limits,
+                ),
+                provenance,
+                graph_factory=lambda pipeline_config, account_snapshot, memory_source: ForexTradingAgentsGraph(
+                    config={
+                        "llm_provider": pipeline_config.provider,
+                        "quick_think_llm": pipeline_config.quick_model,
+                        "deep_think_llm": pipeline_config.deep_model,
+                        "max_tokens": pipeline_config.token_limits,
+                        "max_debate_rounds": 3 if pipeline_config.research_depth == "deep" else 1,
+                        "historical_backtest": True,
+                        "historical_memory_enabled": pipeline_config.memory_enabled,
+                    },
+                    selected_analysts=pipeline_config.analyst_selection,
+                    sizing_account=account_snapshot,
+                    learning_manager=memory_source,
+                    auto_record_trades=False,
+                ),
+                memory_source=get_learning_manager(),
+            )
+            agent_backtester = HistoricalForexAgentBacktester(config=agent_cfg)
+            report = agent_backtester.run(
+                candles=candle_objs,
+                agent_pipeline_callable=pipeline_callable,
+                market_data_provenance=provenance,
+            )
             backtest_id = report.backtest_id
             report_dict = _safe_model_dump(report.to_dict())
+            report_dict["estimate"] = estimate
 
             backtest_entry = {
                 **report_dict,
@@ -2401,6 +2564,28 @@ async def run_walk_forward(
             },
             strict_oos_guard=True,
         )
+        structure = validator.estimate_analysis_structure(
+            candle_objs,
+            n_splits=n_splits,
+            sampling_interval=req.sampling_interval,
+            max_analysis_points=req.max_analysis_points,
+        )
+        estimate = estimate_agent_analyses(
+            total_bars=structure["expected_analyses_count"],
+            sampling_interval=1,
+            analyst_count=len(req.analyst_selection or ["technical", "macro", "news"]),
+        ).to_dict()
+        estimate.update(structure)
+        estimate["cost_kind"] = "ESTIMATE"
+        if estimate["estimated_cost_usd"] >= 1.0 and not req.confirm_expensive:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "COST_CONFIRMATION_REQUIRED",
+                    "message": "Explicit confirmation is required for this walk-forward estimate.",
+                    "estimate": estimate,
+                },
+            )
         if req.demo_mode:
             # Explicit demo runs still execute a callable; they do not masquerade as
             # the historical graph because their candles have no verified provenance.
@@ -2419,6 +2604,7 @@ async def run_walk_forward(
                     token_limits=req.token_limits,
                 ),
                 provenance,
+                memory_source=get_learning_manager(),
             )
         report = validator.validate(
             candles=candle_objs,
@@ -2445,6 +2631,7 @@ async def run_walk_forward(
 
         val_id = report.validation_id
         report_dict = _safe_model_dump(report.to_dict())
+        report_dict["estimate"] = estimate
         # Store a summary into _backtest_runs for UI listing
         backtest_entry = {
             "backtest_id": val_id,
@@ -2564,6 +2751,7 @@ async def run_historical_agent_ablation(req: ForexAblationRequest):
                     memory_enabled=variant.enable_memory,
                 ),
                 provenance,
+                memory_source=get_learning_manager(),
             )
 
         report = ForexAblationRunner(
@@ -2628,6 +2816,7 @@ async def get_backtest(backtest_id: str):
 
 @router.get("/dashboard/overview")
 async def get_dashboard_overview(
+    pair: str = "EURUSD",
     journal: ForexTradeJournal = Depends(get_journal),
     mt5: MT5Observer = Depends(get_mt5_observer),
     learning_mgr: ForexLearningManager = Depends(get_learning_manager),
@@ -2642,6 +2831,7 @@ async def get_dashboard_overview(
     - Research pipeline state: recent analyses and institutional lessons
     - Performance summary: expectancy, profit factor, average R, max drawdown, with small sample warning.
     """
+    norm_pair = normalize_forex_pair(pair)
     conn = mt5.connection
     is_conn = conn.is_connected() if hasattr(conn, "is_connected") else False
     status_str = conn.get_status().value if hasattr(conn, "get_status") else ("CONNECTED" if is_conn else "DISCONNECTED")
@@ -2711,7 +2901,7 @@ async def get_dashboard_overview(
     try:
         from tradingagents.forex.calendar import EventImpact, get_calendar_events_for_pair
         today_events = get_calendar_events_for_pair(
-            symbol="EURUSD",
+            symbol=norm_pair,
             curr_date=today_str,
             min_impact=EventImpact.HIGH,
         )
@@ -2759,6 +2949,7 @@ async def get_dashboard_overview(
     }
 
     return {
+        "pair": norm_pair,
         "mt5": {
             "connection_status": status_str,
             "is_connected": is_conn,

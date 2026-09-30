@@ -27,11 +27,11 @@ The current workspace was verified with the repository's supported Windows virtu
 D:\TradingAgents\.venv\Scripts\python.exe -m pytest -q -m "not e2e"
 ```
 
-Result on 2026-09-30: `2096 passed, 5 skipped, 5 deselected, 0 failed, 20 warnings,
-88 subtests passed`. Local Chromium E2E also passed (`5 passed`). GitHub Actions
-run [36664347641](https://github.com/Zubair815/TradingAgents/actions/runs/36664347641)
-is green for base commit `53bdf53160d70dd6797c73d96b166cbba00a0185`
-(`Version1.7`) on Python 3.10, 3.11, 3.12, and 3.13, including Ruff,
+Result on 2026-09-30: `2109 passed, 5 skipped, 6 deselected, 0 failed, 20 warnings,
+88 subtests passed`. Local Chromium E2E also passed (`6 passed`). GitHub Actions
+run [36667732822](https://github.com/Zubair815/TradingAgents/actions/runs/36667732822)
+is green for base commit `18cdbea0806eb631911dd332a5f0211c45a65d92`
+(`Version1.8`) on Python 3.10, 3.11, 3.12, and 3.13, including Ruff,
 clean-install, and Chromium E2E jobs. The final working-tree polish is uncommitted,
 so its GitHub CI remains pending until commit and push.
 
@@ -54,6 +54,14 @@ of profitable or statistically validated trading performance. See
 [FINAL_REPORT.md](FINAL_REPORT.md) for the feature matrix and evidence, and
 [the XM Demo checklist](docs/XM_MT5_DEMO_ACCEPTANCE.md) for the remaining manual
 acceptance gate.
+
+Historical decisions use completed-bar close-time execution, pending orders only
+become eligible on a later simulation step, and walk-forward periods receive only
+real pre-period bars as warm-up context. Historical risk sizing uses the evolving
+simulated balance, equity, free margin, currency, and leverage. Live MT5 sizing
+uses the observed `margin_free` value (or a validated equity-minus-margin
+derivation) and rejects unavailable account truth rather than substituting a
+plausible default.
 
 ## News
 - [2026-09] **Interactive Web Dashboard**: Added a modern browser-based UI and FastAPI backend with real-time SSE progress streaming across all 13 pipeline nodes, interactive multi-section reports, secure browser session auth with optional API key protection, and unified history deduplication.

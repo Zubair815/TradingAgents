@@ -21,6 +21,7 @@ from tradingagents.agents.schemas_forex import (
     ForexTraderProposal,
     OrderType,
 )
+from tradingagents.backtest.forex_engine import ForexBacktestConfig
 from tradingagents.backtest.walk_forward import (
     EvaluationPeriodType,
     ForexWalkForwardValidator,
@@ -352,3 +353,99 @@ class TestFullValidation:
         )
         assert isinstance(report, WalkForwardValidationReport)
         assert call_count > 0  # Agent was invoked
+
+
+@pytest.mark.parametrize(
+    ("order_type", "entry_price"),
+    [
+        (OrderType.MARKET, None),
+        (OrderType.BUY_LIMIT, 1.1050),
+        (OrderType.BUY_STOP, 1.1160),
+    ],
+)
+def test_completed_bar_decision_never_executes_retroactively(order_type, entry_price):
+    """Close-known OHLC cannot produce an earlier same-bar fill."""
+    start = datetime(2025, 1, 1, 9, tzinfo=timezone.utc)
+    decision_bar = ForexBar(
+        timestamp=start,
+        close_time=start + timedelta(hours=1),
+        open=1.1000,
+        high=1.1200,
+        low=1.0990,
+        close=1.1150,
+        volume=100,
+        is_closed=True,
+    )
+    next_bar = ForexBar(
+        timestamp=start + timedelta(hours=1),
+        close_time=start + timedelta(hours=2),
+        open=1.1150,
+        high=1.1180,
+        low=1.1040,
+        close=1.1170,
+        volume=100,
+        is_closed=True,
+    )
+    seen = []
+
+    def agent(pair, cutoff, history):
+        seen.append((cutoff, max(bar.close_time or bar.timestamp for bar in history)))
+        return ForexTraderProposal(
+            pair=pair,
+            action=ForexAction.LONG,
+            order_type=order_type,
+            entry_price=entry_price,
+            stop_loss=1.0900,
+            take_profit_1=1.1300,
+            suggested_lot_size=0.01,
+            reasoning="Causality regression",
+        )
+
+    report = ForexWalkForwardValidator(config_snapshot={"max_analysis_points": 1}).run_period_backtest(
+        [decision_bar, next_bar],
+        PeriodWindow(EvaluationPeriodType.OUT_OF_SAMPLE, start, next_bar.timestamp),
+        backtest_config=ForexBacktestConfig(
+            default_spread_pips=0,
+            default_slippage_pips=0,
+            commission_per_lot_usd=0,
+        ),
+        agent_pipeline_callable=agent,
+    )
+
+    assert all(last_information <= decision for decision, last_information in seen)
+    assert report.result.trades
+    trade = report.result.trades[0]
+    decision_time = decision_bar.close_time
+    assert trade.entry_time >= decision_time
+    if order_type == OrderType.MARKET:
+        assert trade.entry_price == decision_bar.close
+    else:
+        assert trade.entry_time == next_bar.timestamp
+
+
+def test_period_warmup_is_context_only_and_never_traded():
+    start = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    bars = [
+        ForexBar(
+            timestamp=start + timedelta(hours=index),
+            close_time=start + timedelta(hours=index + 1),
+            open=1.1,
+            high=1.11,
+            low=1.09,
+            close=1.1,
+            is_closed=True,
+        )
+        for index in range(4)
+    ]
+    histories = []
+
+    def no_trade(_pair, _cutoff, history):
+        histories.append(list(history))
+        return None
+
+    ForexWalkForwardValidator(config_snapshot={"max_analysis_points": 1}).run_period_backtest(
+        bars,
+        PeriodWindow(EvaluationPeriodType.OUT_OF_SAMPLE, bars[2].timestamp, bars[3].timestamp),
+        agent_pipeline_callable=no_trade,
+    )
+    assert [bar.timestamp for bar in histories[0]] == [bar.timestamp for bar in bars[:3]]

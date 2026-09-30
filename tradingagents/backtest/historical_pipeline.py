@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from inspect import signature
 from typing import Any
 
 from tradingagents.agents.schemas_forex import (
@@ -19,6 +20,7 @@ from tradingagents.dataflows.forex_data import ForexBar
 from tradingagents.dataflows.trading_economics import TradingEconomicsCalendar
 from tradingagents.forex import ForexTradingAgentsGraph
 from tradingagents.forex.domain import normalize_forex_pair
+from tradingagents.risk.sizing import ForexAccountProfile
 
 
 @dataclass(frozen=True)
@@ -42,6 +44,7 @@ def create_historical_forex_pipeline(
     provenance: dict[str, Any],
     *,
     graph_factory: Callable[..., Any] | None = None,
+    memory_source: Any = None,
 ) -> Callable[[str, datetime, list[ForexBar]], ForexTraderProposal | None]:
     """Create the real graph callback shared by historical validation workflows.
 
@@ -49,6 +52,12 @@ def create_historical_forex_pipeline(
     It never executes against a broker and rejects pair-changing graph output.
     """
     expected_pair = normalize_forex_pair(config.pair)
+    account_snapshot: ForexAccountProfile | None = None
+    audit_metadata: dict[str, Any] = {"applied_lesson_ids": []}
+
+    def set_account_snapshot(snapshot: ForexAccountProfile) -> None:
+        nonlocal account_snapshot
+        account_snapshot = snapshot.model_copy(deep=True)
 
     def pipeline(pair: str, cutoff: datetime, pit_candles: list[ForexBar]):
         canonical_pair = normalize_forex_pair(pair)
@@ -66,10 +75,15 @@ def create_historical_forex_pipeline(
                 (cutoff + timedelta(days=7)).date().isoformat(),
                 as_of=cutoff,
             )
-            graph = (
-                graph_factory(config)
-                if graph_factory is not None
-                else ForexTradingAgentsGraph(
+            if graph_factory is not None:
+                parameter_count = len(signature(graph_factory).parameters)
+                graph = (
+                    graph_factory(config, account_snapshot, memory_source)
+                    if parameter_count >= 3
+                    else graph_factory(config)
+                )
+            else:
+                graph = ForexTradingAgentsGraph(
                     config={
                         "llm_provider": config.provider,
                         "quick_think_llm": config.quick_model,
@@ -81,14 +95,18 @@ def create_historical_forex_pipeline(
                         "historical_memory_enabled": config.memory_enabled,
                     },
                     selected_analysts=config.analyst_selection,
+                    sizing_account=account_snapshot,
+                    learning_manager=memory_source,
                     auto_record_trades=False,
                 )
-            )
             final_state, _signal = graph.run(
                 pair=canonical_pair,
                 trade_date=cutoff.isoformat(),
                 execution_timeframe=config.timeframe,
             )
+
+        audit_metadata["applied_lesson_ids"] = list(final_state.get("applied_lesson_ids") or [])
+        audit_metadata["decision_cutoff"] = cutoff.isoformat()
 
         raw_proposal = final_state.get("forex_proposal")
         if raw_proposal is None:
@@ -123,4 +141,6 @@ def create_historical_forex_pipeline(
         return proposal.model_copy(update=updates)
 
     pipeline.historical_pipeline_config = config  # type: ignore[attr-defined]
+    pipeline.set_account_snapshot = set_account_snapshot  # type: ignore[attr-defined]
+    pipeline.audit_metadata = audit_metadata  # type: ignore[attr-defined]
     return pipeline
