@@ -265,8 +265,8 @@ manual trade lifecycle, costs, learning and non-empty restart checks are complet
 
 ## Phase 6 - Final Release Verification
 
-Status: local engineering gates complete in the current working tree; commit,
-GitHub CI, and the manual XM trade lifecycle remain pending.
+Status: engineering implementation, local gates, commit, push, and GitHub CI are
+complete. The manual XM trade lifecycle remains pending.
 
 ### Implemented and verified
 
@@ -288,7 +288,7 @@ GitHub CI, and the manual XM trade lifecycle remain pending.
 - Full non-browser suite: 2,193 passed, 5 skipped, 22 warnings, 88 subtests.
 - Chromium E2E: 6 passed.
 - Ruff, Python compilation, JavaScript syntax, and `git diff --check`: passed.
-- GitHub CI: pending commit and push of the Phase 6 patch.
+- GitHub CI: all seven jobs passed on implementation commit `27a1591`.
 
 ### Acceptance boundary
 

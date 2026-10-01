@@ -1,8 +1,8 @@
 # TradingAgents Forex remediation final verification report
 
 - Verification date: 2026-10-02
-- Base HEAD: `9267df1222a357a068493a83e661edb1ac231bda` (`Version 2.4`)
-- Phase 6 status: verified working-tree changes; commit and GitHub CI pending
+- Phase 6 implementation commit: `27a1591ed5009dda48855588c70ae2ec2939385c`
+- Phase 6 status: committed, pushed, and verified by local and GitHub CI gates
 - Release status: **READY FOR XM DEMO ACCEPTANCE; NOT XM DEMO ACCEPTED**
 
 This status means the automated engineering gates pass. It is not a trading
@@ -64,10 +64,9 @@ There is no automated Forex broker-order submission path.
 | JavaScript syntax checks | PASS |
 | `git diff --check` | PASS |
 | Fresh local Python 3.12 install and package/CLI import | PASS |
-| GitHub checks for Phase 6 patch | PENDING — changes are not committed or pushed |
+| GitHub checks for Phase 6 patch | PASS — all 7 jobs on `27a1591` |
 
-No GitHub Actions result is available for the uncommitted remediation worktree;
-current-worktree CI remains pending commit and push. The five local skips are
+The five local skips are
 three POSIX-mode checks on Windows, optional Bedrock without `langchain_aws`, and
 an optional live DeepSeek call without credentials. No mandatory browser test
 was skipped.
@@ -119,7 +118,7 @@ an implemented path whose real-world or statistical acceptance remains limited.
 | Learning UI | COMPLETE | Lesson filters, evidence, rule text, and source-trade navigation are E2E tested. |
 | Settings | COMPLETE | Safe allowlisted persistence/reset, secret status, and reload behavior are E2E tested. |
 | Authentication | COMPLETE | Protected Forex router, in-memory key, HttpOnly cookie, strict origin/cookie policy, and sanitized errors are tested. |
-| E2E | COMPLETE | Six mandatory real-Chromium workflows pass locally; current-worktree GitHub Actions remains pending commit and push. |
+| E2E | COMPLETE | Six mandatory real-Chromium workflows pass locally and the GitHub browser job passes. |
 | Runtime retention | COMPLETE | Age/count bounds, event caps, locks, tombstones, SSE exit, and journal preservation are stress tested. |
 | Documentation | COMPLETE | README, this report, phase evidence, and XM checklist reflect the verified Phase 6 working tree. |
 
@@ -185,9 +184,9 @@ and non-empty restart persistence remain unchecked in
 
 ## Release truth
 
-All repository-local automated engineering gates pass for the Phase 6 working
-tree. GitHub CI must run after these changes are committed and pushed. The
-remaining environment gate is the explicitly manual XM demo trade lifecycle.
+All repository-local automated engineering gates and all seven GitHub CI jobs
+pass for the Phase 6 implementation. The remaining environment gate is the
+explicitly manual XM demo trade lifecycle.
 The objective local classification is therefore:
 
 **READY FOR XM DEMO ACCEPTANCE**

@@ -10,7 +10,7 @@ Record the date, commit, MT5 build, XM demo server, tester, and evidence links
 before marking any item complete. Never record a password or API key.
 
 - [x] 1. Launch XM MT5 and log into the demo account.
-- [ ] 2. Start the TradingAgents dashboard from the audited commit.
+- [x] 2. Start the TradingAgents dashboard from the audited implementation.
 - [x] 3. Connect the read-only MT5 integration.
 - [x] 4. Confirm masked account and server status are correct.
 - [x] 5. Confirm open positions, pending orders, and deals are visible.
@@ -50,7 +50,7 @@ Host, restart, resource, and sanitized failure evidence is recorded in
 
 The original IPC blocker was resolved on 2026-10-02 by selecting the XM-specific
 terminal executable. Items 1, 3, 4 and 5 are now supported by sanitized live
-evidence. Item 2 remains unchecked until the final Phase 6 patch is committed,
-and items 6-25 still require the manual acceptance workflow.
+evidence. The tested Phase 6 implementation is now committed and passed all
+seven GitHub CI jobs; items 6-25 still require the manual acceptance workflow.
 
 Acceptance result remains: **NOT XM DEMO ACCEPTED**.
