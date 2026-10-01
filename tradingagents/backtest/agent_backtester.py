@@ -42,6 +42,11 @@ from tradingagents.database.journal import ForexTradeJournal
 from tradingagents.database.models import TradeExitReason
 from tradingagents.dataflows.forex_context import historical_market_scope
 from tradingagents.dataflows.forex_data import ForexBar
+from tradingagents.forex.conversion import (
+    ForexConversionRate,
+    FXConversionUnavailable,
+    resolve_conversion_rate,
+)
 from tradingagents.forex.domain import Timeframe, normalize_forex_pair
 
 logger = logging.getLogger(__name__)
@@ -72,6 +77,8 @@ class AgentBacktestConfig:
     token_limits: int | None = None
     research_depth: str = "standard"
     backtest_config: ForexBacktestConfig = field(default_factory=ForexBacktestConfig)
+    conversion_rates: tuple[ForexConversionRate, ...] = ()
+    max_conversion_age: timedelta | None = None
 
 
 @dataclass
@@ -215,6 +222,23 @@ class HistoricalForexAgentBacktester:
             analyst_count=len(self.config.analyst_selection),
         )
 
+    def _require_historical_quote_conversion(self, pair: str, cutoff: datetime) -> None:
+        quote_currency = pair[3:6]
+        account_currency = self.config.backtest_config.account_currency.upper()
+        try:
+            resolve_conversion_rate(
+                quote_currency,
+                account_currency,
+                self.config.conversion_rates,
+                as_of_utc=cutoff,
+                max_age=self.config.max_conversion_age,
+            )
+        except FXConversionUnavailable as exc:
+            raise HistoricalDataUnavailable(
+                f"historical conversion {quote_currency}->{account_currency} "
+                f"is unavailable at {cutoff.isoformat()}"
+            ) from exc
+
     def run(
         self,
         candles: Sequence[ForexBar],
@@ -276,7 +300,12 @@ class HistoricalForexAgentBacktester:
         else:
             analysis_indices = set(candidate_indices)
 
-        engine = ForexBacktestEngine(config=self.config.backtest_config, journal=self.journal)
+        engine = ForexBacktestEngine(
+            config=self.config.backtest_config,
+            journal=self.journal,
+            conversion_rates=self.config.conversion_rates,
+            max_conversion_age=self.config.max_conversion_age,
+        )
         engine.reset()
 
         analyses_performed = 0
@@ -306,6 +335,18 @@ class HistoricalForexAgentBacktester:
                     snapshot_setter = getattr(agent_pipeline_callable, "set_account_snapshot", None)
                     if callable(snapshot_setter):
                         snapshot_setter(engine.account_snapshot())
+                    context_setter = getattr(agent_pipeline_callable, "set_deterministic_snapshot", None)
+                    if callable(context_setter):
+                        context_setter(
+                            engine.account_snapshot(),
+                            engine.open_position_snapshot(cutoff),
+                            tuple(
+                                rate
+                                for rate in self.config.conversion_rates
+                                if rate.observed_at is not None and rate.observed_at <= cutoff
+                            ),
+                            cutoff,
+                        )
                     if historical:
                         with historical_market_scope(pair, candle_frame(pit_candles, provenance), cutoff):
                             proposal = agent_pipeline_callable(pair, cutoff, pit_candles)
@@ -361,9 +402,13 @@ class HistoricalForexAgentBacktester:
                         action_str = str(action_val)
 
                     if action_str == "APPROVE":
+                        if historical and proposal.action != ForexAction.NO_TRADE:
+                            self._require_historical_quote_conversion(pair, cutoff)
                         proposals_approved += 1
                         new_proposals.append(proposal)
                     elif action_str == "MODIFY":
+                        if historical and proposal.action != ForexAction.NO_TRADE:
+                            self._require_historical_quote_conversion(pair, cutoff)
                         proposals_modified += 1
                         new_proposals.append(proposal)
                     elif action_str == "REJECT":

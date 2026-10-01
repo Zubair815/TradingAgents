@@ -29,6 +29,8 @@ from tradingagents.agents.schemas_forex import (
 )
 from tradingagents.database.journal import ForexTradeJournal
 from tradingagents.dataflows import config as config_module
+from tradingagents.forex.conversion import AvailabilityStatus, ForexConversionRate
+from tradingagents.graph.forex_graph import create_forex_risk_evaluator
 from tradingagents.journal.manager import ForexJournalManager
 from tradingagents.mt5.errors import MT5DataError
 from tradingagents.mt5.models import (
@@ -39,7 +41,13 @@ from tradingagents.mt5.models import (
     MT5Tick,
 )
 from tradingagents.mt5.observer import MT5Observer
-from tradingagents.risk.sizing import PositionSizingMethod, PositionSizingResult
+from tradingagents.risk.engine import ForexRiskLimits
+from tradingagents.risk.sizing import (
+    ForexAccountProfile,
+    OpenPosition,
+    PositionSizingMethod,
+    PositionSizingResult,
+)
 from web.forex_routes import (
     ForexAnalysisRequest,
     _forex_completed_reports,
@@ -595,6 +603,7 @@ class TestProposalRoutes:
                 "suggested_risk_percent": 1.0,
             },
             "account_balance": 100000.0,
+            "account_currency": "USD",
             "spread_pips": 1.2,
             "current_time": "2026-09-22T10:00:00+00:00",  # Mid-week London session (calendar clear)
         }
@@ -605,6 +614,8 @@ class TestProposalRoutes:
         assert data["is_approved"] is False
         assert "DATA_INSUFFICIENT" in str(data)
         assert data["action"] == "REJECT"
+        assert data["evaluation_kind"] == "MANUAL_RISK_EVALUATION"
+        assert data["broker_verified"] is False
 
     def test_position_sizing_endpoint(self, client):
         sizing_payload = {
@@ -620,16 +631,74 @@ class TestProposalRoutes:
             },
             "method": "FIXED_RISK_PERCENT",
             "account_balance": 100000.0,
+            "account_equity": 100000.0,
+            "account_free_margin": 100000.0,
+            "account_currency": "USD",
             "risk_percent": 1.0,  # $1,000 risk
             "leverage": 100.0,
         }
         res = client.post("/api/forex/proposals/size", json=sizing_payload)
         assert res.status_code == 200
         sizing = res.json()["sizing"]
+        assert res.json()["sizing_kind"] == "MANUAL_ESTIMATE"
+        assert res.json()["broker_verified"] is False
+        assert res.json()["broker_constraints_source"] == "STANDARD_FX_ESTIMATE"
+        assert any("Standard FX estimate constraints" in item for item in res.json()["assumptions"])
         assert sizing["is_executable"] is True
         assert sizing["lots"] > 0
         assert sizing["margin_required"] > 0
         assert pytest.approx(sizing["risk_amount"], abs=5.0) == 1000.0
+
+    def test_position_sizing_requires_complete_manual_account_data(self, client):
+        res = client.post(
+            "/api/forex/proposals/size",
+            json={
+                "proposal": {
+                    "pair": "EURUSD",
+                    "action": "LONG",
+                    "entry_price": 1.0850,
+                    "stop_loss": 1.0820,
+                },
+                "account_balance": 100000.0,
+            },
+        )
+        assert res.status_code == 422
+
+    def test_position_sizing_preserves_known_zero_free_margin(self, client):
+        res = client.post(
+            "/api/forex/proposals/size",
+            json={
+                "proposal": {
+                    "pair": "EURUSD",
+                    "action": "LONG",
+                    "entry_price": 1.0850,
+                    "stop_loss": 1.0820,
+                },
+                "account_balance": 100000.0,
+                "account_equity": 90000.0,
+                "account_free_margin": 0.0,
+                "account_currency": "USD",
+                "leverage": 100.0,
+            },
+        )
+        assert res.status_code == 200
+        data = res.json()
+        assert data["sizing_kind"] == "MANUAL_ESTIMATE"
+        assert data["sizing"]["is_executable"] is False
+
+    def test_position_sizing_rejects_negative_free_margin(self, client):
+        res = client.post(
+            "/api/forex/proposals/size",
+            json={
+                "proposal": {"pair": "EURUSD", "action": "NO_TRADE"},
+                "account_balance": 100000.0,
+                "account_equity": 100000.0,
+                "account_free_margin": -1.0,
+                "account_currency": "USD",
+                "leverage": 100.0,
+            },
+        )
+        assert res.status_code == 422
 
 
 # ---------------------------------------------------------------------------
@@ -900,7 +969,18 @@ class TestForexAnalysisRuns:
             graph.get_last_risk_decision.return_value = None if missing == "risk" else decision
             graph.get_last_sizing_result.return_value = None
             graph.process_signal.return_value = "NO_TRADE"
-            _run_forex_analysis(run_id, ForexAnalysisRequest(pair="EURUSD"))
+            _run_forex_analysis(
+                run_id,
+                ForexAnalysisRequest(
+                    pair="EURUSD",
+                    account_source="manual",
+                    account_balance=100000,
+                    account_equity=100000,
+                    account_free_margin=100000,
+                    account_leverage=100,
+                    account_currency="USD",
+                ),
+            )
             graph.save_reports.assert_not_called()
         assert _forex_runs[run_id]["status"] == "failed"
         assert _forex_runs[run_id]["signal"] is None
@@ -926,7 +1006,18 @@ class TestForexAnalysisRuns:
             graph.get_last_sizing_result.return_value = None
             graph.process_signal.return_value = "NO_TRADE"
             graph.save_reports.return_value = None
-            _run_forex_analysis(run_id, ForexAnalysisRequest(pair="EURUSD"))
+            _run_forex_analysis(
+                run_id,
+                ForexAnalysisRequest(
+                    pair="EURUSD",
+                    account_source="manual",
+                    account_balance=100000,
+                    account_equity=100000,
+                    account_free_margin=100000,
+                    account_leverage=100,
+                    account_currency="USD",
+                ),
+            )
         assert _forex_runs[run_id]["status"] == "completed"
         assert _forex_completed_reports[run_id]["proposal_id"] is None
         assert _forex_runs[run_id]["proposal_id"] != unrelated
@@ -969,6 +1060,36 @@ class TestForexAnalysisRuns:
         assert run_detail["run_id"] == run_id
         assert run_detail["pair"] == "EURUSD"
         assert run_detail["asset_type"] == "forex"
+
+    def test_analysis_rejects_invalid_account_source(self, client):
+        res = client.post(
+            "/api/forex/analyze",
+            json={"pair": "EURUSD", "account_source": "paper"},
+        )
+        assert res.status_code == 422
+
+    def test_manual_analysis_requires_complete_account_data(self, client):
+        res = client.post(
+            "/api/forex/analyze",
+            json={
+                "pair": "EURUSD",
+                "account_source": "manual",
+                "account_balance": 100000.0,
+            },
+        )
+        assert res.status_code == 422
+
+    def test_manual_analysis_accepts_explicit_zero_free_margin(self):
+        request = ForexAnalysisRequest(
+            pair="EURUSD",
+            account_source="manual",
+            account_balance=100000.0,
+            account_equity=90000.0,
+            account_free_margin=0.0,
+            account_leverage=50.0,
+            account_currency="USD",
+        )
+        assert request.account_free_margin == 0.0
 
     def test_canonical_routes_and_compatibility_aliases(self, client):
         """Verify canonical endpoints /runs/{id}, /events and compatibility aliases."""
@@ -1055,6 +1176,10 @@ class TestForexAnalysisRuns:
             "risk_percent": 1.5,
             "research_depth": "comprehensive",
             "account_source": "manual",
+            "account_equity": 149000.0,
+            "account_free_margin": 125000.0,
+            "account_leverage": 50.0,
+            "account_currency": "USD",
             "min_rr": 2.0,
             "max_spread_pips": 1.8,
             "economic_blackout": False,
@@ -1086,6 +1211,51 @@ class TestForexAnalysisRuns:
         mock_acc.currency = "USD"
         mock_acc.leverage = 100
         mock_conn.get_account_info.return_value = mock_acc
+        observed_at = datetime.now(timezone.utc)
+        mock_observer.to_sizing_account_profile.return_value = ForexAccountProfile(
+            balance=87654.0,
+            equity=87900.0,
+            used_margin=150.0,
+            free_margin=87750.0,
+            currency="USD",
+            leverage=100.0,
+            margin_call_level=85.0,
+            stop_out_level=40.0,
+        )
+        mock_observer.get_current_tick.return_value = MT5Tick(
+            time=observed_at,
+            bid=1.0843,
+            ask=1.0850,
+            spread_pips=7.0,
+            source="MT5",
+            broker_symbol="EURUSD.raw",
+        )
+        mock_observer.to_broker_constraints.return_value = MT5SymbolInfo(
+            name="EURUSD.raw",
+            canonical_symbol="EURUSD",
+            digits=5,
+            point=0.00001,
+            pip_size=0.0001,
+            volume_min=0.03,
+            volume_max=17.0,
+            volume_step=0.03,
+            contract_size=1000.0,
+        ).to_broker_constraints()
+        mock_observer.get_atr_pips.return_value = 20.0
+        mock_observer.get_conversion_observations.return_value = ()
+        day_start = observed_at.replace(hour=0, minute=0, second=0, microsecond=0)
+        mock_observer.get_daily_realized_pnl.return_value = (-100.0, day_start)
+        mock_observer.to_open_positions.return_value = [
+            OpenPosition(
+                position_id="live-1",
+                pair="GBPUSD",
+                action=ForexAction.SHORT,
+                lots=0.3,
+                entry_price=1.25,
+                stop_loss=1.26,
+                risk_amount=300.0,
+            )
+        ]
 
         run_id = "fx_phase26_worker_test"
         _forex_runs[run_id] = {"status": "queued", "signal": None}
@@ -1102,6 +1272,7 @@ class TestForexAnalysisRuns:
             max_spread_pips=1.9,
             economic_blackout=True,
             research_depth="comprehensive",
+            max_daily_loss_percent=2.0,
         )
 
         proposal = ForexTraderProposal(pair="EURUSD", action=ForexAction.NO_TRADE, reasoning="No setup")
@@ -1128,10 +1299,186 @@ class TestForexAnalysisRuns:
             assert call_kwargs["sizing_account"].equity == 87900.0
             assert call_kwargs["sizing_account"].used_margin == 150.0
             assert call_kwargs["sizing_account"].free_margin == 87750.0
+            context = call_kwargs["risk_context"]
+            assert graph.stream.call_args.kwargs["trade_date"] == context.as_of_utc.isoformat()
+            assert context.account.margin_call_level == 85.0
+            assert context.market.spread_pips == 7.0
+            assert context.market.atr_pips == 20.0
+            assert context.broker.broker_symbol == "EURUSD.raw"
+            assert context.broker.min_volume == 0.03
+            assert context.broker.max_volume == 17.0
+            assert context.broker.volume_step == 0.03
+            assert context.portfolio.open_positions[0].position_id == "live-1"
+            assert context.portfolio.realized_pnl_today == -100.0
+            assert context.portfolio.trading_day_start_utc == day_start
             assert call_kwargs["risk_limits"].min_risk_reward_ratio == 2.2
             assert call_kwargs["risk_limits"].max_spread_pips == 1.9
             assert call_kwargs["risk_limits"].enforce_news_blackout is True
             assert call_kwargs["config"]["research_depth"] == "comprehensive"
+
+            holder = {}
+            evaluator = create_forex_risk_evaluator(
+                risk_context=context,
+                risk_limits=ForexRiskLimits(
+                    enforce_market_open=False,
+                    enforce_news_blackout=False,
+                    max_spread_pips=2.5,
+                ),
+                sizing_result_holder=holder,
+            )
+            live_proposal = ForexTraderProposal(
+                pair="EURUSD",
+                action=ForexAction.LONG,
+                entry_price=1.0850,
+                stop_loss=1.0800,
+                take_profit_1=1.0950,
+                suggested_risk_percent=1.0,
+                reasoning="Live-context propagation regression",
+            )
+            evaluated = evaluator(
+                {
+                    "company_of_interest": "EURUSD",
+                    "trade_date": observed_at.date().isoformat(),
+                    "forex_proposal": live_proposal.model_dump(),
+                }
+            )
+            violations = evaluated["forex_risk_decision"]["risk_violations"]
+            assert any("Current spread (7.0 pips)" in item for item in violations)
+            assert any("Spread-to-ATR ratio" in item for item in violations)
+            assert holder["latest"].recommended_lot_size % 0.03 == pytest.approx(0.0)
+
+    def test_live_usdjpy_conversion_reaches_sizing(self, isolated_forex_env):
+        _, _, observer = isolated_forex_env
+        observer.connection.is_connected.return_value = True
+        observed_at = datetime.now(timezone.utc)
+        observer.to_sizing_account_profile.return_value = ForexAccountProfile(
+            balance=20_000,
+            equity=20_000,
+            free_margin=20_000,
+            currency="USD",
+            leverage=100,
+        )
+        observer.get_current_tick.return_value = MT5Tick(
+            time=observed_at,
+            bid=149.99,
+            ask=150.01,
+            spread_pips=2.0,
+            source="MT5",
+            broker_symbol="USDJPY.raw",
+        )
+        observer.to_broker_constraints.return_value = MT5SymbolInfo(
+            name="USDJPY.raw",
+            canonical_symbol="USDJPY",
+            digits=3,
+            point=0.001,
+            pip_size=0.01,
+            volume_min=0.01,
+            volume_max=50,
+            volume_step=0.01,
+        ).to_broker_constraints()
+        observer.get_atr_pips.return_value = 60.0
+        observer.get_conversion_observations.return_value = (
+            ForexConversionRate(
+                from_currency="USD",
+                to_currency="JPY",
+                status=AvailabilityStatus.AVAILABLE,
+                rate=150.0,
+                conversion_path=("USDJPY.raw",),
+                source="MT5",
+                observed_at=observed_at,
+            ),
+        )
+        observer.to_open_positions.return_value = []
+
+        run_id = "fx_phase3_usdjpy"
+        _forex_runs[run_id] = {"status": "queued", "signal": None}
+        _forex_run_events[run_id] = []
+        req = ForexAnalysisRequest(
+            pair="USDJPY",
+            execution_timeframe="H1",
+            account_source="mt5",
+            economic_blackout=False,
+        )
+        proposal = ForexTraderProposal(pair="USDJPY", action=ForexAction.NO_TRADE, reasoning="No setup")
+        decision = ForexRiskDecision(
+            pair="USDJPY",
+            decision=ForexRiskDecisionAction.APPROVE,
+            original_action=ForexAction.NO_TRADE,
+            approved_action=ForexAction.NO_TRADE,
+            executive_rationale="Preserve capital",
+        )
+        with patch("web.forex_routes.ForexTradingAgentsGraph") as factory:
+            graph = factory.return_value
+            graph.stream.return_value = iter([])
+            graph.get_state.return_value = {"final_trade_decision": "NO_TRADE"}
+            graph.get_last_proposal.return_value = proposal
+            graph.get_last_risk_decision.return_value = decision
+            graph.get_last_sizing_result.return_value = None
+            graph.process_signal.return_value = "NO_TRADE"
+            graph.save_reports.return_value = None
+            _run_forex_analysis(run_id, req)
+
+            context = factory.call_args.kwargs["risk_context"]
+            assert context.conversions[0].conversion_path == ("USDJPY.raw",)
+            holder = {}
+            evaluator = create_forex_risk_evaluator(
+                risk_context=context,
+                risk_limits=ForexRiskLimits(enforce_market_open=False, enforce_news_blackout=False),
+                sizing_result_holder=holder,
+            )
+            executable = ForexTraderProposal(
+                pair="USDJPY",
+                action=ForexAction.LONG,
+                entry_price=150.0,
+                stop_loss=149.5,
+                take_profit_1=151.0,
+                suggested_risk_percent=1.0,
+                reasoning="USDJPY conversion propagation",
+            )
+            evaluator(
+                {
+                    "company_of_interest": "USDJPY",
+                    "trade_date": observed_at.date().isoformat(),
+                    "forex_proposal": executable.model_dump(),
+                }
+            )
+            assert holder["latest"].pip_value_per_lot == pytest.approx(6.67, abs=0.01)
+
+    def test_explicit_disconnected_mt5_fails_without_manual_fallback(self, isolated_forex_env):
+        _, _, observer = isolated_forex_env
+        observer.connection.is_connected.return_value = False
+        run_id = "fx_phase3_disconnected"
+        _forex_runs[run_id] = {"status": "queued", "signal": None}
+        _forex_run_events[run_id] = []
+
+        with patch("web.forex_routes.ForexTradingAgentsGraph") as factory:
+            _run_forex_analysis(
+                run_id,
+                ForexAnalysisRequest(pair="EURUSD", account_source="mt5"),
+            )
+            factory.assert_not_called()
+
+        assert _forex_runs[run_id]["status"] == "failed"
+        assert _forex_runs[run_id]["signal"] is None
+
+    def test_omitted_account_source_defaults_to_mt5_without_balance_fallback(
+        self, isolated_forex_env
+    ):
+        _, _, observer = isolated_forex_env
+        observer.connection.is_connected.return_value = False
+        request = ForexAnalysisRequest(pair="EURUSD")
+        assert request.account_source == "mt5"
+        assert request.account_balance is None
+
+        run_id = "fx_phase5_default_mt5_disconnected"
+        _forex_runs[run_id] = {"status": "queued", "signal": None}
+        _forex_run_events[run_id] = []
+        with patch("web.forex_routes.ForexTradingAgentsGraph") as factory:
+            _run_forex_analysis(run_id, request)
+            factory.assert_not_called()
+
+        assert _forex_runs[run_id]["status"] == "failed"
+        assert "not connected" in _forex_runs[run_id]["error"].lower()
 
     def test_run_forex_analysis_worker_and_sse_events(self, client, tmp_path):
         run_id = "fx_test_worker_123"
@@ -1141,6 +1488,11 @@ class TestForexAnalysisRuns:
             date="2026-03-04",
             analysts=["forex_technical", "forex_macro", "forex_news"],
             account_balance=100000.0,
+            account_source="manual",
+            account_equity=100000.0,
+            account_free_margin=100000.0,
+            account_leverage=100.0,
+            account_currency="USD",
             risk_percent=1.0,
         )
 
@@ -1417,7 +1769,16 @@ class TestForexAnalysisRuns:
 
     def test_run_forex_analysis_worker_failure_emits_error(self, client):
         run_id = "fx_test_failure_456"
-        req = ForexAnalysisRequest(pair="USDJPY", timeframe="H1")
+        req = ForexAnalysisRequest(
+            pair="USDJPY",
+            timeframe="H1",
+            account_source="manual",
+            account_balance=100000,
+            account_equity=100000,
+            account_free_margin=100000,
+            account_leverage=100,
+            account_currency="USD",
+        )
 
         _forex_runs[run_id] = {
             "run_id": run_id,
@@ -1751,7 +2112,16 @@ class TestForexAnalystSelection:
         monkeypatch.setattr(forex_routes, "ForexTradingAgentsGraph", MockGraph)
         res = client.post(
             "/api/forex/analyze",
-            json={"pair": "EURUSD", "analysts": ["forex_technical", "forex_news"]},
+            json={
+                "pair": "EURUSD",
+                "analysts": ["forex_technical", "forex_news"],
+                "account_source": "manual",
+                "account_balance": 100000.0,
+                "account_equity": 100000.0,
+                "account_free_margin": 100000.0,
+                "account_leverage": 100.0,
+                "account_currency": "USD",
+            },
         )
         assert res.status_code == 200
         # Allow worker thread to invoke Graph

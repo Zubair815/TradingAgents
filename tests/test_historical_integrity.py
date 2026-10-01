@@ -10,7 +10,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-from tradingagents.agents.schemas_forex import ForexAction, ForexTraderProposal
+from tradingagents.agents.schemas_forex import (
+    ForexAction,
+    ForexRiskDecision,
+    ForexRiskDecisionAction,
+    ForexTraderProposal,
+)
 from tradingagents.backtest.agent_backtester import (
     AgentBacktestConfig,
     HistoricalForexAgentBacktester,
@@ -21,9 +26,16 @@ from tradingagents.backtest.historical_data import (
     candle_frame,
     load_historical_candles,
 )
+from tradingagents.backtest.historical_pipeline import (
+    HistoricalForexPipelineConfig,
+    create_historical_forex_pipeline,
+)
 from tradingagents.dataflows.forex_context import historical_market_context, historical_market_scope
 from tradingagents.dataflows.forex_data import ForexBar, fetch_forex_candles
 from tradingagents.dataflows.forex_quality import DataInsufficientError, utc_timestamp
+from tradingagents.forex.conversion import AvailabilityStatus, ForexConversionRate
+from tradingagents.graph.forex_graph import create_forex_risk_evaluator
+from tradingagents.risk.engine import ForexRiskLimits
 from web.server import app
 
 
@@ -318,10 +330,14 @@ def test_historical_pipeline_receives_evolving_account_snapshot():
     class SnapshotAgent:
         def __init__(self):
             self.snapshots = []
+            self.deterministic_snapshots = []
             self.calls = 0
 
         def set_account_snapshot(self, snapshot):
             self.snapshots.append(snapshot)
+
+        def set_deterministic_snapshot(self, account, positions, conversions, cutoff):
+            self.deterministic_snapshots.append((account, positions, conversions, cutoff))
 
         def __call__(self, pair, _cutoff, _history):
             self.calls += 1
@@ -330,8 +346,8 @@ def test_historical_pipeline_receives_evolving_account_snapshot():
                     pair=pair,
                     action="LONG",
                     order_type="MARKET",
-                    stop_loss=1.0800,
-                    take_profit_1=1.0900,
+                    stop_loss=1.0700,
+                    take_profit_1=1.1000,
                     suggested_lot_size=1.0,
                     reasoning="Account evolution regression",
                 )
@@ -350,5 +366,199 @@ def test_historical_pipeline_receives_evolving_account_snapshot():
 
     assert agent.snapshots[0].balance == 10000.0
     assert agent.snapshots[0].leverage == 500.0
-    assert agent.snapshots[1].balance < agent.snapshots[0].balance
+    assert agent.snapshots[1].balance == agent.snapshots[0].balance
+    assert agent.snapshots[1].equity < agent.snapshots[0].equity
     assert agent.snapshots[1].free_margin <= agent.snapshots[1].equity
+    second_account, second_positions, _, second_cutoff = agent.deterministic_snapshots[1]
+    assert second_account.used_margin > 0.0
+    assert second_account.free_margin < second_account.equity
+    assert len(second_positions) == 1
+    assert second_positions[0].risk_amount > 0.0
+    assert second_positions[0].position_id
+    assert second_cutoff == bars[1].close_time
+
+
+def test_historical_cross_trade_fails_when_conversion_is_unavailable():
+    bars, meta = sourced_bars(2)
+    meta.update(canonical_symbol="EURJPY", symbol="EURJPY.a")
+    bars = [
+        replace(bar, open=160.0, high=160.2, low=159.8, close=160.0)
+        for bar in bars
+    ]
+
+    def proposal(pair, _cutoff, _history):
+        return ForexTraderProposal(
+            pair=pair,
+            action="LONG",
+            order_type="MARKET",
+            stop_loss=159.0,
+            take_profit_1=162.0,
+            suggested_lot_size=0.1,
+            reasoning="Missing conversion must fail closed",
+        )
+
+    config = AgentBacktestConfig(pair="EURJPY", timeframe="H1", max_analysis_points=1)
+    with pytest.raises(HistoricalDataUnavailable, match="JPY->USD"):
+        HistoricalForexAgentBacktester(config=config).run(
+            bars,
+            market_data_provenance=meta,
+            agent_pipeline_callable=proposal,
+        )
+
+
+def test_historical_conversion_snapshot_excludes_future_observations():
+    bars, meta = sourced_bars(2)
+    meta.update(canonical_symbol="USDJPY", symbol="USDJPY.a")
+    bars = [
+        replace(bar, open=150.0, high=150.2, low=149.8, close=150.0)
+        for bar in bars
+    ]
+    start = bars[0].timestamp
+    past = ForexConversionRate(
+        from_currency="USD",
+        to_currency="JPY",
+        status=AvailabilityStatus.AVAILABLE,
+        rate=150.0,
+        conversion_path=("USDJPY",),
+        source="historical fixture",
+        observed_at=start,
+    )
+    future = past.model_copy(update={"rate": 175.0, "observed_at": start + timedelta(hours=4)})
+
+    class Observer:
+        def __init__(self):
+            self.snapshots = []
+
+        def set_deterministic_snapshot(self, _account, _positions, conversions, cutoff):
+            self.snapshots.append((conversions, cutoff))
+
+        def __call__(self, *_args):
+            return None
+
+    observer = Observer()
+    config = AgentBacktestConfig(
+        pair="USDJPY",
+        timeframe="H1",
+        conversion_rates=(past, future),
+    )
+    HistoricalForexAgentBacktester(config=config).run(
+        bars,
+        market_data_provenance=meta,
+        agent_pipeline_callable=observer,
+    )
+
+    assert observer.snapshots
+    for conversions, cutoff in observer.snapshots:
+        assert conversions
+        assert all(item.observed_at <= cutoff for item in conversions)
+        assert future not in conversions
+
+
+def test_historical_context_uses_shared_live_risk_sizing_math():
+    bars, meta = sourced_bars(2)
+    meta.update(canonical_symbol="USDJPY", symbol="USDJPY.a")
+    bars = [
+        replace(
+            bar,
+            open=150.0,
+            high=150.2,
+            low=149.8,
+            close=150.0,
+            spread_pips=2.0,
+            broker_symbol="USDJPY.a",
+        )
+        for bar in bars
+    ]
+    conversion = ForexConversionRate(
+        from_currency="USD",
+        to_currency="JPY",
+        status=AvailabilityStatus.AVAILABLE,
+        rate=150.0,
+        conversion_path=("USDJPY.a",),
+        source="historical fixture",
+        observed_at=bars[0].timestamp,
+    )
+    captured = {}
+
+    class Graph:
+        def run(self, **_kwargs):
+            proposal = ForexTraderProposal(
+                pair="USDJPY",
+                action=ForexAction.NO_TRADE,
+                reasoning="Context capture",
+            )
+            decision = ForexRiskDecision(
+                pair="USDJPY",
+                decision=ForexRiskDecisionAction.APPROVE,
+                original_action=ForexAction.NO_TRADE,
+                approved_action=ForexAction.NO_TRADE,
+                executive_rationale="No trade",
+            )
+            return {
+                "forex_proposal": proposal.model_dump(),
+                "forex_risk_decision": decision.model_dump(),
+            }, "NO_TRADE"
+
+    def graph_factory(_config, _account, _memory, risk_context):
+        captured["historical"] = risk_context
+        return Graph()
+
+    pipeline = create_historical_forex_pipeline(
+        HistoricalForexPipelineConfig(pair="USDJPY", timeframe="H1"),
+        meta,
+        graph_factory=graph_factory,
+    )
+    config = AgentBacktestConfig(
+        pair="USDJPY",
+        timeframe="H1",
+        max_analysis_points=1,
+        conversion_rates=(conversion,),
+    )
+    with patch(
+        "tradingagents.backtest.historical_pipeline.TradingEconomicsCalendar.query",
+        return_value=[],
+    ):
+        HistoricalForexAgentBacktester(config=config).run(
+            bars,
+            market_data_provenance=meta,
+            agent_pipeline_callable=pipeline,
+        )
+
+    historical_context = captured["historical"]
+    assert historical_context.as_of_utc == bars[0].close_time
+    assert historical_context.conversions == (conversion,)
+    assert historical_context.market.observed_at <= historical_context.as_of_utc
+
+    live_equivalent = historical_context.model_copy(deep=True)
+    proposal = ForexTraderProposal(
+        pair="USDJPY",
+        action=ForexAction.LONG,
+        entry_price=150.0,
+        stop_loss=149.5,
+        take_profit_1=151.0,
+        suggested_risk_percent=1.0,
+        reasoning="Parity check",
+    )
+    results = []
+    for context in (historical_context, live_equivalent):
+        holder = {}
+        evaluator = create_forex_risk_evaluator(
+            risk_context=context,
+            risk_limits=ForexRiskLimits(
+                enforce_market_open=False,
+                enforce_news_blackout=False,
+                max_spread_pips=5.0,
+            ),
+            sizing_result_holder=holder,
+        )
+        evaluator(
+            {
+                "company_of_interest": "USDJPY",
+                "trade_date": context.as_of_utc.isoformat(),
+                "forex_proposal": proposal.model_dump(),
+            }
+        )
+        results.append(holder["latest"])
+
+    assert results[0] == results[1]
+    assert results[0].pip_value_per_lot == pytest.approx(6.67, abs=0.01)

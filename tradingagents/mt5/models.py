@@ -6,15 +6,17 @@ market ticks, positions, orders, and deals.
 
 from __future__ import annotations
 
-from datetime import datetime
+from collections.abc import Sequence
+from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any
 
 from pydantic import BaseModel, Field
 
 from tradingagents.agents.schemas_forex import ForexAction
+from tradingagents.forex.conversion import ForexConversionRate, FXConversionUnavailable
 from tradingagents.forex.domain import normalize_forex_pair
-from tradingagents.forex.pips import pip_size_for
+from tradingagents.forex.pips import pip_size_for, pip_value_in_account_currency
 from tradingagents.risk.sizing import (
     BrokerExecutionConstraints,
     ForexAccountProfile,
@@ -96,6 +98,10 @@ class MT5SymbolInfo(BaseModel):
     def to_broker_constraints(self) -> BrokerExecutionConstraints:
         """Convert MT5 symbol specification to BrokerExecutionConstraints."""
         return BrokerExecutionConstraints(
+            broker_symbol=self.name,
+            digits=self.digits,
+            point=self.point,
+            pip_size=self.pip_size,
             min_volume=self.volume_min,
             max_volume=self.volume_max,
             volume_step=self.volume_step,
@@ -150,22 +156,42 @@ class MT5Position(BaseModel):
             diff = self.price_open - self.price_current
         return round(diff / pip_sz, 1)
 
-    def to_open_position(self) -> OpenPosition:
+    def to_open_position(
+        self,
+        account_currency: str = "USD",
+        conversions: Sequence[ForexConversionRate] = (),
+        as_of_utc: datetime | None = None,
+        max_conversion_age: timedelta | None = None,
+    ) -> OpenPosition:
         """Convert MT5 position to an OpenPosition for portfolio correlation & risk aggregation."""
-        pip_sz = pip_size_for(self.symbol)
-        sl_dist_price = abs(self.price_open - self.sl) if self.sl > 0 else (50.0 * pip_sz)
-        # Approximate committed dollar risk if stop loss is defined
-        stop_pips = sl_dist_price / pip_sz
-        est_risk = stop_pips * (self.volume * 10.0)  # Standard 10 USD/pip estimate for 1.0 lot
+        normalized_pair = normalize_forex_pair(self.symbol)
+        stop_loss = self.sl if self.sl > 0 else None
+        est_risk: float | None = None
+        if stop_loss is not None:
+            pip_sz = pip_size_for(normalized_pair)
+            stop_pips = abs(self.price_open - stop_loss) / pip_sz
+            try:
+                pip_value = pip_value_in_account_currency(
+                    normalized_pair,
+                    self.volume,
+                    account_currency,
+                    current_quote_price=self.price_current or self.price_open,
+                    conversions=conversions,
+                    as_of_utc=as_of_utc,
+                    max_conversion_age=max_conversion_age,
+                )
+                est_risk = round(stop_pips * pip_value, 2)
+            except FXConversionUnavailable:
+                est_risk = None
 
         return OpenPosition(
             position_id=str(self.ticket),
-            pair=normalize_forex_pair(self.symbol),
+            pair=normalized_pair,
             action=self.type,
             lots=self.volume,
             entry_price=self.price_open,
-            stop_loss=self.sl,
-            risk_amount=round(est_risk, 2),
+            stop_loss=stop_loss,
+            risk_amount=est_risk,
         )
 
 

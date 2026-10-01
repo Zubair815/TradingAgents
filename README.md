@@ -27,17 +27,16 @@ The current workspace was verified with the repository's supported Windows virtu
 D:\TradingAgents\.venv\Scripts\python.exe -m pytest -q -m "not e2e"
 ```
 
-Result on 2026-09-30: `2109 passed, 5 skipped, 6 deselected, 0 failed, 20 warnings,
-88 subtests passed`. Local Chromium E2E also passed (`6 passed`). GitHub Actions
-run [36667732822](https://github.com/Zubair815/TradingAgents/actions/runs/36667732822)
-is green for base commit `18cdbea0806eb631911dd332a5f0211c45a65d92`
-(`Version1.8`) on Python 3.10, 3.11, 3.12, and 3.13, including Ruff,
-clean-install, and Chromium E2E jobs. The final working-tree polish is uncommitted,
-so its GitHub CI remains pending until commit and push.
+Result on 2026-10-01 at HEAD `4d2152914fc3ae85249b04126645339eaf755e79`
+(`Version2.0`) plus the uncommitted Forex remediation: `2161 passed, 5 skipped,
+6 deselected, 0 failed, 22 warnings, 88 subtests passed`. Local Chromium E2E
+also passed (`6 passed, 2166 deselected`). Ruff, compileall, JavaScript syntax,
+and whitespace checks passed. Current-worktree GitHub CI is not available until
+the remediation is committed and pushed.
 
-Release status: **READY FOR LOCAL DEMO VALIDATION**. Automated engineering gates
+Release status: **READY FOR XM DEMO ACCEPTANCE**. Automated engineering gates
 pass, but the Windows + XM Demo checklist has not been executed. This status is
-not a trading-performance recommendation.
+not a trading-performance recommendation or a claim of live validation.
 
 ## Forex decision-support safety
 

@@ -19,8 +19,19 @@ from tradingagents.dataflows.forex_context import historical_market_scope
 from tradingagents.dataflows.forex_data import ForexBar
 from tradingagents.dataflows.trading_economics import TradingEconomicsCalendar
 from tradingagents.forex import ForexTradingAgentsGraph
+from tradingagents.forex.conversion import AvailabilityStatus, ForexConversionRate
 from tradingagents.forex.domain import normalize_forex_pair
-from tradingagents.risk.sizing import ForexAccountProfile
+from tradingagents.forex.pips import pip_size_for
+from tradingagents.risk.context import (
+    ForexMarketContext,
+    ForexPortfolioContext,
+    ForexRiskContext,
+)
+from tradingagents.risk.sizing import (
+    BrokerExecutionConstraints,
+    ForexAccountProfile,
+    OpenPosition,
+)
 
 
 @dataclass(frozen=True)
@@ -53,11 +64,26 @@ def create_historical_forex_pipeline(
     """
     expected_pair = normalize_forex_pair(config.pair)
     account_snapshot: ForexAccountProfile | None = None
+    open_positions: tuple[OpenPosition, ...] = ()
+    conversion_snapshot: tuple[ForexConversionRate, ...] = ()
+    snapshot_as_of: datetime | None = None
     audit_metadata: dict[str, Any] = {"applied_lesson_ids": []}
 
     def set_account_snapshot(snapshot: ForexAccountProfile) -> None:
         nonlocal account_snapshot
         account_snapshot = snapshot.model_copy(deep=True)
+
+    def set_deterministic_snapshot(
+        account: ForexAccountProfile,
+        positions: tuple[OpenPosition, ...],
+        conversions: tuple[ForexConversionRate, ...],
+        as_of_utc: datetime,
+    ) -> None:
+        nonlocal account_snapshot, open_positions, conversion_snapshot, snapshot_as_of
+        account_snapshot = account.model_copy(deep=True)
+        open_positions = tuple(position.model_copy(deep=True) for position in positions)
+        conversion_snapshot = tuple(conversions)
+        snapshot_as_of = as_of_utc
 
     def pipeline(pair: str, cutoff: datetime, pit_candles: list[ForexBar]):
         canonical_pair = normalize_forex_pair(pair)
@@ -65,6 +91,32 @@ def create_historical_forex_pipeline(
             raise ValueError("historical pipeline pair does not match configured pair")
         if not pit_candles:
             return None
+        if account_snapshot is None or snapshot_as_of != cutoff:
+            raise ValueError("historical deterministic account/portfolio snapshot is unavailable")
+
+        last_bar = pit_candles[-1]
+        observed_at = last_bar.close_time or last_bar.timestamp
+        spread_pips = max(0.0, last_bar.spread_pips)
+        risk_context = ForexRiskContext(
+            pair=canonical_pair,
+            as_of_utc=cutoff,
+            market=ForexMarketContext(
+                quote_status=AvailabilityStatus.AVAILABLE,
+                bid=last_bar.close,
+                ask=last_bar.close + spread_pips * pip_size_for(canonical_pair),
+                spread_pips=spread_pips,
+                atr_status=AvailabilityStatus.NOT_APPLICABLE,
+                source=f"historical:{last_bar.data_source}",
+                observed_at=observed_at,
+            ),
+            account=account_snapshot,
+            broker=BrokerExecutionConstraints(
+                broker_symbol=last_bar.broker_symbol or canonical_pair,
+                pip_size=pip_size_for(canonical_pair),
+            ),
+            portfolio=ForexPortfolioContext(open_positions=open_positions),
+            conversions=conversion_snapshot,
+        )
 
         with historical_market_scope(
             canonical_pair, candle_frame(pit_candles, provenance), cutoff
@@ -78,9 +130,13 @@ def create_historical_forex_pipeline(
             if graph_factory is not None:
                 parameter_count = len(signature(graph_factory).parameters)
                 graph = (
-                    graph_factory(config, account_snapshot, memory_source)
-                    if parameter_count >= 3
-                    else graph_factory(config)
+                    graph_factory(config, account_snapshot, memory_source, risk_context)
+                    if parameter_count >= 4
+                    else (
+                        graph_factory(config, account_snapshot, memory_source)
+                        if parameter_count >= 3
+                        else graph_factory(config)
+                    )
                 )
             else:
                 graph = ForexTradingAgentsGraph(
@@ -96,6 +152,7 @@ def create_historical_forex_pipeline(
                     },
                     selected_analysts=config.analyst_selection,
                     sizing_account=account_snapshot,
+                    risk_context=risk_context,
                     learning_manager=memory_source,
                     auto_record_trades=False,
                 )
@@ -142,5 +199,6 @@ def create_historical_forex_pipeline(
 
     pipeline.historical_pipeline_config = config  # type: ignore[attr-defined]
     pipeline.set_account_snapshot = set_account_snapshot  # type: ignore[attr-defined]
+    pipeline.set_deterministic_snapshot = set_deterministic_snapshot  # type: ignore[attr-defined]
     pipeline.audit_metadata = audit_metadata  # type: ignore[attr-defined]
     return pipeline

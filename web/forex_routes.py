@@ -24,6 +24,7 @@ Provides:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import json
 import logging
@@ -37,7 +38,7 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # Forex Domain, Journal, Risk, Backtest, Analytics, MT5, Learning imports
 from tradingagents.agents.schemas_forex import (
@@ -95,6 +96,12 @@ from tradingagents.metrics.manager import ForexMetricsManager
 from tradingagents.mt5.errors import MT5Error
 from tradingagents.mt5.observer import MT5Observer
 from tradingagents.research.contracts import AnalysisRequest as ForexAnalysisRequest
+from tradingagents.risk.context import (
+    AvailabilityStatus,
+    ForexMarketContext,
+    ForexPortfolioContext,
+    ForexRiskContext,
+)
 from tradingagents.risk.engine import ForexRiskEngine, ForexRiskLimits
 from tradingagents.risk.sizing import (
     BrokerExecutionConstraints,
@@ -538,8 +545,14 @@ class ProposalCreateRequest(BaseModel):
 class EvaluateRiskRequest(BaseModel):
     proposal_id: str | None = Field(default=None, description="Proposal ID if loading from journal")
     proposal: dict[str, Any] | None = Field(default=None, description="Raw proposal dict if evaluating ad-hoc")
-    account_balance: float = Field(default=100000.0, gt=0)
-    spread_pips: float = Field(default=1.2, ge=0)
+    account_source: Literal["manual"] = "manual"
+    account_balance: float = Field(..., gt=0)
+    account_currency: str = Field(..., min_length=3, max_length=3)
+    spread_pips: float = Field(..., ge=0)
+    atr_pips: float | None = Field(default=None, gt=0)
+    max_spread_pips: float = Field(default=3.5, gt=0)
+    max_spread_atr_ratio: float = Field(default=0.15, gt=0)
+    min_risk_reward_ratio: float = Field(default=1.5, gt=0)
     current_time: str | None = Field(default=None, description="Optional UTC ISO timestamp")
 
 
@@ -547,10 +560,33 @@ class PositionSizeRequest(BaseModel):
     proposal_id: str | None = Field(default=None, description="Proposal ID if loading from journal")
     proposal: dict[str, Any] | None = Field(default=None, description="Raw proposal dict if sizing ad-hoc")
     method: str = Field(default="FIXED_RISK_PERCENT", description="Position sizing model")
-    account_balance: float = Field(default=100000.0, gt=0)
-    account_currency: str = Field(default="USD")
-    leverage: float = Field(default=100.0, gt=0)
+    account_source: Literal["manual"] = "manual"
+    account_balance: float = Field(..., gt=0)
+    account_equity: float = Field(..., gt=0)
+    account_free_margin: float = Field(..., ge=0)
+    account_currency: str = Field(..., min_length=3, max_length=3)
+    leverage: float = Field(..., ge=1)
     risk_percent: float = Field(default=1.0, gt=0, le=10.0)
+    broker_symbol: str | None = None
+    digits: int | None = Field(default=None, ge=0, le=10)
+    point: float | None = Field(default=None, gt=0)
+    pip_size: float | None = Field(default=None, gt=0)
+    contract_size: float | None = Field(default=None, gt=0)
+    volume_min: float | None = Field(default=None, gt=0)
+    volume_max: float | None = Field(default=None, gt=0)
+    volume_step: float | None = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def broker_inputs_are_complete_or_omitted(self):
+        names = (
+            "broker_symbol", "digits", "point", "pip_size", "contract_size",
+            "volume_min", "volume_max", "volume_step",
+        )
+        provided = [name for name in names if getattr(self, name) is not None]
+        if provided and len(provided) != len(names):
+            missing = [name for name in names if getattr(self, name) is None]
+            raise ValueError(f"complete broker constraints required when any are supplied: {', '.join(missing)}")
+        return self
 
 
 class UpdateProposalStatusRequest(BaseModel):
@@ -736,6 +772,25 @@ def _forex_cancel_requested(run_id: str) -> bool:
             (event is not None and event.is_set())
             or (run is not None and str(run.get("status", "")).lower() == "cancelled")
         )
+
+
+@contextlib.contextmanager
+def _forex_proposal_persistence_guard(run_id: str):
+    """Serialize cancellation with the short proposal persistence commit."""
+    with _lock:
+        run = _forex_runs.get(run_id)
+        cancel_event = _forex_cancellations.get(run_id)
+        if run is None:
+            raise RuntimeError("analysis run is unavailable")
+        if (
+            (cancel_event is not None and cancel_event.is_set())
+            or str(run.get("status", "")).lower() in TERMINAL_STATUSES
+        ):
+            raise RuntimeError("analysis cancelled")
+        yield
+        run["persistence_committed"] = True
+        run["status"] = "finalizing"
+        run["last_activity_at"] = datetime.now(timezone.utc).isoformat()
 
 
 def _normalize_proposal_dict(data: dict[str, Any]) -> dict[str, Any]:
@@ -1221,17 +1276,35 @@ async def evaluate_risk(
         curr_t = None
         if req.current_time:
             dt = datetime.fromisoformat(req.current_time)
+            if dt.tzinfo is None:
+                raise ValueError("current_time requires an explicit UTC offset")
             curr_d = dt.strftime("%Y-%m-%d")
             curr_t = dt.strftime("%H:%M")
+
+        limits = ForexRiskLimits(
+            min_risk_reward_ratio=req.min_risk_reward_ratio,
+            max_spread_pips=req.max_spread_pips,
+            max_spread_atr_ratio=req.max_spread_atr_ratio,
+        )
 
         decision = engine.validate_proposal(
             proposal=proposal_obj,
             account_balance=req.account_balance,
+            account_currency=req.account_currency,
             current_spread_pips=req.spread_pips,
+            atr_pips=req.atr_pips,
             curr_date=curr_d,
             curr_time_utc=curr_t,
+            limits=limits,
         )
         return {
+            "evaluation_kind": "MANUAL_RISK_EVALUATION",
+            "broker_verified": False,
+            "assumptions": [
+                "Account and market inputs are caller-supplied.",
+                "No MT5 account, quote, broker, conversion, or portfolio snapshot was verified.",
+                "Use the normal MT5 analysis path for broker-verified risk and sizing.",
+            ],
             "decision": _safe_model_dump(decision),
             "is_approved": decision.decision == ForexRiskDecisionAction.APPROVE,
             "action": decision.decision.value,
@@ -1265,12 +1338,23 @@ async def size_proposal(
 
         account_profile = ForexAccountProfile(
             balance=req.account_balance,
-            equity=req.account_balance,
-            free_margin=req.account_balance,
+            equity=req.account_equity,
+            free_margin=req.account_free_margin,
+            used_margin=max(0.0, req.account_equity - req.account_free_margin),
             currency=req.account_currency,
             leverage=req.leverage,
         )
-        constraints = BrokerExecutionConstraints()
+        broker_supplied = req.broker_symbol is not None
+        constraints = BrokerExecutionConstraints(
+            broker_symbol=req.broker_symbol,
+            digits=req.digits,
+            point=req.point,
+            pip_size=req.pip_size,
+            contract_size=req.contract_size or 100000.0,
+            min_volume=req.volume_min or 0.01,
+            max_volume=req.volume_max or 100.0,
+            volume_step=req.volume_step or 0.01,
+        )
         sizing_engine = ForexPositionSizingEngine(default_account=account_profile, default_constraints=constraints)
 
         method_enum = PositionSizingMethod(req.method.upper())
@@ -1282,7 +1366,21 @@ async def size_proposal(
         )
         res_dict = _safe_model_dump(result)
         res_dict["lots"] = result.recommended_lot_size
-        return {"sizing": res_dict}
+        assumptions = [
+            "Account values are caller-supplied and were not verified against a broker.",
+            "Open positions, pending orders, daily realized P&L, and live conversion observations are not included.",
+        ]
+        if not broker_supplied:
+            assumptions.append(
+                "Standard FX estimate constraints are used: contract_size=100000, volume_min=0.01, volume_max=100, volume_step=0.01."
+            )
+        return {
+            "sizing_kind": "MANUAL_ESTIMATE",
+            "broker_verified": False,
+            "broker_constraints_source": "CALLER_SUPPLIED" if broker_supplied else "STANDARD_FX_ESTIMATE",
+            "assumptions": assumptions,
+            "sizing": res_dict,
+        }
     except HTTPException:
         raise
     except Exception as exc:
@@ -1585,15 +1683,11 @@ def _run_forex_analysis(run_id: str, req: ForexAnalysisRequest) -> None:
         if getattr(req, "research_depth", None):
             config["research_depth"] = req.research_depth
 
-        eff_balance = float(req.account_balance)
-        eff_equity = float(req.account_balance)
-        eff_currency = getattr(req, "account_currency", "USD") or "USD"
-        eff_leverage = 100.0
-        eff_used_margin = 0.0
-        eff_free_margin = getattr(req, "account_free_margin", None)
+        exec_tf = req.execution_timeframe or req.timeframe or "H1"
+        ctx_tfs = req.context_timeframes or req.higher_timeframes or ("H4", "D1")
+        risk_context: ForexRiskContext | None = None
 
-        requested_source = getattr(req, "account_source", "mt5")
-        source_was_explicit = "account_source" in req.model_fields_set
+        requested_source = req.account_source
         mt5_obs = get_mt5_observer() if requested_source == "mt5" else None
         mt5_connected = bool(
             mt5_obs
@@ -1601,48 +1695,99 @@ def _run_forex_analysis(run_id: str, req: ForexAnalysisRequest) -> None:
             and hasattr(mt5_obs.connection, "is_connected")
             and mt5_obs.connection.is_connected()
         )
-        effective_account_source = (
-            "mt5" if requested_source == "mt5" and (source_was_explicit or mt5_connected) else "manual"
-        )
+        effective_account_source = requested_source
 
         if effective_account_source == "mt5":
             if mt5_connected:
                 try:
-                    acc = mt5_obs.connection.get_account_info()
-                    if acc and getattr(acc, "balance", None) is not None:
-                        eff_balance = float(acc.balance)
-                        eff_equity = float(getattr(acc, "equity", eff_balance))
-                        eff_currency = str(getattr(acc, "currency", eff_currency) or eff_currency)
-                        eff_leverage = float(getattr(acc, "leverage", 100.0))
-                        margin_value = getattr(acc, "margin", None)
-                        free_value = getattr(acc, "margin_free", None)
-                        eff_used_margin = float(margin_value) if margin_value is not None else 0.0
-                        if free_value is not None:
-                            eff_free_margin = float(free_value)
-                        elif margin_value is not None:
-                            eff_free_margin = max(0.0, eff_equity - eff_used_margin)
-                        else:
-                            raise DataInsufficientError("MT5 free margin is unavailable")
-                    else:
-                        raise DataInsufficientError("MT5 account snapshot is unavailable")
+                    account = mt5_obs.to_sizing_account_profile()
+                    account = account.model_copy(
+                        update={
+                            "max_open_positions": req.max_open_positions,
+                            "max_account_risk_percent": req.max_account_risk_percent,
+                            "max_currency_exposure_percent": req.max_currency_exposure_percent,
+                            "max_daily_loss_percent": req.max_daily_loss_percent,
+                            "max_daily_loss_amount": req.max_daily_loss_amount,
+                        }
+                    )
+                    tick = mt5_obs.get_current_tick(req.pair)
+                    constraints = mt5_obs.to_broker_constraints(req.pair)
+                    atr_pips = mt5_obs.get_atr_pips(req.pair, exec_tf, as_of=tick.time)
+                    conversions = mt5_obs.get_conversion_observations(req.pair, account.currency)
+                    as_of_utc = datetime.now(timezone.utc)
+                    max_conversion_age = timedelta(
+                        seconds=float(get_runtime_config().get("forex_quote_max_age_seconds", 30))
+                    )
+                    positions = mt5_obs.to_open_positions(
+                        account_currency=account.currency,
+                        conversions=conversions,
+                        as_of_utc=as_of_utc,
+                        max_conversion_age=max_conversion_age,
+                    )
+                    daily_rule_enabled = (
+                        account.max_daily_loss_percent is not None
+                        or account.max_daily_loss_amount is not None
+                    )
+                    daily_pnl_status = AvailabilityStatus.NOT_APPLICABLE
+                    daily_pnl = None
+                    day_start_balance = None
+                    daily_pnl_source = None
+                    trading_day_start = None
+                    if daily_rule_enabled:
+                        try:
+                            daily_pnl, trading_day_start = mt5_obs.get_daily_realized_pnl(as_of_utc)
+                            day_start_balance = account.balance - daily_pnl
+                            daily_pnl_source = "MT5 deal history"
+                            daily_pnl_status = AvailabilityStatus.AVAILABLE
+                        except MT5Error:
+                            daily_pnl_status = AvailabilityStatus.UNAVAILABLE
+                    risk_context = ForexRiskContext(
+                        pair=req.pair,
+                        as_of_utc=as_of_utc,
+                        market=ForexMarketContext(
+                            quote_status=AvailabilityStatus.AVAILABLE,
+                            bid=tick.bid,
+                            ask=tick.ask,
+                            spread_pips=tick.spread_pips,
+                            atr_status=AvailabilityStatus.AVAILABLE,
+                            atr_pips=atr_pips,
+                            source=f"{tick.source}:{tick.broker_symbol or req.pair}",
+                            observed_at=tick.time,
+                        ),
+                        account=account,
+                        broker=constraints,
+                        portfolio=ForexPortfolioContext(
+                            open_positions=tuple(positions),
+                            daily_pnl_status=daily_pnl_status,
+                            realized_pnl_today=daily_pnl,
+                            day_start_balance=day_start_balance,
+                            daily_pnl_source=daily_pnl_source,
+                            trading_day_start_utc=trading_day_start,
+                        ),
+                        conversions=conversions,
+                    )
                 except DataInsufficientError:
                     raise
                 except Exception as exc:
-                    raise DataInsufficientError("MT5 account snapshot is unavailable") from exc
+                    raise DataInsufficientError("complete MT5 risk context is unavailable") from exc
             else:
                 raise DataInsufficientError("MT5 account is not connected")
-        elif eff_free_margin is None:
-            # Manual account mode assumes no existing margin unless explicitly supplied.
-            eff_free_margin = eff_equity
-
-        account = ForexAccountProfile(
-            balance=eff_balance,
-            equity=eff_equity,
-            free_margin=eff_free_margin,
-            used_margin=eff_used_margin,
-            currency=eff_currency,
-            leverage=eff_leverage,
-        )
+        if risk_context is not None:
+            account = risk_context.account
+        else:
+            account = ForexAccountProfile(
+                balance=req.account_balance,
+                equity=req.account_equity,
+                free_margin=req.account_free_margin,
+                used_margin=max(0.0, req.account_equity - req.account_free_margin),
+                currency=req.account_currency,
+                leverage=req.account_leverage,
+                max_open_positions=req.max_open_positions,
+                max_account_risk_percent=req.max_account_risk_percent,
+                max_currency_exposure_percent=req.max_currency_exposure_percent,
+                max_daily_loss_percent=req.max_daily_loss_percent,
+                max_daily_loss_amount=req.max_daily_loss_amount,
+            )
 
         risk_kwargs: dict[str, Any] = {
             "max_risk_percent": req.risk_percent,
@@ -1654,6 +1799,9 @@ def _run_forex_analysis(run_id: str, req: ForexAnalysisRequest) -> None:
             risk_kwargs["min_risk_reward_ratio"] = float(req.min_rr)
         if getattr(req, "max_spread_pips", None) is not None:
             risk_kwargs["max_spread_pips"] = float(req.max_spread_pips)
+        risk_kwargs["max_open_positions"] = req.max_open_positions
+        risk_kwargs["max_daily_loss_percent"] = req.max_daily_loss_percent
+        risk_kwargs["max_daily_loss_amount"] = req.max_daily_loss_amount
 
         risk_limits = ForexRiskLimits(**risk_kwargs)
         journal = get_journal()
@@ -1664,8 +1812,10 @@ def _run_forex_analysis(run_id: str, req: ForexAnalysisRequest) -> None:
             config=config,
             risk_limits=risk_limits,
             sizing_account=account,
+            risk_context=risk_context,
             journal=journal,
             cancellation_check=lambda: _forex_cancel_requested(run_id),
+            persistence_guard=lambda: _forex_proposal_persistence_guard(run_id),
             debug=True,
         )
 
@@ -1673,13 +1823,11 @@ def _run_forex_analysis(run_id: str, req: ForexAnalysisRequest) -> None:
             return
 
         seen_stages: set[str] = set()
-
-        exec_tf = req.execution_timeframe or req.timeframe or "H1"
-        ctx_tfs = req.context_timeframes or req.higher_timeframes or ("H4", "D1")
+        analysis_cutoff = risk_context.as_of_utc.isoformat() if risk_context is not None else req.date
 
         for chunk in graph.stream(
             req.pair,
-            trade_date=req.date,
+            trade_date=analysis_cutoff,
             execution_timeframe=exec_tf,
             context_timeframes=ctx_tfs,
         ):
@@ -1859,12 +2007,7 @@ def _run_forex_analysis(run_id: str, req: ForexAnalysisRequest) -> None:
                 "currency": account.currency,
                 "leverage": account.leverage,
                 "risk_percent": req.risk_percent,
-                "free_margin_assumption": (
-                    "manual_no_existing_margin"
-                    if effective_account_source != "mt5"
-                    and getattr(req, "account_free_margin", None) is None
-                    else None
-                ),
+                "free_margin_assumption": None,
             },
             "provenance": {
                 "sources": ["Forex Market Feed (OHLCV)", "Economic Calendar", "Central Bank Intelligence"],
@@ -1907,7 +2050,12 @@ def _run_forex_analysis(run_id: str, req: ForexAnalysisRequest) -> None:
         )
 
     except Exception as exc:
-        error_msg = "The Forex analysis provider failed. Please retry."
+        if isinstance(exc, DataInsufficientError):
+            error_msg = str(exc)
+            error_code = "DATA_INSUFFICIENT"
+        else:
+            error_msg = "The Forex analysis provider failed. Please retry."
+            error_code = "PROVIDER_ERROR"
         with _lock:
             if _forex_cancel_requested(run_id):
                 return
@@ -1916,7 +2064,7 @@ def _run_forex_analysis(run_id: str, req: ForexAnalysisRequest) -> None:
                     status="failed",
                     finished_at=datetime.now(timezone.utc).isoformat(),
                     error=error_msg,
-                    error_code="PROVIDER_ERROR",
+                    error_code=error_code,
                 )
 
         _emit_fx_event(
@@ -1925,7 +2073,7 @@ def _run_forex_analysis(run_id: str, req: ForexAnalysisRequest) -> None:
             {
                 "run_id": run_id,
                 "error": error_msg,
-                "code": "PROVIDER_ERROR",
+                "code": error_code,
                 "message": f"Forex analysis failed: {error_msg}",
             },
         )
@@ -2047,6 +2195,8 @@ async def cancel_forex_run(run_id: str):
         status = str(entry.get("status", "")).lower()
         if status in TERMINAL_STATUSES:
             return {"run_id": run_id, "status": entry.get("status", "cancelled")}
+        if entry.get("persistence_committed") or status == "finalizing":
+            return {"run_id": run_id, "status": entry.get("status", "finalizing")}
         cancel_event = _forex_cancellations.setdefault(run_id, threading.Event())
         cancel_event.set()
         entry.update(

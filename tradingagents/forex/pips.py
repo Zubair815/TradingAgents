@@ -22,6 +22,10 @@ volume step is required, callers supply ``volume_step`` explicitly.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from datetime import datetime, timedelta
+
+from tradingagents.forex.conversion import ForexConversionRate, resolve_conversion_rate
 from tradingagents.forex.domain import ForexPair, get_forex_pair
 
 # ---------------------------------------------------------------------------
@@ -148,6 +152,9 @@ def pip_value_in_account_currency(
     lot_size: float,
     account_currency: str = "USD",
     current_quote_price: float | None = None,
+    conversions: Sequence[ForexConversionRate] = (),
+    as_of_utc: datetime | None = None,
+    max_conversion_age: timedelta | None = None,
 ) -> float:
     """Value of one pip move for ``lot_size`` lots in the account currency.
 
@@ -160,15 +167,9 @@ def pip_value_in_account_currency(
 
         pip_size × contract_size × lot_size / current_quote
 
-    For cross pairs (GBPJPY, EURJPY) you need the USD/JPY quote to convert.
-    In that case, supply ``current_quote_price`` as the price of the pair's
-    quote currency vs the account currency (e.g. USDJPY spot for JPY-quoted
-    crosses when account is USD).
-
-    When ``current_quote_price`` is None, the function assumes the pair is
-    already expressed in account currency (a simplification that works for
-    EURUSD/GBPUSD from a USD account).  For full accuracy always supply the
-    cross rate.
+    Cross pairs require an explicit directional observation in ``conversions``.
+    ``current_quote_price`` is only the traded pair price and is used as a
+    conversion when the pair base is the account currency.
 
     Returns
     -------
@@ -195,17 +196,18 @@ def pip_value_in_account_currency(
     if pair_obj.quote_currency == acc:
         return ps * cs * lot_size
 
-    # If the base currency equals account currency (e.g. USD base, JPY quote).
+    # The pair price itself is a valid quote->base conversion only when the
+    # account currency is the pair base (e.g. USDJPY in a USD account).
     if pair_obj.base_currency == acc and current_quote_price and current_quote_price > 0:
         return (ps * cs * lot_size) / current_quote_price
-
-    # Cross pair or missing rate: use approximation.
-    if current_quote_price and current_quote_price > 0:
-        # current_quote_price is quote/account rate (e.g. USDJPY for JPY-quoted crosses)
-        return (ps * cs * lot_size) / current_quote_price
-
-    # Last resort: assume quote ≈ account currency (accurate for USD-account + USD-quoted).
-    return ps * cs * lot_size
+    rate = resolve_conversion_rate(
+        pair_obj.quote_currency,
+        acc,
+        conversions,
+        as_of_utc=as_of_utc,
+        max_age=max_conversion_age,
+    )
+    return ps * cs * lot_size * rate
 
 
 # ---------------------------------------------------------------------------
@@ -221,6 +223,9 @@ def lot_size_from_risk(
     pair: ForexPair | str,
     account_currency: str = "USD",
     current_quote_price: float | None = None,
+    conversions: Sequence[ForexConversionRate] = (),
+    as_of_utc: datetime | None = None,
+    max_conversion_age: timedelta | None = None,
     volume_step: float = 0.01,
     min_volume: float = 0.01,
     max_volume: float = 100.0,
@@ -245,9 +250,8 @@ def lot_size_from_risk(
     account_currency:
         ISO code for the account deposit currency.
     current_quote_price:
-        Live quote of the pair's quote currency vs account currency.
-        Required for non-USD-quoted pairs from a USD account; see
-        :func:`pip_value_in_account_currency`.
+        Current traded-pair price. It is a valid conversion only when the
+        account currency is the pair base.
     volume_step:
         Broker's minimum volume increment (e.g. 0.01 lots).
     min_volume:
@@ -285,7 +289,8 @@ def lot_size_from_risk(
     stop_distance_pips = stop_distance_price / pip_sz
 
     pip_val = pip_value_in_account_currency(
-        pair_obj, 1.0, account_currency, current_quote_price
+        pair_obj, 1.0, account_currency, current_quote_price,
+        conversions, as_of_utc, max_conversion_age,
     )
     if pip_val <= 0:
         raise ValueError(f"pip_value_per_lot must be positive, got {pip_val}")

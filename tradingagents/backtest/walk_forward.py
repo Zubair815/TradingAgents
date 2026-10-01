@@ -180,10 +180,12 @@ class WalkForwardValidationReport:
     timeframe: str
     splits: list[WalkForwardSplit]
     period_reports: dict[str, PeriodPerformanceReport]
-    walk_forward_efficiency_ratio: float
+    walk_forward_efficiency_ratio: float | None
+    walk_forward_efficiency_status: str
     profit_factor_degradation: float
-    robustness_verdict: str  # ROBUST, MARGINAL, OVERFITTED, TAINTED
+    robustness_verdict: str  # Heuristic: ROBUST, MARGINAL, OVERFITTED, UNAVAILABLE, TAINTED
     markdown_summary: str
+    split_methodology: str = "SINGLE_HOLDOUT"
     source_provenance: dict[str, Any] = field(default_factory=dict)
     validation_status: str = "PARTIALLY_VALIDATED"
     created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
@@ -201,8 +203,10 @@ class WalkForwardValidationReport:
             "splits": [s.to_dict() for s in self.splits],
             "period_reports": {k: v.to_dict() for k, v in self.period_reports.items()},
             "walk_forward_efficiency_ratio": self.walk_forward_efficiency_ratio,
+            "walk_forward_efficiency_status": self.walk_forward_efficiency_status,
             "profit_factor_degradation": self.profit_factor_degradation,
             "robustness_verdict": self.robustness_verdict,
+            "split_methodology": self.split_methodology,
             "markdown_summary": self.markdown_summary,
             "created_at": self.created_at,
         }
@@ -244,6 +248,8 @@ class ForexWalkForwardValidator:
         n = len(sorted_candles)
         if n < 10:
             raise ValueError(f"Insufficient candles ({n}) to construct valid walk-forward splits.")
+        if dev_ratio <= 0 or val_ratio < 0 or oos_ratio <= 0:
+            raise ValueError("dev_ratio and oos_ratio must be positive; val_ratio cannot be negative")
 
         tot_ratio = dev_ratio + val_ratio + oos_ratio
         dev_w = dev_ratio / tot_ratio
@@ -304,43 +310,51 @@ class ForexWalkForwardValidator:
                 )
             )
         else:
-            # Rolling window walk-forward splits
-            window_size = int(n / (n_splits + 1))
-            step_size = max(1, int((n - window_size) / n_splits))
+            # Expanding-window walk-forward. The initial in-sample prefix is
+            # followed by disjoint OOS blocks that account for the entire tail.
+            in_sample_weight = dev_ratio + val_ratio
+            total_weight = in_sample_weight + (n_splits * oos_ratio)
+            min_in_sample = 3 if val_ratio > 0 else 2
+            initial_end = int(n * (in_sample_weight / total_weight))
+            initial_end = min(max(min_in_sample, initial_end), n - n_splits)
+            remaining = n - initial_end
+            if remaining < n_splits:
+                raise ValueError("Insufficient candles to allocate one OOS observation per split.")
 
+            base_oos_size, remainder = divmod(remaining, n_splits)
+            oos_start = initial_end
             for s in range(n_splits):
-                start_idx = s * step_size
-                split_candles = sorted_candles[start_idx : start_idx + window_size]
-                if len(split_candles) < 6:
-                    continue
+                oos_size = base_oos_size + (1 if s < remainder else 0)
+                oos_end = oos_start + oos_size
+                prefix_size = oos_start
 
-                sub_n = len(split_candles)
-                sub_dev_end = max(2, int(sub_n * dev_w))
-                sub_val_end = max(sub_dev_end + 1, int(sub_n * (dev_w + val_w))) if val_ratio > 0 else sub_dev_end
-                sub_oos_end = sub_n
+                if val_ratio > 0:
+                    dev_fraction = dev_ratio / in_sample_weight
+                    dev_end = min(max(2, int(prefix_size * dev_fraction)), prefix_size - 1)
+                else:
+                    dev_end = prefix_size
 
                 dev_win = PeriodWindow(
                     period_type=EvaluationPeriodType.DEVELOPMENT,
-                    start_time=split_candles[0].timestamp,
-                    end_time=split_candles[sub_dev_end - 1].timestamp,
-                    description=f"Split {s + 1} Development",
+                    start_time=sorted_candles[0].timestamp,
+                    end_time=sorted_candles[dev_end - 1].timestamp,
+                    description=f"Expanding Split {s + 1} Development",
                 )
                 val_win = (
                     PeriodWindow(
                         period_type=EvaluationPeriodType.VALIDATION,
-                        start_time=split_candles[sub_dev_end].timestamp,
-                        end_time=split_candles[sub_val_end - 1].timestamp,
-                        description=f"Split {s + 1} Validation",
+                        start_time=sorted_candles[dev_end].timestamp,
+                        end_time=sorted_candles[prefix_size - 1].timestamp,
+                        description=f"Expanding Split {s + 1} Validation",
                     )
-                    if val_ratio > 0 and sub_val_end > sub_dev_end
+                    if val_ratio > 0
                     else None
                 )
-                oos_s_idx = sub_val_end if val_win else sub_dev_end
                 oos_win = PeriodWindow(
                     period_type=EvaluationPeriodType.OUT_OF_SAMPLE,
-                    start_time=split_candles[oos_s_idx].timestamp,
-                    end_time=split_candles[sub_oos_end - 1].timestamp,
-                    description=f"Split {s + 1} Out-of-Sample",
+                    start_time=sorted_candles[oos_start].timestamp,
+                    end_time=sorted_candles[oos_end - 1].timestamp,
+                    description=f"Expanding Split {s + 1} Disjoint Out-of-Sample",
                 )
 
                 splits.append(
@@ -353,6 +367,7 @@ class ForexWalkForwardValidator:
                         forward_demo=None,
                     )
                 )
+                oos_start = oos_end
 
         return splits
 
@@ -584,30 +599,36 @@ class ForexWalkForwardValidator:
         dev_rep = dev_reports[0] if dev_reports else None
         oos_rep = oos_reports[0] if oos_reports else None
 
-        wfe_ratio = 0.0
+        wfe_ratio: float | None = None
+        wfe_status = "UNAVAILABLE_NO_REPORTS"
         pf_degradation = 0.0
-        robustness = "OVERFITTED"
+        robustness = "UNAVAILABLE"
 
         if dev_rep and oos_rep:
             if any(r.is_tainted for r in oos_reports):
                 robustness = "TAINTED"
+                wfe_status = "UNAVAILABLE_TAINTED"
             else:
-                dev_ret = max(0.0001, sum(r.result.total_return_pct for r in dev_reports))
-                oos_ret = sum(r.result.total_return_pct for r in oos_reports)
-                wfe_ratio = round((oos_ret / dev_ret) if dev_ret > 0 else 0.0, 3)
+                dev_ret = sum(r.result.total_return_pct for r in dev_reports) / len(dev_reports)
+                oos_ret = sum(r.result.total_return_pct for r in oos_reports) / len(oos_reports)
 
                 dev_pf = sum(r.result.profit_factor for r in dev_reports) / len(dev_reports)
                 oos_pf = sum(r.result.profit_factor for r in oos_reports) / len(oos_reports)
                 pf_degradation = round(((dev_pf - oos_pf) / dev_pf) * 100.0, 1) if dev_pf > 0 else 0.0
 
-                # Classification rules
-                oos_expectancy = sum(r.result.expectancy_r for r in oos_reports) / len(oos_reports)
-                if oos_pf >= 1.3 and wfe_ratio >= 0.60 and oos_expectancy > 0.15:
-                    robustness = "ROBUST"
-                elif oos_pf >= 1.05 and wfe_ratio >= 0.40:
-                    robustness = "MARGINAL"
+                if dev_ret <= 0:
+                    wfe_status = "UNAVAILABLE_NONPOSITIVE_DEVELOPMENT_RETURN"
                 else:
-                    robustness = "OVERFITTED"
+                    wfe_ratio = round(oos_ret / dev_ret, 3)
+                    wfe_status = "AVAILABLE"
+                    # Descriptive heuristic thresholds; not statistical proof.
+                    oos_expectancy = sum(r.result.expectancy_r for r in oos_reports) / len(oos_reports)
+                    if oos_pf >= 1.3 and wfe_ratio >= 0.60 and oos_expectancy > 0.15:
+                        robustness = "ROBUST"
+                    elif oos_pf >= 1.05 and wfe_ratio >= 0.40:
+                        robustness = "MARGINAL"
+                    else:
+                        robustness = "OVERFITTED"
 
         md_summary = self._render_markdown_summary(
             validation_id=validation_id,
@@ -615,6 +636,7 @@ class ForexWalkForwardValidator:
             timeframe=timeframe,
             period_reports=period_reports,
             wfe=wfe_ratio,
+            wfe_status=wfe_status,
             pf_deg=pf_degradation,
             verdict=robustness,
         )
@@ -626,9 +648,11 @@ class ForexWalkForwardValidator:
             splits=splits,
             period_reports=period_reports,
             walk_forward_efficiency_ratio=wfe_ratio,
+            walk_forward_efficiency_status=wfe_status,
             profit_factor_degradation=pf_degradation,
             robustness_verdict=robustness,
             markdown_summary=md_summary,
+            split_methodology="EXPANDING_WINDOW" if len(splits) > 1 else "SINGLE_HOLDOUT",
             source_provenance=dict(source_provenance or {}),
             validation_status=validation_status,
         )
@@ -639,7 +663,8 @@ class ForexWalkForwardValidator:
         pair: str,
         timeframe: str,
         period_reports: dict[str, PeriodPerformanceReport],
-        wfe: float,
+        wfe: float | None,
+        wfe_status: str,
         pf_deg: float,
         verdict: str,
     ) -> str:
@@ -648,6 +673,7 @@ class ForexWalkForwardValidator:
             "ROBUST": "🟢 **ROBUST** (Heuristic thresholds met in this sample; not statistical validation)",
             "MARGINAL": "🟡 **MARGINAL** (Degradation observed, sizing dampening advised)",
             "OVERFITTED": "🔴 **OVERFITTED** (Performance deteriorates significantly out-of-sample)",
+            "UNAVAILABLE": "⚪ **UNAVAILABLE** (No valid positive development-return baseline for WFE)",
             "TAINTED": "🚨 **TAINTED** (OOS data was accessed during optimization)",
         }.get(verdict, verdict)
 
@@ -658,7 +684,8 @@ class ForexWalkForwardValidator:
             f"**Config Hash**: `{self.config_hash}`",
             "",
             f"### Robustness Assessment: {verdict_badge}",
-            f"- **Walk-Forward Efficiency (WFE)**: `{wfe:.2f}`",
+            f"- **Walk-Forward Efficiency (WFE)**: `{wfe:.2f}`" if wfe is not None else "- **Walk-Forward Efficiency (WFE)**: `Unavailable`",
+            f"- **WFE Status**: `{wfe_status}`",
             f"- **Profit Factor Degradation**: `{pf_deg:.1f}%`",
             "",
             "## Independent Period Performance Breakdown",

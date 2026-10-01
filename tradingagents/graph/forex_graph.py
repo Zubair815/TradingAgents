@@ -74,6 +74,7 @@ from tradingagents.graph.propagation import Propagator
 from tradingagents.graph.setup import DEBATE_PATH_MAP
 from tradingagents.llm_clients import create_llm_client
 from tradingagents.reporting import write_report_tree
+from tradingagents.risk.context import ForexRiskContext
 from tradingagents.risk.engine import ForexRiskEngine, ForexRiskLimits
 from tradingagents.risk.sizing import (
     BrokerExecutionConstraints,
@@ -99,6 +100,7 @@ def create_forex_risk_evaluator(
     sizing_constraints: BrokerExecutionConstraints | None = None,
     sizing_method: PositionSizingMethod = PositionSizingMethod.FIXED_RISK_PERCENT,
     sizing_result_holder: dict[str, PositionSizingResult] | None = None,
+    risk_context: ForexRiskContext | None = None,
 ):
     """Factory for the deterministic institutional Forex Risk Evaluator node.
 
@@ -108,14 +110,16 @@ def create_forex_risk_evaluator(
     """
     engine = risk_engine or ForexRiskEngine(default_limits=risk_limits)
     s_engine = sizing_engine or ForexPositionSizingEngine()
-    account = sizing_account or ForexAccountProfile()
-    constraints = sizing_constraints or BrokerExecutionConstraints()
+    account = risk_context.account if risk_context is not None else (sizing_account or ForexAccountProfile())
+    constraints = risk_context.broker if risk_context is not None else (sizing_constraints or BrokerExecutionConstraints())
 
     def forex_risk_evaluator_node(
         state: dict[str, Any], name: str = "Forex Risk Evaluator"
     ) -> dict[str, Any]:
         raw_pair = state.get("company_of_interest", "EURUSD")
         pair = normalize_forex_pair(raw_pair)
+        if risk_context is not None and risk_context.pair != pair:
+            raise ValueError("Forex risk context pair does not match graph pair")
         curr_date = state.get("trade_date")
 
         # 1. Retrieve or reconstruct proposal
@@ -145,6 +149,15 @@ def create_forex_risk_evaluator(
             account_balance=account.equity,
             account_currency=account.currency,
             limits=risk_limits,
+            current_spread_pips=(risk_context.market.spread_pips if risk_context else None),
+            atr_pips=(risk_context.market.atr_pips if risk_context else None),
+            open_position_count=(risk_context.portfolio.open_position_count if risk_context else 0),
+            daily_realized_pnl=(risk_context.portfolio.realized_pnl_today if risk_context else None),
+            day_start_balance=(risk_context.portfolio.day_start_balance if risk_context else None),
+            daily_pnl_available=(
+                risk_context is not None
+                and risk_context.portfolio.daily_pnl_status.value == "AVAILABLE"
+            ),
         )
 
         # 3. Deterministic Position Sizing & Margin Validation
@@ -153,6 +166,16 @@ def create_forex_risk_evaluator(
             sizing_method=sizing_method,
             account=account,
             constraints=constraints,
+            atr_pips=(risk_context.market.atr_pips if risk_context else None),
+            open_positions=(risk_context.portfolio.open_positions if risk_context else None),
+            conversions=(risk_context.conversions if risk_context else ()),
+            as_of_utc=(risk_context.as_of_utc if risk_context else None),
+            daily_realized_pnl=(risk_context.portfolio.realized_pnl_today if risk_context else None),
+            day_start_balance=(risk_context.portfolio.day_start_balance if risk_context else None),
+            daily_pnl_available=(
+                risk_context is not None
+                and risk_context.portfolio.daily_pnl_status.value == "AVAILABLE"
+            ),
         )
 
         if sizing_result_holder is not None:
@@ -208,6 +231,7 @@ def create_forex_portfolio_manager(
     journal: ForexTradeJournal | None = None,
     auto_record_trades: bool = False,
     cancellation_check: Callable[[], bool] | None = None,
+    persistence_guard: Callable[[], contextlib.AbstractContextManager[None]] | None = None,
 ):
     """Factory for the Forex Portfolio Manager node.
 
@@ -286,19 +310,23 @@ def create_forex_portfolio_manager(
                     else:
                         status = ProposalStatus.REJECTED
 
-                proposal_id = journal.save_proposal(
-                    proposal=proposal,
-                    risk_decision=decision,
-                    status=status,
-                    metadata={"trade_date": curr_date, "pair": pair},
-                )
+                guard = persistence_guard() if persistence_guard is not None else contextlib.nullcontext()
+                with guard:
+                    if cancellation_check is not None and cancellation_check():
+                        raise RuntimeError("analysis cancelled")
+                    proposal_id = journal.save_proposal(
+                        proposal=proposal,
+                        risk_decision=decision,
+                        status=status,
+                        metadata={"trade_date": curr_date, "pair": pair},
+                    )
 
-                # Newer analysis supersedes older unexecuted proposals for the same pair
-                if (
-                    status in (ProposalStatus.APPROVED, ProposalStatus.MODIFIED, ProposalStatus.PROPOSED)
-                    and hasattr(journal, "supersede_proposals")
-                ):
-                    journal.supersede_proposals(pair=pair, exclude_proposal_id=proposal_id)
+                    # Newer analysis supersedes older unexecuted proposals for the same pair
+                    if (
+                        status in (ProposalStatus.APPROVED, ProposalStatus.MODIFIED, ProposalStatus.PROPOSED)
+                        and hasattr(journal, "supersede_proposals")
+                    ):
+                        journal.supersede_proposals(pair=pair, exclude_proposal_id=proposal_id)
 
             except Exception as exc:
                 logger.error("Failed auto-logging Forex proposal to journal: %s", exc, exc_info=True)
@@ -334,10 +362,12 @@ class ForexGraphSetup:
         sizing_account: ForexAccountProfile | None = None,
         sizing_constraints: BrokerExecutionConstraints | None = None,
         sizing_method: PositionSizingMethod = PositionSizingMethod.FIXED_RISK_PERCENT,
+        risk_context: ForexRiskContext | None = None,
         sizing_result_holder: dict[str, PositionSizingResult] | None = None,
         journal: ForexTradeJournal | None = None,
         auto_record_trades: bool = False,
         cancellation_check: Callable[[], bool] | None = None,
+        persistence_guard: Callable[[], contextlib.AbstractContextManager[None]] | None = None,
         config: dict | None = None,
     ):
         _require_manual_execution(auto_record_trades)
@@ -351,10 +381,12 @@ class ForexGraphSetup:
         self.sizing_account = sizing_account
         self.sizing_constraints = sizing_constraints
         self.sizing_method = sizing_method
+        self.risk_context = risk_context
         self.sizing_result_holder = sizing_result_holder
         self.journal = journal
         self.auto_record_trades = auto_record_trades
         self.cancellation_check = cancellation_check
+        self.persistence_guard = persistence_guard
         self.config = config
 
     def _bind_config(self, node):
@@ -399,6 +431,7 @@ class ForexGraphSetup:
             sizing_constraints=self.sizing_constraints,
             sizing_method=self.sizing_method,
             sizing_result_holder=self.sizing_result_holder,
+            risk_context=self.risk_context,
         )
 
         portfolio_manager = create_forex_portfolio_manager(
@@ -406,6 +439,7 @@ class ForexGraphSetup:
             journal=self.journal,
             auto_record_trades=self.auto_record_trades,
             cancellation_check=self.cancellation_check,
+            persistence_guard=self.persistence_guard,
         )
 
         workflow = StateGraph(AgentState)
@@ -490,11 +524,13 @@ class ForexTradingAgentsGraph:
         sizing_account: ForexAccountProfile | None = None,
         sizing_constraints: BrokerExecutionConstraints | None = None,
         sizing_method: PositionSizingMethod = PositionSizingMethod.FIXED_RISK_PERCENT,
+        risk_context: ForexRiskContext | None = None,
         journal: ForexTradeJournal | None = None,
         learning_manager: Any = None,
         db_path: str | Path | None = None,
         auto_record_trades: bool = False,
         cancellation_check: Callable[[], bool] | None = None,
+        persistence_guard: Callable[[], contextlib.AbstractContextManager[None]] | None = None,
         quick_thinking_llm: Any = None,
         deep_thinking_llm: Any = None,
         checkpointer: Any = None,
@@ -509,8 +545,15 @@ class ForexTradingAgentsGraph:
         self.risk_limits = risk_limits or ForexRiskLimits()
         self.risk_engine = risk_engine or ForexRiskEngine(default_limits=self.risk_limits)
         self.sizing_engine = sizing_engine or ForexPositionSizingEngine()
-        self.sizing_account = sizing_account or ForexAccountProfile()
-        self.sizing_constraints = sizing_constraints or BrokerExecutionConstraints()
+        self.risk_context = risk_context
+        self.sizing_account = (
+            risk_context.account if risk_context is not None else (sizing_account or ForexAccountProfile())
+        )
+        self.sizing_constraints = (
+            risk_context.broker
+            if risk_context is not None
+            else (sizing_constraints or BrokerExecutionConstraints())
+        )
         self.sizing_method = sizing_method
         self.sizing_result_holder: dict[str, PositionSizingResult] = {}
 
@@ -524,6 +567,7 @@ class ForexTradingAgentsGraph:
         self.learning_manager = learning_manager
         self.auto_record_trades = auto_record_trades
         self.cancellation_check = cancellation_check
+        self.persistence_guard = persistence_guard
 
         # LLMs
         llm_kwargs = self._get_provider_kwargs()
@@ -595,10 +639,12 @@ class ForexTradingAgentsGraph:
             sizing_account=self.sizing_account,
             sizing_constraints=self.sizing_constraints,
             sizing_method=self.sizing_method,
+            risk_context=self.risk_context,
             sizing_result_holder=self.sizing_result_holder,
             journal=self.journal,
             auto_record_trades=self.auto_record_trades,
             cancellation_check=self.cancellation_check,
+            persistence_guard=self.persistence_guard,
             config=self.config,
         )
 

@@ -185,8 +185,8 @@ def reset_runtime_settings() -> dict:
 def build_config(config: dict | None = None) -> dict:
     """Build an isolated configuration from defaults, never another run's state."""
     result = deepcopy(default_config.DEFAULT_CONFIG)
-    default_config._apply_env_overrides(result)
     _merge_config(result, _load_runtime_settings())
+    default_config._apply_env_overrides(result)
     _merge_config(result, config or {})
     return result
 
