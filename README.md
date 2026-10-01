@@ -442,7 +442,7 @@ are synthetic or supplied by the caller. Demo runs do not write simulated trades
 to the actual trade journal. Without demo mode, the endpoint returns HTTP 503
 with code `FOREX_BACKTEST_DEMO_ONLY`.
 
-## Forex Phase 2 data integrity
+## Forex Phase 2 data integrity.
 
 Forex market data now defaults to MT5. Yahoo requires explicit selection or
 fallback permission and retains its source label. Only completed candles are
