@@ -684,6 +684,12 @@ class ForexTradingAgentsGraph:
         if self.config.get("llm_max_retries") is not None:
             kwargs["max_retries"] = int(self.config["llm_max_retries"])
 
+        if self.config.get("llm_timeout_seconds") is not None:
+            timeout = float(self.config["llm_timeout_seconds"])
+            if not 1 <= timeout <= 600:
+                raise ValueError("llm_timeout_seconds must be between 1 and 600")
+            kwargs["timeout"] = timeout
+
         return kwargs
 
 

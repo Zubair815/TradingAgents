@@ -356,6 +356,12 @@ def test_dashboard_boot_authentication_and_secret_storage(e2e_environment):
         config = page.evaluate("fetch('/api/config').then(async r => ({status:r.status, body:await r.json()}))")
         assert config["status"] == 200
         assert config["body"]["auth_required"] is False
+        live = page.evaluate("fetch('/api/health/live').then(r => r.json())")
+        assert live["status"] == "alive"
+        ready = page.evaluate("fetch('/api/health/ready').then(r => r.json())")
+        assert ready["status"] == "ready"
+        assert ready["components"]["database"]["status"] == "ready"
+        assert ready["components"]["mt5"]["status"] == "degraded"
 
     server.DASHBOARD_API_KEY = E2E_API_KEY
     try:

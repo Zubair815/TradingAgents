@@ -91,10 +91,21 @@ def _validate_runtime_value(key: str, value):
         if value < 0.5:
             raise ValueError(f"{key} must be at least 0.5 seconds")
         return value
+    if key == "llm_max_retries":
+        if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 10:
+            raise ValueError(f"{key} must be an integer between 0 and 10")
+        return value
+    if key == "llm_timeout_seconds":
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"{key} must be numeric")
+        value = float(value)
+        if not 1 <= value <= 600:
+            raise ValueError(f"{key} must be between 1 and 600 seconds")
+        return value
 
     reference = default_config.DEFAULT_CONFIG.get(key)
     explicit_type = default_config._CONFIG_KEY_TYPES.get(key)
-    if key in {"max_tokens", "llm_max_retries"}:
+    if key == "max_tokens":
         explicit_type = int
     if explicit_type is bool:
         if not isinstance(value, bool):

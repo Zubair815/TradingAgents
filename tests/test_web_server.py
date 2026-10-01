@@ -1,6 +1,7 @@
 """Tests for TradingAgents Web Dashboard backend."""
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -128,6 +129,40 @@ class TestDashboardAuth:
         with patch("web.server._run_analysis"):
             post_res = fresh_client.post("/api/analyze", json={"ticker": "AAPL"})
             assert post_res.status_code == 401
+
+
+@pytest.mark.unit
+class TestHealthEndpoints:
+    def test_liveness_is_public_and_has_stable_contract(self, client):
+        response = client.get("/api/health/live")
+        assert response.status_code == 200
+        assert response.json()["status"] == "alive"
+        assert response.json()["service"] == "tradingagents-dashboard"
+
+    def test_readiness_is_authenticated_and_mt5_disconnect_is_degraded(self):
+        client = TestClient(app)
+        assert client.get("/api/health/ready").status_code == 401
+
+        journal = SimpleNamespace(health_check=lambda: {"status": "ready"})
+        connection = SimpleNamespace(is_connected=lambda: False)
+        runtime = SimpleNamespace(
+            observer=SimpleNamespace(connection=connection),
+            service=SimpleNamespace(is_running=False),
+            closed=False,
+        )
+        with (
+            patch("web.forex_routes.get_journal", return_value=journal),
+            patch("web.forex_routes.get_forex_runtime", return_value=runtime),
+        ):
+            response = client.get(
+                "/api/health/ready",
+                headers={"X-Session-Token": server._SESSION_TOKEN},
+            )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["status"] == "ready"
+        assert body["components"]["database"]["status"] == "ready"
+        assert body["components"]["mt5"] == {"status": "degraded", "connected": False}
 
 
 # ---------------------------------------------------------------------------

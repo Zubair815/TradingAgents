@@ -198,6 +198,26 @@ MIGRATIONS: list[dict[str, Any]] = [
         SELECT 1;
         """,
     },
+    {
+        "version": 4,
+        "description": "Persist provider-reported LLM token usage by application run",
+        "sql": """
+        CREATE TABLE IF NOT EXISTS llm_usage_records (
+            usage_id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            provider TEXT,
+            model TEXT,
+            input_tokens INTEGER NOT NULL DEFAULT 0,
+            output_tokens INTEGER NOT NULL DEFAULT 0,
+            total_tokens INTEGER NOT NULL DEFAULT 0,
+            cached_tokens INTEGER NOT NULL DEFAULT 0,
+            reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+            observed_at_utc TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_llm_usage_run
+            ON llm_usage_records(run_id, observed_at_utc);
+        """,
+    },
 ]
 
 

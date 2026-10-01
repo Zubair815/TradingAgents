@@ -4,6 +4,7 @@ import sys
 import time
 from functools import wraps
 from pathlib import Path
+from typing import Any
 
 import typer
 from rich.align import Align
@@ -61,6 +62,7 @@ from tradingagents.graph.analyst_execution import (
     sync_analyst_tracker_from_chunk,
 )
 from tradingagents.graph.trading_graph import TradingAgentsGraph, _deep_merge_chunks
+from tradingagents.operations import configure_bounded_logging
 from tradingagents.portfolio import load_portfolio
 from tradingagents.reporting import write_report_tree
 
@@ -83,9 +85,59 @@ app = typer.Typer(
     help="TradingAgents CLI: Multi-Agents LLM Financial Trading Framework",
     add_completion=True,  # Enable shell completion
 )
+journal_app = typer.Typer(help="Back up or restore the local Forex SQLite journal.")
+app.add_typer(journal_app, name="journal")
 
 
 # MessageBuffer, create_layout, and update_display are provided by cli.display
+
+
+@journal_app.command("backup")
+def journal_backup_command(
+    destination: Path = typer.Argument(..., help="Backup file or destination directory."),  # noqa: B008
+    database: Path = typer.Option(None, "--database", help="Journal database path; defaults to the configured local journal."),  # noqa: B008
+):
+    """Create a consistency-safe, integrity-checked journal backup."""
+    from tradingagents.database.backup import create_journal_backup
+    from tradingagents.database.journal import ForexTradeJournal
+
+    journal = ForexTradeJournal(db_path=database) if database is not None else ForexTradeJournal()
+    try:
+        result = create_journal_backup(journal, destination)
+    finally:
+        journal.close()
+    typer.echo(f"Backup: {result.backup_path}")
+    typer.echo(f"Metadata: {result.metadata_path}")
+    typer.echo(f"Schema version: {result.metadata.schema_version}")
+    typer.echo("Integrity check: ok")
+
+
+@journal_app.command("restore")
+def journal_restore_command(
+    source: Path = typer.Argument(..., exists=True, dir_okay=False, help="Validated TradingAgents journal backup."),  # noqa: B008
+    database: Path = typer.Option(None, "--database", help="Active journal database path; defaults to the configured local journal."),  # noqa: B008
+    safety_backup_directory: Path = typer.Option(None, "--safety-backup-directory", help="Directory for the automatic pre-restore safety backup."),  # noqa: B008
+    confirm: bool = typer.Option(False, "--confirm", help="Required confirmation for journal replacement."),
+):
+    """Restore a validated backup after creating a safety snapshot."""
+    from tradingagents.database.backup import restore_journal_backup
+    from tradingagents.database.journal import ForexTradeJournal
+
+    if not confirm:
+        raise typer.BadParameter("restore requires --confirm")
+    journal = ForexTradeJournal(db_path=database) if database is not None else ForexTradeJournal()
+    try:
+        result = restore_journal_backup(
+            journal,
+            source,
+            safety_backup_directory=safety_backup_directory,
+        )
+    finally:
+        journal.close()
+    typer.echo(f"Restored: {result.restored_path}")
+    typer.echo(f"Safety backup: {result.safety_backup.backup_path}")
+    typer.echo(f"Schema version: {result.final_schema_version}")
+    typer.echo("Integrity check: ok")
 
 
 def get_user_selections():
@@ -970,6 +1022,7 @@ def analyze(
     ),
 ):
     """Run an analysis. This is what a bare `tradingagents` does."""
+    configure_bounded_logging()
     if ctx.invoked_subcommand is not None:
         return
     if clear_checkpoints:
@@ -1013,7 +1066,13 @@ def run_command(
     analysts: str = typer.Option(None, "--analysts", help="Comma-separated analysts; omit for all applicable analysts."),
     asset_type: str = typer.Option(None, "--asset-type", help="stock, crypto, or forex; detected from the ticker if omitted."),
     timeframe: str = typer.Option("H1", "--timeframe", help="Forex execution timeframe (M15, H1, H4, etc.)."),
-    balance: float = typer.Option(100000.0, "--balance", help="Forex account balance."),
+    context_timeframes: str = typer.Option(None, "--context-timeframes", help="Comma-separated Forex context timeframes; omit for the canonical ladder."),
+    account_source: str = typer.Option(None, "--account-source", help="Required for Forex: mt5 or manual."),
+    balance: float = typer.Option(None, "--balance", help="Manual Forex account balance."),
+    equity: float = typer.Option(None, "--equity", help="Manual Forex account equity."),
+    free_margin: float = typer.Option(None, "--free-margin", help="Manual Forex account free margin; zero is preserved."),
+    leverage: float = typer.Option(None, "--leverage", help="Manual Forex leverage ratio, e.g. 100 for 1:100."),
+    account_currency: str = typer.Option(None, "--account-currency", help="Manual Forex three-letter account currency."),
     risk_pct: float = typer.Option(1.0, "--risk-pct", help="Forex max risk percentage per trade."),
     checkpoint: bool | None = typer.Option(None, "--checkpoint/--no-checkpoint", help="Override checkpoint/resume configuration."),
     portfolio: str = typer.Option(None, "--portfolio", help="JSON file containing holdings and cash."),
@@ -1033,8 +1092,13 @@ def run_command(
 
         if asset_type == "forex":
             from tradingagents.forex import ForexTradingAgentsGraph
+            from tradingagents.forex.application import (
+                build_manual_application_context,
+                build_mt5_application_context,
+            )
+            from tradingagents.forex.domain import Timeframe
+            from tradingagents.mt5.observer import MT5Observer
             from tradingagents.risk.engine import ForexRiskLimits
-            from tradingagents.risk.sizing import ForexAccountProfile
 
             forex_analysts = ["forex_technical", "forex_macro", "forex_news"]
             if analysts is None:
@@ -1047,7 +1111,57 @@ def run_command(
                     raise ValueError("Forex analysts must contain one or more of: " + ", ".join(forex_analysts))
                 selected = [a for a in forex_analysts if a in requested]
 
-            account_profile = ForexAccountProfile(balance=balance, equity=balance)
+            exec_tf = Timeframe.from_string(timeframe).value
+            parsed_context_timeframes = None
+            if context_timeframes:
+                parsed_context_timeframes = [
+                    Timeframe.from_string(item.strip()).value
+                    for item in context_timeframes.split(",")
+                    if item.strip()
+                ]
+                if not parsed_context_timeframes:
+                    raise ValueError("context-timeframes must contain at least one timeframe")
+
+            source = (account_source or "").strip().lower()
+            if source not in {"mt5", "manual"}:
+                raise ValueError("Forex account-source must be explicitly set to mt5 or manual")
+
+            observer = None
+            if source == "manual":
+                manual_values = {
+                    "balance": balance,
+                    "equity": equity,
+                    "free-margin": free_margin,
+                    "leverage": leverage,
+                    "account-currency": account_currency,
+                }
+                missing = [name for name, value in manual_values.items() if value is None]
+                if missing:
+                    raise ValueError(
+                        "manual Forex mode requires: " + ", ".join(missing)
+                    )
+                if not account_currency or len(account_currency.strip()) != 3 or not account_currency.isalpha():
+                    raise ValueError("account-currency must be a three-letter code")
+                application_context = build_manual_application_context(
+                    balance=balance,
+                    equity=equity,
+                    free_margin=free_margin,
+                    leverage=leverage,
+                    currency=account_currency,
+                )
+            else:
+                observer = MT5Observer(auto_connect=False)
+                try:
+                    observer.connection.connect()
+                    application_context = build_mt5_application_context(
+                        observer,
+                        pair=ticker,
+                        execution_timeframe=exec_tf,
+                    )
+                except Exception:
+                    observer.connection.disconnect()
+                    raise
+
             risk_limits = ForexRiskLimits(max_risk_percent=risk_pct, default_risk_percent=risk_pct)
 
             config = deepcopy(DEFAULT_CONFIG)
@@ -1059,18 +1173,67 @@ def run_command(
             deep_model = config.get("deep_think_llm", "unknown")
             backend = config.get("backend_url") or "default"
             typer.echo(f"Provider: {provider} | Quick: {quick_model} | Deep: {deep_model} | Backend: {backend}")
-            typer.echo(f"Analyzing Forex pair {ticker} on {trade_date} ({timeframe}) with {', '.join(selected)}...")
+            verification = "broker verified" if application_context.broker_verified else "manual estimate / not broker verified"
+            typer.echo(f"Account source: {source} ({verification})")
+            typer.echo(f"Analyzing Forex pair {ticker} on {trade_date} ({exec_tf}) with {', '.join(selected)}...")
 
-            graph = ForexTradingAgentsGraph(
-                selected_analysts=selected,
-                config=config,
-                risk_limits=risk_limits,
-                sizing_account=account_profile,
-                debug=True,
-            )
-            state, signal = graph.run(ticker, trade_date=trade_date)
-            report = graph.save_reports(state, ticker, trade_date=trade_date)
+            try:
+                graph = ForexTradingAgentsGraph(
+                    selected_analysts=selected,
+                    config=config,
+                    risk_limits=risk_limits,
+                    sizing_account=application_context.account,
+                    risk_context=application_context.risk_context,
+                    debug=True,
+                )
+                analysis_cutoff = (
+                    application_context.risk_context.as_of_utc.isoformat()
+                    if application_context.risk_context is not None
+                    else trade_date
+                )
+                state, signal = graph.run(
+                    ticker,
+                    trade_date=analysis_cutoff,
+                    execution_timeframe=exec_tf,
+                    context_timeframes=parsed_context_timeframes,
+                )
+                report = graph.save_reports(state, ticker, trade_date=trade_date)
+            finally:
+                if observer is not None:
+                    observer.connection.disconnect()
+
+            def field(value: Any, name: str, default: Any = None) -> Any:
+                if isinstance(value, dict):
+                    return value.get(name, default)
+                return getattr(value, name, default)
+
+            proposal = state.get("forex_proposal") or {}
+            risk_decision = state.get("forex_risk_decision") or {}
+            action = field(proposal, "action", signal)
+            action = getattr(action, "value", action)
             typer.echo(f"Decision: {signal}")
+            typer.echo(f"Action: {action}")
+            typer.echo(f"Execution timeframe: {state.get('forex_execution_timeframe', exec_tf)}")
+            if proposal:
+                typer.echo(
+                    "Proposal: "
+                    f"entry={field(proposal, 'entry_price', 'Unavailable')} | "
+                    f"stop={field(proposal, 'stop_loss', 'Unavailable')} | "
+                    f"target={field(proposal, 'take_profit', 'Unavailable')}"
+                )
+            if risk_decision:
+                decision = field(risk_decision, "decision", "Unavailable")
+                decision = getattr(decision, "value", decision)
+                approved_size = field(risk_decision, "approved_lot_size", None)
+                violations = field(risk_decision, "violations", ()) or ()
+                typer.echo(f"Risk decision: {decision}")
+                typer.echo(f"Approved lot size: {approved_size if approved_size is not None else 'Unavailable'}")
+                if violations:
+                    typer.echo("Risk reasons: " + "; ".join(str(item) for item in violations))
+            typer.echo(f"Data source: {source}; broker_verified={str(application_context.broker_verified).lower()}")
+            for assumption in application_context.assumptions:
+                typer.echo(f"Assumption: {assumption}")
+            typer.echo("Execution policy: MANUAL ONLY — no broker order was submitted.")
             typer.echo(f"Report: {report}")
             return
         if analysts is None:

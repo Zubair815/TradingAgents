@@ -96,6 +96,12 @@ class ForexTradeJournal:
         """Return an active database connection with pragmas configured."""
         if self._mem_conn is not None:
             return self._mem_conn
+        maintenance_lock = Path(f"{self.db_path}.maintenance.lock")
+        if maintenance_lock.exists():
+            from tradingagents.database.backup import recover_stale_maintenance_marker
+
+            if not recover_stale_maintenance_marker(self.db_path):
+                raise RuntimeError("Forex journal maintenance is in progress")
         conn = sqlite3.connect(str(self.db_path), timeout=30.0)
         apply_pragmas(conn, is_memory=False)
         return conn
@@ -106,6 +112,84 @@ class ForexTradeJournal:
             with contextlib.suppress(Exception):
                 self._mem_conn.close()
             self._mem_conn = None
+
+    def save_llm_usage(self, records: list[dict[str, Any]]) -> int:
+        """Persist de-duplicated provider token counters; never stores content."""
+        if not records:
+            return 0
+        with self._lock:
+            conn = self._get_connection()
+            should_close = conn != self._mem_conn
+            try:
+                before = conn.total_changes
+                with conn:
+                    conn.executemany(
+                        """
+                        INSERT OR IGNORE INTO llm_usage_records (
+                            usage_id, run_id, provider, model, input_tokens,
+                            output_tokens, total_tokens, cached_tokens,
+                            reasoning_tokens, observed_at_utc
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        [
+                            (
+                                item["usage_id"], item["run_id"], item.get("provider"),
+                                item.get("model"), int(item.get("input_tokens", 0)),
+                                int(item.get("output_tokens", 0)),
+                                int(item.get("total_tokens", 0)),
+                                int(item.get("cached_tokens", 0)),
+                                int(item.get("reasoning_tokens", 0)),
+                                item["observed_at_utc"],
+                            )
+                            for item in records
+                        ],
+                    )
+                return conn.total_changes - before
+            finally:
+                if should_close:
+                    conn.close()
+
+    def get_llm_usage_summary(self, run_id: str) -> dict[str, Any]:
+        """Return actual usage totals, or an explicit unavailable result."""
+        with self._lock:
+            conn = self._get_connection()
+            should_close = conn != self._mem_conn
+            try:
+                row = conn.execute(
+                    """
+                    SELECT COUNT(*), COALESCE(SUM(input_tokens), 0),
+                           COALESCE(SUM(output_tokens), 0), COALESCE(SUM(total_tokens), 0),
+                           COALESCE(SUM(cached_tokens), 0), COALESCE(SUM(reasoning_tokens), 0)
+                    FROM llm_usage_records WHERE run_id = ?
+                    """,
+                    (run_id,),
+                ).fetchone()
+            finally:
+                if should_close:
+                    conn.close()
+        count, input_tokens, output_tokens, total_tokens, cached_tokens, reasoning_tokens = row
+        return {
+            "status": "available" if count else "unavailable",
+            "source": "provider_metadata",
+            "call_count": count,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": total_tokens,
+            "cached_tokens": cached_tokens,
+            "reasoning_tokens": reasoning_tokens,
+        }
+
+    def health_check(self) -> dict[str, str]:
+        """Perform the inexpensive query used by readiness probes."""
+        with self._lock:
+            conn = self._get_connection()
+            should_close = conn != self._mem_conn
+            try:
+                conn.execute("SELECT 1").fetchone()
+                return {"status": "ready"}
+            finally:
+                if should_close:
+                    conn.close()
 
 
     def __enter__(self) -> ForexTradeJournal:

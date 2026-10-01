@@ -1,6 +1,6 @@
 # Windows + XM Demo manual acceptance checklist
 
-Status: **NOT EXECUTED**
+Status: **ATTEMPTED 2026-10-01 - BLOCKED BEFORE CONNECTIVITY**
 
 This checklist requires a Windows machine with XM MetaTrader 5, a demo account,
 market connectivity, and user-controlled broker actions. Repository tests use
@@ -35,5 +35,17 @@ before marking any item complete. Never record a password or API key.
 - [ ] 24. Restart the dashboard.
 - [ ] 25. Confirm journal, deal, reflection, and lesson data remain available.
 
-Acceptance result: **NOT EXECUTED — no live XM/MT5 evidence was supplied during
-the final repository audit.**
+Acceptance result: **NOT XM DEMO ACCEPTED — the checklist remains incomplete.**
+
+## 2026-10-01 attempt
+
+The Windows host, MetaTrader5 Python package, and installed terminal executable
+were verified. The terminal was launched, but Python IPC initialization timed out
+with error `-10005`; no connected account or XM demo server was available. No
+checklist item above is marked complete because the required live evidence was not
+obtained and no manual broker action was performed.
+
+Host, restart, resource, and sanitized failure evidence is recorded in
+`docs/PHASE5_ACCEPTANCE_EVIDENCE.md`.
+
+Acceptance result remains: **NOT XM DEMO ACCEPTED**.

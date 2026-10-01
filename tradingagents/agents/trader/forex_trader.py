@@ -266,6 +266,8 @@ def create_forex_trader(llm: Any):
         if structured_llm is not None:
             try:
                 raw_res = structured_llm.invoke(messages)
+                from tradingagents.llm_clients.usage import observe_response_usage
+                observe_response_usage(raw_res.get("raw") if isinstance(raw_res, dict) else raw_res)
                 if isinstance(raw_res, dict) and "parsed" in raw_res:
                     candidate = raw_res.get("parsed")
                 else:

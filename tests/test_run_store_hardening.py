@@ -87,6 +87,7 @@ def test_stale_active_pruned_but_recent_active_retained(isolated_transient_store
     assert "recent" in server._runs
     assert "stale" not in server._run_events
     assert "stale" in server._expired_runs
+    assert server._expired_runs["stale"]["status"] == "stale"
 
 
 def test_run_cancel_endpoint_sets_terminal_state(isolated_transient_stores):

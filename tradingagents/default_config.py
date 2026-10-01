@@ -19,6 +19,7 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_BENCHMARK_TICKER":     "benchmark_ticker",
     "TRADINGAGENTS_TEMPERATURE":          "temperature",
     "TRADINGAGENTS_LLM_MAX_RETRIES":      "llm_max_retries",
+    "TRADINGAGENTS_LLM_TIMEOUT_SECONDS":  "llm_timeout_seconds",
     "TRADINGAGENTS_MAX_TOKENS":           "max_tokens",
     # Provider-specific reasoning/thinking knobs (None = each provider's own
     # default). Settable here for non-interactive runs; the CLI also offers an
@@ -50,6 +51,8 @@ _CONFIG_KEY_TYPES = {
     "anthropic_effort": str,
     "holding_period_days": int,
     "memory_log_max_entries": int,
+    "llm_max_retries": int,
+    "llm_timeout_seconds": float,
 }
 
 
@@ -60,7 +63,7 @@ def _coerce(value: str, reference, key: str | None = None):
     default — a misspelled boolean (e.g. ``treu``) or non-numeric float/int fails
     loudly at startup with an informative message.
     """
-    if key in ("max_tokens", "llm_max_retries"):
+    if key == "max_tokens":
         try:
             int(value)
         except (ValueError, TypeError):
@@ -144,7 +147,10 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # SDK retry budget forwarded to every provider chat client. None leaves each
     # provider/SDK at its own default (usually 2). Raise it to ride out bursty
     # 429 throttling on rate-limited deployments instead of aborting a run (#1091).
-    "llm_max_retries": None,
+    "llm_max_retries": 2,
+    # Bound routine provider calls. Provider SDKs enforce this per HTTP request;
+    # native tool/data timeouts remain independently bounded at their adapters.
+    "llm_timeout_seconds": 120.0,
     # Cap on output tokens forwarded to every provider chat client. None leaves
     # each provider at its own default. Set it to bound a model that emits
     # unbounded reasoning/output and hangs or trips a gateway idle timeout

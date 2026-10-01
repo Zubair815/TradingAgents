@@ -276,11 +276,15 @@ different context around it.
 
 ### CLI path
 
-`cli/main.py::run_analysis()` prompts for Forex selection, constructs a manual
-`ForexAccountProfile` from the entered balance and a `ForexRiskLimits`, creates
-the same `ForexTradingAgentsGraph`, and runs the same analyst/debate/trader/risk/
-portfolio-manager chain. It has no MT5 context assembly and therefore uses default
-broker constraints, no open positions, no conversion rate, and no live spread/ATR.
+The noninteractive `cli/main.py::run_command()` requires an explicit `mt5` or
+`manual` account source. Both the browser worker and CLI call the framework-neutral
+builders in `tradingagents/forex/application.py`. MT5 mode supplies the complete
+authoritative account, quote, ATR, broker, portfolio, daily-P&L and conversion
+context and fails closed when evidence is unavailable. Manual mode requires
+balance, equity, free margin, leverage and currency, preserves known zero values,
+and is labelled non-broker-verified. The selected execution/context timeframes are
+passed explicitly into `ForexTradingAgentsGraph`; all broker execution remains a
+human action outside TradingAgents.
 
 ### Manual execution, observation, journal, and learning path
 

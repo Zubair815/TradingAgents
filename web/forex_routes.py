@@ -83,6 +83,10 @@ from tradingagents.dataflows.config import (
 from tradingagents.dataflows.forex_data import ForexBar
 from tradingagents.dataflows.forex_quality import DataInsufficientError
 from tradingagents.forex import ForexTradingAgentsGraph
+from tradingagents.forex.application import (
+    build_manual_application_context,
+    build_mt5_application_context,
+)
 from tradingagents.forex.domain import (
     MAJOR_PAIRS,
     normalize_forex_pair,
@@ -92,16 +96,11 @@ from tradingagents.journal.lifecycle import LifecycleError, LifecycleTransitionE
 from tradingagents.journal.manager import ForexJournalManager
 from tradingagents.journal.models import LifecycleState
 from tradingagents.learning.manager import ForexLearningManager
+from tradingagents.llm_clients.usage import UsageTracker, track_usage
 from tradingagents.metrics.manager import ForexMetricsManager
 from tradingagents.mt5.errors import MT5Error
 from tradingagents.mt5.observer import MT5Observer
 from tradingagents.research.contracts import AnalysisRequest as ForexAnalysisRequest
-from tradingagents.risk.context import (
-    AvailabilityStatus,
-    ForexMarketContext,
-    ForexPortfolioContext,
-    ForexRiskContext,
-)
 from tradingagents.risk.engine import ForexRiskEngine, ForexRiskLimits
 from tradingagents.risk.sizing import (
     BrokerExecutionConstraints,
@@ -172,6 +171,9 @@ def _prune_expired_forex_runs(*, now: float | None = None) -> list[str]:
                 if stamp is None or current - stamp > _FOREX_RETENTION_POLICY.terminal_max_age_seconds:
                     expired.add(run_id)
             elif stamp is None or current - stamp > _FOREX_RETENTION_POLICY.stale_active_seconds:
+                run["status"] = "stale"
+                run["finished_at"] = datetime.now(timezone.utc).isoformat()
+                run["error"] = "Run exceeded the active retention window"
                 expired.add(run_id)
         expired.update(oldest_excess_ids(
             _forex_runs,
@@ -1685,101 +1687,28 @@ def _run_forex_analysis(run_id: str, req: ForexAnalysisRequest) -> None:
 
         exec_tf = req.execution_timeframe or req.timeframe or "H1"
         ctx_tfs = req.context_timeframes or req.higher_timeframes or ("H4", "D1")
-        risk_context: ForexRiskContext | None = None
-
         requested_source = req.account_source
-        mt5_obs = get_mt5_observer() if requested_source == "mt5" else None
-        mt5_connected = bool(
-            mt5_obs
-            and getattr(mt5_obs, "connection", None)
-            and hasattr(mt5_obs.connection, "is_connected")
-            and mt5_obs.connection.is_connected()
-        )
         effective_account_source = requested_source
 
         if effective_account_source == "mt5":
-            if mt5_connected:
-                try:
-                    account = mt5_obs.to_sizing_account_profile()
-                    account = account.model_copy(
-                        update={
-                            "max_open_positions": req.max_open_positions,
-                            "max_account_risk_percent": req.max_account_risk_percent,
-                            "max_currency_exposure_percent": req.max_currency_exposure_percent,
-                            "max_daily_loss_percent": req.max_daily_loss_percent,
-                            "max_daily_loss_amount": req.max_daily_loss_amount,
-                        }
-                    )
-                    tick = mt5_obs.get_current_tick(req.pair)
-                    constraints = mt5_obs.to_broker_constraints(req.pair)
-                    atr_pips = mt5_obs.get_atr_pips(req.pair, exec_tf, as_of=tick.time)
-                    conversions = mt5_obs.get_conversion_observations(req.pair, account.currency)
-                    as_of_utc = datetime.now(timezone.utc)
-                    max_conversion_age = timedelta(
-                        seconds=float(get_runtime_config().get("forex_quote_max_age_seconds", 30))
-                    )
-                    positions = mt5_obs.to_open_positions(
-                        account_currency=account.currency,
-                        conversions=conversions,
-                        as_of_utc=as_of_utc,
-                        max_conversion_age=max_conversion_age,
-                    )
-                    daily_rule_enabled = (
-                        account.max_daily_loss_percent is not None
-                        or account.max_daily_loss_amount is not None
-                    )
-                    daily_pnl_status = AvailabilityStatus.NOT_APPLICABLE
-                    daily_pnl = None
-                    day_start_balance = None
-                    daily_pnl_source = None
-                    trading_day_start = None
-                    if daily_rule_enabled:
-                        try:
-                            daily_pnl, trading_day_start = mt5_obs.get_daily_realized_pnl(as_of_utc)
-                            day_start_balance = account.balance - daily_pnl
-                            daily_pnl_source = "MT5 deal history"
-                            daily_pnl_status = AvailabilityStatus.AVAILABLE
-                        except MT5Error:
-                            daily_pnl_status = AvailabilityStatus.UNAVAILABLE
-                    risk_context = ForexRiskContext(
-                        pair=req.pair,
-                        as_of_utc=as_of_utc,
-                        market=ForexMarketContext(
-                            quote_status=AvailabilityStatus.AVAILABLE,
-                            bid=tick.bid,
-                            ask=tick.ask,
-                            spread_pips=tick.spread_pips,
-                            atr_status=AvailabilityStatus.AVAILABLE,
-                            atr_pips=atr_pips,
-                            source=f"{tick.source}:{tick.broker_symbol or req.pair}",
-                            observed_at=tick.time,
-                        ),
-                        account=account,
-                        broker=constraints,
-                        portfolio=ForexPortfolioContext(
-                            open_positions=tuple(positions),
-                            daily_pnl_status=daily_pnl_status,
-                            realized_pnl_today=daily_pnl,
-                            day_start_balance=day_start_balance,
-                            daily_pnl_source=daily_pnl_source,
-                            trading_day_start_utc=trading_day_start,
-                        ),
-                        conversions=conversions,
-                    )
-                except DataInsufficientError:
-                    raise
-                except Exception as exc:
-                    raise DataInsufficientError("complete MT5 risk context is unavailable") from exc
-            else:
-                raise DataInsufficientError("MT5 account is not connected")
-        if risk_context is not None:
-            account = risk_context.account
+            application_context = build_mt5_application_context(
+                get_mt5_observer(),
+                pair=req.pair,
+                execution_timeframe=exec_tf,
+                max_open_positions=req.max_open_positions,
+                max_account_risk_percent=req.max_account_risk_percent,
+                max_currency_exposure_percent=req.max_currency_exposure_percent,
+                max_daily_loss_percent=req.max_daily_loss_percent,
+                max_daily_loss_amount=req.max_daily_loss_amount,
+                quote_max_age_seconds=float(
+                    get_runtime_config().get("forex_quote_max_age_seconds", 30)
+                ),
+            )
         else:
-            account = ForexAccountProfile(
+            application_context = build_manual_application_context(
                 balance=req.account_balance,
                 equity=req.account_equity,
                 free_margin=req.account_free_margin,
-                used_margin=max(0.0, req.account_equity - req.account_free_margin),
                 currency=req.account_currency,
                 leverage=req.account_leverage,
                 max_open_positions=req.max_open_positions,
@@ -1788,6 +1717,8 @@ def _run_forex_analysis(run_id: str, req: ForexAnalysisRequest) -> None:
                 max_daily_loss_percent=req.max_daily_loss_percent,
                 max_daily_loss_amount=req.max_daily_loss_amount,
             )
+        account = application_context.account
+        risk_context = application_context.risk_context
 
         risk_kwargs: dict[str, Any] = {
             "max_risk_percent": req.risk_percent,
@@ -2082,10 +2013,23 @@ def _run_forex_analysis(run_id: str, req: ForexAnalysisRequest) -> None:
 
 def _forex_worker_entry(run_id: str, req: ForexAnalysisRequest) -> None:
     """Track worker lifetime so shutdown never closes its journal underneath it."""
+    tracker = UsageTracker(
+        run_id=run_id,
+        provider=req.provider or get_runtime_config().get("llm_provider"),
+        model=req.quick_model or get_runtime_config().get("quick_think_llm"),
+    )
     try:
-        _run_forex_analysis(run_id, req)
+        with track_usage(tracker):
+            _run_forex_analysis(run_id, req)
     finally:
+        journal = get_journal()
+        journal.save_llm_usage(tracker.records())
+        usage = journal.get_llm_usage_summary(run_id)
         with _lock:
+            if run_id in _forex_runs:
+                _forex_runs[run_id]["usage"] = usage
+            if run_id in _forex_completed_reports:
+                _forex_completed_reports[run_id]["usage"] = usage
             _forex_analysis_threads.discard(threading.current_thread())
 
 
@@ -2137,6 +2081,7 @@ async def start_forex_analysis(
         "proposal_id": None,
         "report_id": None,
         "report_path": None,
+        "usage": UsageTracker(run_id=run_id).summary(),
     }
 
     with _lock:

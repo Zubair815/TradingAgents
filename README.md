@@ -159,6 +159,11 @@ Open your browser to:
 | `TRADINGAGENTS_DASHBOARD_PORT` | `8050` | Dashboard server port |
 | `TRADINGAGENTS_DASHBOARD_API_KEY` | *(None)* | Optional API key to restrict run execution |
 | `TRADINGAGENTS_CORS_ORIGINS` | `http://localhost:8050,http://127.0.0.1:8050` | Allowed CORS origins (comma-separated) |
+| `TRADINGAGENTS_LOG_DIR` | `~/.tradingagents/logs` | Local application log directory |
+| `TRADINGAGENTS_LOG_MAX_BYTES` | `5242880` | Maximum bytes per log file (1 KiB-100 MiB) |
+| `TRADINGAGENTS_LOG_BACKUP_COUNT` | `3` | Rotated log files retained (1-20) |
+| `TRADINGAGENTS_LLM_TIMEOUT_SECONDS` | `120` | Per-request provider timeout (1-600 seconds) |
+| `TRADINGAGENTS_LLM_MAX_RETRIES` | `2` | Provider SDK retry limit (0-10) |
 
 ## Installation and CLI
 
@@ -248,6 +253,29 @@ tradingagents          # installed command
 python -m cli.main     # alternative: run directly from source
 ```
 You will see a screen where you can select your desired tickers, analysis date, LLM provider, research depth, and more. Your previous run's answers come back as the defaults, so pressing Enter accepts them. The `TRADINGAGENTS_*` variables in `.env` still skip their step entirely.
+
+For noninteractive Forex analysis, select the account source explicitly. Manual
+mode requires every sizing-critical account value and is labelled as a
+non-broker-verified estimate:
+
+```bash
+tradingagents run EURUSD --account-source manual --timeframe M15 \
+  --balance 10000 --equity 9800 --free-margin 8500 \
+  --leverage 100 --account-currency USD
+```
+
+MT5 mode connects to the local terminal and builds the same authoritative,
+read-only risk context used by the browser. Missing account, quote, symbol,
+portfolio, ATR, or conversion evidence fails closed; it never falls back to a
+fabricated manual account:
+
+```bash
+tradingagents run EURJPY --account-source mt5 --timeframe M15 \
+  --context-timeframes H1,H4
+```
+
+Both modes provide decision support only. The CLI never submits, modifies, or
+closes a broker order.
 
 ### Markets and tickers
 
@@ -353,6 +381,47 @@ An empty `positions` list means a flat book, which is different from passing not
 ## Persistence and Recovery
 
 TradingAgents persists two kinds of state across runs.
+
+### Forex journal backup and restore
+
+The authoritative Forex SQLite journal can be backed up with SQLite snapshot
+semantics while the application is running. The command validates the resulting
+database, records schema/application metadata and a SHA-256 hash, and never copies
+`.env` or broker/provider credentials:
+
+```bash
+tradingagents journal backup ./backups
+```
+
+Restore validates compatibility and integrity before replacement, creates a
+pre-restore safety backup, coordinates writers through the journal maintenance
+boundary, applies compatible migrations, and verifies the restored database. The
+explicit confirmation flag prevents accidental replacement:
+
+```bash
+tradingagents journal restore ./backups/forex-journal-backup-....db --confirm
+```
+
+Use `--database PATH` to administer a non-default journal and
+`--safety-backup-directory PATH` to select where the pre-restore snapshot is kept.
+Do not delete the reported safety backup until the restored journal has been
+reviewed.
+
+Restore creates `<journal>.maintenance.lock` while writers are stopped. Normal
+completion removes it. After a process crash, the application automatically
+removes the marker only when it is older than five minutes, contains a valid PID,
+and that process is no longer alive. An unparseable, recent, or live-owner marker
+continues to block database access. Inspect the process and journal before manually
+removing such a marker; then run a backup or integrity check before resuming work.
+
+### Operational shutdown and logs
+
+Dashboard shutdown asks active equity analyses to stop between graph stages,
+waits for tracked workers for a bounded interval, then stops the read-only MT5
+observer and closes journal resources. Native MT5 IPC cannot be force-cancelled;
+if a terminal call stalls, cleanup remains deferred until that call returns or the
+process exits. Application logs rotate by size using the limits above, so routine
+local deployment does not grow one file indefinitely.
 
 ### Decision log
 

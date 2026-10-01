@@ -2,6 +2,8 @@
 
 from collections.abc import Mapping
 
+from .usage import observe_response_usage
+
 
 class IncompleteResponseError(RuntimeError):
     """A model stopped before producing a usable, complete response."""
@@ -14,6 +16,7 @@ def validate_response(response, source: str = "LLM", *, allow_empty: bool = Fals
     runnables can bypass a provider wrapper's ``invoke`` method. Never infer
     completion just because the model returned no tool calls.
     """
+    observe_response_usage(response)
     for attribute in ("response_metadata", "additional_kwargs"):
         metadata = getattr(response, attribute, None)
         if not isinstance(metadata, Mapping):

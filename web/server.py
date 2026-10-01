@@ -46,6 +46,8 @@ from tradingagents.dataflows.config import get_config as get_runtime_config  # n
 from tradingagents.dataflows.utils import safe_ticker_component  # noqa: E402
 from tradingagents.default_config import DEFAULT_CONFIG  # noqa: E402
 from tradingagents.graph.trading_graph import TradingAgentsGraph  # noqa: E402
+from tradingagents.llm_clients.usage import UsageTracker, track_usage  # noqa: E402
+from tradingagents.operations import configure_bounded_logging  # noqa: E402
 from web.retention import (  # noqa: E402
     DEFAULT_RETENTION_POLICY,
     TERMINAL_STATUSES,
@@ -142,6 +144,8 @@ _expired_runs: dict[str, dict[str, Any]] = {}
 _run_store_lock = threading.RLock()
 _RUN_RETENTION_POLICY = DEFAULT_RETENTION_POLICY
 _last_run_prune_at: float | None = None
+_analysis_threads: set[threading.Thread] = set()
+_shutdown_requested = threading.Event()
 
 
 def _prune_expired_runs(*, now: float | None = None) -> list[str]:
@@ -164,6 +168,9 @@ def _prune_expired_runs(*, now: float | None = None) -> list[str]:
                 if stamp is None or current - stamp > _RUN_RETENTION_POLICY.terminal_max_age_seconds:
                     expired.add(run_id)
             elif stamp is None or current - stamp > _RUN_RETENTION_POLICY.stale_active_seconds:
+                run["status"] = "stale"
+                run["finished_at"] = datetime.now().astimezone().isoformat()
+                run["error"] = "Run exceeded the active retention window"
                 expired.add(run_id)
         expired.update(oldest_excess_ids(
             _runs,
@@ -287,9 +294,15 @@ def _emit(run_id: str, event_type: str, data: dict):
 # ---------------------------------------------------------------------------
 # Background analysis runner
 # ---------------------------------------------------------------------------
-def _run_analysis(run_id: str, req: AnalysisRequest):
+def _run_analysis(
+    run_id: str,
+    req: AnalysisRequest,
+    shutdown_event: threading.Event | None = None,
+):
     """Execute analysis in a background thread, emitting progress events."""
     try:
+        if shutdown_event is not None and shutdown_event.is_set():
+            raise RuntimeError("Application shutdown requested")
         trade_date = req.date or datetime.now().strftime("%Y-%m-%d")
         with _run_store_lock:
             if run_id not in _runs:
@@ -371,6 +384,8 @@ def _run_analysis(run_id: str, req: AnalysisRequest):
             })
 
             for chunk in graph.graph.stream(graph_input, **args):
+                if shutdown_event is not None and shutdown_event.is_set():
+                    raise RuntimeError("Application shutdown requested")
                 trace.append(chunk)
 
                 # Identify nodes from state changes across analyst reports, debates, and decisions
@@ -506,19 +521,48 @@ def _run_analysis(run_id: str, req: AnalysisRequest):
         logger.error("Analysis failed for run %s (%s)", run_id, type(exc).__name__)
 
 
+def _run_analysis_entry(run_id: str, req: AnalysisRequest) -> None:
+    """Run analysis with provider-reported token accounting."""
+    cfg = get_runtime_config()
+    tracker = UsageTracker(
+        run_id=run_id,
+        provider=req.provider or cfg.get("llm_provider"),
+        model=req.quick_model or cfg.get("quick_think_llm"),
+    )
+    try:
+        with track_usage(tracker):
+            _run_analysis(run_id, req, _shutdown_requested)
+        usage = tracker.summary()
+        with _run_store_lock:
+            if run_id in _runs:
+                _runs[run_id]["usage"] = usage
+            if run_id in _completed_reports:
+                _completed_reports[run_id]["usage"] = usage
+    finally:
+        with _run_store_lock:
+            _analysis_threads.discard(threading.current_thread())
+
+
 # ---------------------------------------------------------------------------
 # FastAPI app
 # ---------------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    configure_bounded_logging()
     logger.info("TradingAgents Web Dashboard starting")
     from web.forex_routes import get_forex_runtime, reset_forex_state
     runtime = get_forex_runtime()
+    _shutdown_requested.clear()
     app.state.forex_runtime = runtime
     try:
         await asyncio.to_thread(runtime.start)
         yield
     finally:
+        _shutdown_requested.set()
+        with _run_store_lock:
+            analysis_threads = list(_analysis_threads)
+        for thread in analysis_threads:
+            await asyncio.to_thread(thread.join, 0.5)
         await asyncio.to_thread(reset_forex_state)
         logger.info("TradingAgents Web Dashboard shutting down")
 
@@ -638,6 +682,49 @@ async def runtime_diagnostics(request: Request):
     return {"equities": equities, "forex": get_retention_diagnostics()}
 
 
+@app.get("/api/health/live")
+async def health_live():
+    """Process liveness only; deliberately independent of external providers."""
+    return {
+        "status": "alive",
+        "service": "tradingagents-dashboard",
+        "checked_at": datetime.now().astimezone().isoformat(),
+    }
+
+
+@app.get("/api/health/ready")
+async def health_ready(request: Request):
+    """Authenticated dependency readiness with sanitized component states."""
+    verify_auth(request)
+    from web.forex_routes import get_forex_runtime, get_journal
+
+    components: dict[str, dict[str, Any]] = {}
+    try:
+        components["database"] = get_journal().health_check()
+    except Exception:
+        components["database"] = {"status": "not_ready"}
+
+    runtime = get_forex_runtime()
+    try:
+        connected = bool(runtime.observer.connection.is_connected())
+    except Exception:
+        connected = False
+    components["mt5"] = {
+        "status": "ready" if connected else "degraded",
+        "connected": connected,
+    }
+    components["observation_service"] = {
+        "status": "ready" if runtime.service.is_running else "idle",
+        "running": bool(runtime.service.is_running),
+    }
+    ready = components["database"]["status"] == "ready" and not runtime.closed
+    return {
+        "status": "ready" if ready else "not_ready",
+        "components": components,
+        "checked_at": datetime.now().astimezone().isoformat(),
+    }
+
+
 @app.post("/api/analyze")
 async def start_analysis(req: AnalysisRequest, request: Request):
     """Launch a new analysis run in a background thread."""
@@ -658,11 +745,14 @@ async def start_analysis(req: AnalysisRequest, request: Request):
             "finished_at": None,
             "error": None,
             "signal": None,
+            "usage": UsageTracker(run_id=run_id).summary(),
         }
         _run_events[run_id] = []
         _prune_expired_runs()
 
-    thread = threading.Thread(target=_run_analysis, args=(run_id, req), daemon=True)
+    thread = threading.Thread(target=_run_analysis_entry, args=(run_id, req), daemon=True)
+    with _run_store_lock:
+        _analysis_threads.add(thread)
     thread.start()
 
     return {"run_id": run_id, "status": "queued"}

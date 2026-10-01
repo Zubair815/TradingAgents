@@ -262,6 +262,13 @@ class TradingAgentsGraph:
         if max_retries is not None and max_retries != "":
             kwargs["max_retries"] = _coerce_max_retries(max_retries)
 
+        timeout = self.config.get("llm_timeout_seconds")
+        if timeout is not None and timeout != "":
+            timeout = float(timeout)
+            if not 1 <= timeout <= 600:
+                raise ValueError("llm_timeout_seconds must be between 1 and 600")
+            kwargs["timeout"] = timeout
+
         # Output-token cap is cross-provider, but Gemini names it
         # ``max_output_tokens``; forward under the right key when set (#1204).
         max_tokens = self.config.get("max_tokens")
