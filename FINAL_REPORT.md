@@ -1,10 +1,9 @@
-# TradingAgents final system acceptance report
+# TradingAgents Forex remediation final verification report
 
-- Audit date: 2026-09-30
-- Commit at audit start: `18cdbea0806eb631911dd332a5f0211c45a65d92` (`Version1.8`)
-- Working tree at audit start: clean
-- Final release-evidence patch: uncommitted; it has no commit SHA until the maintainer commits it
-- Release status: **READY FOR LOCAL DEMO VALIDATION**
+- Verification date: 2026-10-01
+- Current HEAD: `4d2152914fc3ae85249b04126645339eaf755e79` (`Version2.0`)
+- Forex remediation: uncommitted working-tree changes; no newer commit SHA exists
+- Release status: **READY FOR XM DEMO ACCEPTANCE**
 
 This status means the automated engineering gates pass. It is not a trading
 performance recommendation, and it does not claim live XM acceptance.
@@ -59,8 +58,8 @@ There is no automated Forex broker-order submission path.
 | Gate | Result |
 | --- | --- |
 | `ruff check .` | PASS |
-| `pytest -q -m "not e2e"` | PASS — 2,109 passed, 5 skipped, 6 deselected, 20 warnings, 88 subtests |
-| `pytest -q -m e2e` | PASS — 6 passed |
+| `pytest -q -m "not e2e"` | PASS — 2,161 passed, 5 skipped, 6 deselected, 22 warnings, 88 subtests |
+| `pytest -q -m e2e` | PASS — 6 passed, 2,166 deselected |
 | `python -m compileall tradingagents web cli` | PASS |
 | JavaScript syntax checks | PASS |
 | `git diff --check` | PASS |
@@ -73,10 +72,8 @@ There is no automated Forex broker-order submission path.
 | GitHub Chromium E2E | PASS |
 | GitHub Ruff | PASS |
 
-Latest GitHub evidence for the base commit: [CI run 36667732822](https://github.com/Zubair815/TradingAgents/actions/runs/36667732822),
-completed successfully for `18cdbea0806eb631911dd332a5f0211c45a65d92` on 2026-09-30.
-It does not cover the uncommitted final working-tree patch; final GitHub CI is
-therefore pending commit and push. The five local skips are
+No GitHub Actions result is available for the uncommitted remediation worktree;
+current-worktree CI remains pending commit and push. The five local skips are
 three POSIX-mode checks on Windows, optional Bedrock without `langchain_aws`, and
 an optional live DeepSeek call without credentials. No mandatory browser test
 was skipped.
@@ -128,7 +125,7 @@ an implemented path whose real-world or statistical acceptance remains limited.
 | Learning UI | COMPLETE | Lesson filters, evidence, rule text, and source-trade navigation are E2E tested. |
 | Settings | COMPLETE | Safe allowlisted persistence/reset, secret status, and reload behavior are E2E tested. |
 | Authentication | COMPLETE | Protected Forex router, in-memory key, HttpOnly cookie, strict origin/cookie policy, and sanitized errors are tested. |
-| E2E | COMPLETE | Six mandatory real-Chromium workflows pass locally; the five-test base gate passed in GitHub Actions. |
+| E2E | COMPLETE | Six mandatory real-Chromium workflows pass locally; current-worktree GitHub Actions remains pending commit and push. |
 | Runtime retention | COMPLETE | Age/count bounds, event caps, locks, tombstones, SSE exit, and journal preservation are stress tested. |
 | Documentation | COMPLETE | README, this evidence report, phase integrity docs, and XM checklist reflect the audited commit. |
 
@@ -188,9 +185,8 @@ the release from local-demo readiness to full live-environment acceptance.
 ## Release truth
 
 All repository-local automated engineering gates pass for the current working
-tree. GitHub CI is green for the base commit and must be rerun after this final
-patch is committed and pushed. The remaining environment gate is the explicitly
+tree. GitHub CI must run after this remediation is committed and pushed. The remaining environment gate is the explicitly
 manual Windows + XM Demo acceptance run. Therefore the objective local release
 classification is:
 
-**READY FOR LOCAL DEMO VALIDATION**
+**READY FOR XM DEMO ACCEPTANCE**

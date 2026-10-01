@@ -25,12 +25,18 @@ from __future__ import annotations
 import logging
 import math
 from collections.abc import Sequence
+from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any
 
 from pydantic import BaseModel, Field, model_validator
 
 from tradingagents.agents.schemas_forex import ForexAction, ForexTraderProposal
+from tradingagents.forex.conversion import (
+    ForexConversionRate,
+    FXConversionUnavailable,
+    resolve_conversion_rate,
+)
 from tradingagents.forex.domain import ForexPair, get_forex_pair
 from tradingagents.forex.pips import (
     pip_size_for,
@@ -149,8 +155,11 @@ class ForexAccountProfile(BaseModel):
         default=5.0,
         ge=1.0,
         le=25.0,
-        description="Maximum net directional exposure risk on any individual currency (e.g. USD)",
+        description="Maximum absolute net stop-loss risk attributed to one currency as a percentage of equity",
     )
+    max_open_positions: int = Field(default=5, ge=1, description="Maximum live open positions; pending orders excluded")
+    max_daily_loss_percent: float | None = Field(default=None, gt=0.0, le=100.0)
+    max_daily_loss_amount: float | None = Field(default=None, gt=0.0)
     margin_call_level: float = Field(default=100.0, description="Broker margin call level (%)")
     stop_out_level: float = Field(default=50.0, description="Broker liquidation stop-out level (%)")
 
@@ -164,6 +173,10 @@ class ForexAccountProfile(BaseModel):
 class BrokerExecutionConstraints(BaseModel):
     """Broker trading environment parameters and volume rules."""
 
+    broker_symbol: str | None = Field(default=None, description="Broker-native symbol name")
+    digits: int | None = Field(default=None, ge=0, le=10, description="Broker quote precision")
+    point: float | None = Field(default=None, gt=0.0, description="Smallest broker quote increment")
+    pip_size: float | None = Field(default=None, gt=0.0, description="Canonical pip size")
     min_volume: float = Field(default=0.01, ge=0.001, description="Broker minimum volume (0.01 micro lot)")
     max_volume: float = Field(default=100.0, ge=0.1, description="Broker maximum allowed volume in lots")
     volume_step: float = Field(default=0.01, ge=0.001, description="Broker volume increment step")
@@ -178,8 +191,8 @@ class OpenPosition(BaseModel):
     action: ForexAction = Field(description="Direction of the open trade (LONG/SHORT)")
     lots: float = Field(ge=0.0, description="Position size in standard lots")
     entry_price: float = Field(gt=0.0, description="Execution price")
-    stop_loss: float = Field(gt=0.0, description="Stop-loss level")
-    risk_amount: float = Field(ge=0.0, description="Committed dollar risk at stop-loss")
+    stop_loss: float | None = Field(default=None, gt=0.0, description="Stop-loss level; absent means unbounded risk")
+    risk_amount: float | None = Field(default=None, ge=0.0, description="Committed risk; absent when no objective bound exists")
 
 
 # ---------------------------------------------------------------------------
@@ -198,7 +211,7 @@ class PositionSizingResult(BaseModel):
     units: float = Field(ge=0.0, description="Calculated currency units (e.g. 10,000 for 0.10 lots)")
     risk_amount: float = Field(ge=0.0, description="Absolute risk in account currency at stop-loss")
     risk_percent: float = Field(ge=0.0, description="Risk as a percentage of account equity")
-    pip_value_per_lot: float = Field(gt=0.0, description="Value of 1 pip per standard lot in account currency")
+    pip_value_per_lot: float = Field(ge=0.0, description="Value of 1 pip per standard lot in account currency; zero when not executable")
     total_pip_value: float = Field(ge=0.0, description="Total pip value for recommended position size")
     stop_distance_pips: float = Field(gt=0.0, description="Stop-loss distance in pips")
     margin_required: float = Field(ge=0.0, description="Required margin in account currency")
@@ -233,6 +246,9 @@ def calculate_required_margin(
     account_currency: str = "USD",
     current_quote_price: float | None = None,
     contract_size: float = 100000.0,
+    conversions: Sequence[ForexConversionRate] = (),
+    as_of_utc: datetime | None = None,
+    max_conversion_age: timedelta | None = None,
 ) -> float:
     """Compute the required margin in account currency for an FX position.
 
@@ -263,15 +279,16 @@ def calculate_required_margin(
     elif quote_curr == acc_curr:
         notional_account = notional_base * entry_price
 
-    # Case 3: Cross pair (e.g. EURJPY, GBPJPY from USD account)
+    # Case 3: convert base currency to account currency explicitly.
     else:
-        # If current_quote_price is supplied, it is the rate of quote vs account (e.g. USDJPY for EURJPY)
-        # notional_account = notional_base * entry_price / current_quote_price
-        if current_quote_price and current_quote_price > 0:
-            notional_account = (notional_base * entry_price) / current_quote_price
-        else:
-            # Fallback approximation: use entry_price directly
-            notional_account = notional_base * entry_price
+        base_to_account = resolve_conversion_rate(
+            base_curr,
+            acc_curr,
+            conversions,
+            as_of_utc=as_of_utc,
+            max_age=max_conversion_age,
+        )
+        notional_account = notional_base * base_to_account
 
     required_margin = notional_account / leverage
     return round(required_margin, 2)
@@ -391,6 +408,40 @@ def calculate_portfolio_currency_exposure(
     return exposures
 
 
+def calculate_currency_risk_exposure(
+    open_positions: Sequence[OpenPosition],
+    *,
+    new_pair: str | None = None,
+    new_action: ForexAction | None = None,
+    new_risk_amount: float = 0.0,
+) -> dict[str, float]:
+    """Return net stop-loss risk attributed to each currency in account currency.
+
+    A long pair assigns ``+risk`` to its base currency and ``-risk`` to its quote;
+    a short pair reverses those signs. Opposing positions therefore net naturally.
+    This is risk attribution, not raw-lot or gross-notional exposure.
+    """
+    exposures: dict[str, float] = {}
+
+    def add(pair: str, action: ForexAction, risk: float | None) -> None:
+        if risk is None:
+            raise ValueError("currency risk exposure is unknown for an unbounded position")
+        if risk <= 0 or action == ForexAction.NO_TRADE:
+            return
+        pair_obj = get_forex_pair(pair)
+        base = pair_obj.base_currency if pair_obj else pair[:3].upper()
+        quote = pair_obj.quote_currency if pair_obj else pair[3:6].upper()
+        sign = 1.0 if action == ForexAction.LONG else -1.0
+        exposures[base] = exposures.get(base, 0.0) + (sign * risk)
+        exposures[quote] = exposures.get(quote, 0.0) - (sign * risk)
+
+    for position in open_positions:
+        add(position.pair, position.action, position.risk_amount)
+    if new_pair and new_action:
+        add(new_pair, new_action, new_risk_amount)
+    return {currency: round(amount, 2) for currency, amount in exposures.items()}
+
+
 def calculate_correlation_exposure_factor(
     new_pair: str,
     new_action: ForexAction,
@@ -469,6 +520,12 @@ class ForexPositionSizingEngine:
         kelly_fraction: float = 0.25,
         open_positions: Sequence[OpenPosition] | None = None,
         current_quote_price: float | None = None,
+        conversions: Sequence[ForexConversionRate] = (),
+        as_of_utc: datetime | None = None,
+        max_conversion_age: timedelta | None = None,
+        daily_realized_pnl: float | None = None,
+        day_start_balance: float | None = None,
+        daily_pnl_available: bool = False,
     ) -> PositionSizingResult:
         """Calculate complete institutional position sizing and margin requirements.
 
@@ -478,6 +535,7 @@ class ForexPositionSizingEngine:
         acc = account or self.default_account
         cons = constraints or self.default_constraints
         positions = open_positions or []
+        pair_price = current_quote_price or entry_price
 
         adjustments: list[str] = []
 
@@ -494,7 +552,7 @@ class ForexPositionSizingEngine:
                 units=0.0,
                 risk_amount=0.0,
                 risk_percent=0.0,
-                pip_value_per_lot=10.0,
+                pip_value_per_lot=0.0,
                 total_pip_value=0.0,
                 stop_distance_pips=1.0,
                 margin_required=0.0,
@@ -504,6 +562,24 @@ class ForexPositionSizingEngine:
                 adjustments_applied=["Setup evaluated as NO_TRADE. 0 lots assigned."],
                 is_executable=True,
                 rejection_reason=None,
+            )
+
+        if len(positions) >= acc.max_open_positions:
+            return self._build_unexecutable(
+                pair,
+                action,
+                sizing_method,
+                acc,
+                f"Maximum open positions reached ({len(positions)}/{acc.max_open_positions}); pending orders are excluded.",
+            )
+
+        if any(position.risk_amount is None for position in positions):
+            return self._build_unexecutable(
+                pair,
+                action,
+                sizing_method,
+                acc,
+                "Portfolio risk is unbounded because an open position has no objective stop-loss risk.",
             )
 
         # -------------------------------------------------------------------
@@ -531,12 +607,18 @@ class ForexPositionSizingEngine:
                 reason="Stop loss distance is zero pips.",
             )
 
-        pip_val_per_lot = pip_value_in_account_currency(
-            pair=pair,
-            lot_size=1.0,
-            account_currency=acc.currency,
-            current_quote_price=current_quote_price,
-        )
+        try:
+            pip_val_per_lot = pip_value_in_account_currency(
+                pair=pair,
+                lot_size=1.0,
+                account_currency=acc.currency,
+                current_quote_price=pair_price,
+                conversions=conversions,
+                as_of_utc=as_of_utc,
+                max_conversion_age=max_conversion_age,
+            )
+        except FXConversionUnavailable as exc:
+            return self._build_unexecutable(pair, action, sizing_method, acc, str(exc))
 
         if pip_val_per_lot <= 0:
             return self._build_unexecutable(
@@ -666,18 +748,77 @@ class ForexPositionSizingEngine:
         units = round(clamped_lots * cons.contract_size, 1)
         total_pip_val = round(clamped_lots * pip_val_per_lot, 2)
 
+        current_open_risk = sum(position.risk_amount or 0.0 for position in positions)
+        total_open_risk = current_open_risk + actual_risk_amount
+        total_open_risk_pct = (total_open_risk / acc.equity) * 100.0
+        if total_open_risk_pct > acc.max_account_risk_percent:
+            return self._build_unexecutable(
+                pair, action, sizing_method, acc,
+                f"Cumulative portfolio risk ({total_open_risk_pct:.1f}%) would exceed account maximum risk ceiling of {acc.max_account_risk_percent:.1f}%.",
+            )
+
+        daily_limits = [
+            value
+            for value in (
+                acc.max_daily_loss_amount,
+                (
+                    day_start_balance * acc.max_daily_loss_percent / 100.0
+                    if day_start_balance is not None and acc.max_daily_loss_percent is not None
+                    else None
+                ),
+            )
+            if value is not None
+        ]
+        if acc.max_daily_loss_percent is not None or acc.max_daily_loss_amount is not None:
+            if not daily_pnl_available or daily_realized_pnl is None or not daily_limits:
+                return self._build_unexecutable(
+                    pair, action, sizing_method, acc,
+                    "Daily realized P&L is unavailable while the daily-loss rule is enabled.",
+                )
+            daily_loss = max(0.0, -daily_realized_pnl)
+            daily_limit = min(daily_limits)
+            if daily_loss + actual_risk_amount > daily_limit:
+                return self._build_unexecutable(
+                    pair, action, sizing_method, acc,
+                    f"Daily loss plus proposed risk ({daily_loss + actual_risk_amount:.2f}) exceeds limit ({daily_limit:.2f}).",
+                )
+
+        currency_risk = calculate_currency_risk_exposure(
+            positions,
+            new_pair=pair,
+            new_action=action,
+            new_risk_amount=actual_risk_amount,
+        )
+        concentrated = {
+            currency: abs(amount) / acc.equity * 100.0
+            for currency, amount in currency_risk.items()
+            if abs(amount) / acc.equity * 100.0 > acc.max_currency_exposure_percent
+        }
+        if concentrated:
+            details = ", ".join(f"{currency} {percent:.2f}%" for currency, percent in sorted(concentrated.items()))
+            return self._build_unexecutable(
+                pair, action, sizing_method, acc,
+                f"Net currency stop-risk concentration exceeds {acc.max_currency_exposure_percent:.2f}% of equity: {details}.",
+            )
+
         # -------------------------------------------------------------------
         # 6. Margin & Leverage Verification
         # -------------------------------------------------------------------
-        margin_needed = calculate_required_margin(
-            pair=pair,
-            lot_size=clamped_lots,
-            entry_price=entry_price,
-            leverage=acc.leverage,
-            account_currency=acc.currency,
-            current_quote_price=current_quote_price,
-            contract_size=cons.contract_size,
-        )
+        try:
+            margin_needed = calculate_required_margin(
+                pair=pair,
+                lot_size=clamped_lots,
+                entry_price=entry_price,
+                leverage=acc.leverage,
+                account_currency=acc.currency,
+                current_quote_price=pair_price,
+                contract_size=cons.contract_size,
+                conversions=conversions,
+                as_of_utc=as_of_utc,
+                max_conversion_age=max_conversion_age,
+            )
+        except FXConversionUnavailable as exc:
+            return self._build_unexecutable(pair, action, sizing_method, acc, str(exc))
 
         remaining_free_margin = round(acc.free_margin - margin_needed, 2)
 
@@ -714,33 +855,12 @@ class ForexPositionSizingEngine:
             )
 
         # Effective position leverage (notional value / equity)
-        pair_obj = get_forex_pair(pair)
-        base_curr = pair_obj.base_currency if pair_obj else pair[:3].upper()
-        if base_curr == acc.currency:
-            notional = clamped_lots * cons.contract_size
-        else:
-            notional = clamped_lots * cons.contract_size * entry_price
-        leverage_used = round(notional / acc.equity, 2)
+        notional_account = margin_needed * acc.leverage
+        leverage_used = round(notional_account / acc.equity, 2)
 
         # -------------------------------------------------------------------
         # 7. Portfolio Risk Capacity Check
         # -------------------------------------------------------------------
-        current_open_risk = sum(p.risk_amount for p in positions)
-        total_open_risk = current_open_risk + actual_risk_amount
-        total_open_risk_pct = (total_open_risk / acc.equity) * 100.0
-
-        if total_open_risk_pct > acc.max_account_risk_percent:
-            return self._build_unexecutable(
-                pair=pair,
-                action=action,
-                method=sizing_method,
-                acc=acc,
-                reason=(
-                    f"Cumulative portfolio risk ({total_open_risk_pct:.1f}%) would exceed "
-                    f"account maximum risk ceiling of {acc.max_account_risk_percent:.1f}%."
-                ),
-            )
-
         return PositionSizingResult(
             pair=pair,
             action=action,
@@ -773,6 +893,13 @@ class ForexPositionSizingEngine:
         win_loss_ratio: float | None = None,
         open_positions: Sequence[OpenPosition] | None = None,
         current_quote_price: float | None = None,
+        conversion_required: bool = False,
+        conversions: Sequence[ForexConversionRate] = (),
+        as_of_utc: datetime | None = None,
+        max_conversion_age: timedelta | None = None,
+        daily_realized_pnl: float | None = None,
+        day_start_balance: float | None = None,
+        daily_pnl_available: bool = False,
     ) -> PositionSizingResult:
         """Convenience method to compute sizing directly from a ForexTraderProposal."""
         if proposal.action == ForexAction.NO_TRADE or proposal.entry_price is None or proposal.stop_loss is None:
@@ -801,6 +928,12 @@ class ForexPositionSizingEngine:
             win_loss_ratio=win_loss_ratio or proposal.risk_reward_ratio,
             open_positions=open_positions,
             current_quote_price=current_quote_price,
+            conversions=conversions,
+            as_of_utc=as_of_utc,
+            max_conversion_age=max_conversion_age,
+            daily_realized_pnl=daily_realized_pnl,
+            day_start_balance=day_start_balance,
+            daily_pnl_available=daily_pnl_available,
         )
 
     def _build_unexecutable(
@@ -821,7 +954,7 @@ class ForexPositionSizingEngine:
             units=0.0,
             risk_amount=0.0,
             risk_percent=0.0,
-            pip_value_per_lot=10.0,
+            pip_value_per_lot=0.0,
             total_pip_value=0.0,
             stop_distance_pips=1.0,
             margin_required=0.0,

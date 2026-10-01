@@ -17,7 +17,7 @@ import math
 import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -30,12 +30,20 @@ from tradingagents.agents.schemas_forex import (
 from tradingagents.database.journal import ForexTradeJournal
 from tradingagents.database.models import TradeExitReason, TradeStatus
 from tradingagents.dataflows.forex_data import ForexBar
+from tradingagents.forex.conversion import (
+    ForexConversionRate,
+    resolve_conversion_rate,
+)
 from tradingagents.forex.pips import (
     pip_size_for,
     pip_value_in_account_currency,
 )
 from tradingagents.metrics.mfe_mae import parse_utc_timestamp
-from tradingagents.risk.sizing import ForexAccountProfile, calculate_required_margin
+from tradingagents.risk.sizing import (
+    ForexAccountProfile,
+    OpenPosition,
+    calculate_required_margin,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -258,9 +266,13 @@ class ForexBacktestEngine:
         self,
         config: ForexBacktestConfig | None = None,
         journal: ForexTradeJournal | None = None,
+        conversion_rates: Sequence[ForexConversionRate] = (),
+        max_conversion_age: timedelta | None = None,
     ) -> None:
         self.config = config or ForexBacktestConfig()
         self.journal = journal
+        self.conversion_rates = tuple(conversion_rates)
+        self.max_conversion_age = max_conversion_age
 
         self.balance: float = self.config.initial_balance
         self.equity: float = self.config.initial_balance
@@ -277,6 +289,7 @@ class ForexBacktestEngine:
         self.total_commission_drag: float = 0.0
         self.total_swap_drag: float = 0.0
         self._last_swap_date: date | None = None
+        self._as_of_utc: datetime | None = None
         self.ambiguous_trades_count: int = 0
         self.filled_orders_count: int = 0
         self.expired_orders_count: int = 0
@@ -296,6 +309,7 @@ class ForexBacktestEngine:
         self.total_commission_drag = 0.0
         self.total_swap_drag = 0.0
         self._last_swap_date = None
+        self._as_of_utc = None
         self.ambiguous_trades_count = 0
         self.filled_orders_count = 0
         self.expired_orders_count = 0
@@ -310,6 +324,9 @@ class ForexBacktestEngine:
                 entry_price=t.entry_price,
                 leverage=self.config.leverage,
                 account_currency=self.config.account_currency,
+                conversions=self.conversion_rates,
+                as_of_utc=self._as_of_utc or t.entry_time,
+                max_conversion_age=self.max_conversion_age,
             )
             total_margin += m
         return total_margin
@@ -325,6 +342,48 @@ class ForexBacktestEngine:
             currency=self.config.account_currency,
             leverage=self.config.leverage,
             max_account_risk_percent=self.config.max_account_risk_percent,
+            max_open_positions=self.config.max_open_trades,
+        )
+
+    def open_position_snapshot(self, as_of_utc: datetime | None = None) -> tuple[OpenPosition, ...]:
+        """Return only positions objectively open at the current simulation cutoff."""
+        cutoff = as_of_utc or self._as_of_utc
+        positions: list[OpenPosition] = []
+        for trade in self.open_trades:
+            observation_time = cutoff or trade.entry_time
+            stop_pips = abs(trade.entry_price - trade.stop_loss) / pip_size_for(trade.pair)
+            pip_value = pip_value_in_account_currency(
+                trade.pair,
+                trade.lots,
+                self.config.account_currency,
+                trade.entry_price,
+                self.conversion_rates,
+                observation_time,
+                self.max_conversion_age,
+            )
+            positions.append(
+                OpenPosition(
+                    position_id=trade.trade_id,
+                    pair=trade.pair,
+                    action=trade.action,
+                    lots=trade.lots,
+                    entry_price=trade.entry_price,
+                    stop_loss=trade.stop_loss,
+                    risk_amount=stop_pips * pip_value,
+                )
+            )
+        return tuple(positions)
+
+    def _usd_cost_in_account_currency(self, amount_usd: float, as_of_utc: datetime) -> float:
+        """Convert USD-denominated broker costs at the event timestamp."""
+        if amount_usd == 0.0:
+            return 0.0
+        return amount_usd * resolve_conversion_rate(
+            "USD",
+            self.config.account_currency,
+            self.conversion_rates,
+            as_of_utc=as_of_utc,
+            max_age=self.max_conversion_age,
         )
 
     def _update_open_positions_excursions(self, candle: ForexBar, pair: str) -> None:
@@ -487,6 +546,9 @@ class ForexBacktestEngine:
             lot_size=trade.lots,
             account_currency=self.config.account_currency,
             current_quote_price=exit_price,
+            conversions=self.conversion_rates,
+            as_of_utc=exit_time,
+            max_conversion_age=self.max_conversion_age,
         )
 
         if trade.action == ForexAction.LONG:
@@ -598,18 +660,26 @@ class ForexBacktestEngine:
                     entry_price=fill_price,
                     leverage=self.config.leverage,
                     account_currency=self.config.account_currency,
+                    conversions=self.conversion_rates,
+                    as_of_utc=candle.timestamp,
+                    max_conversion_age=self.max_conversion_age,
                 )
                 if req_margin > free_margin:
                     still_pending.append(po)
                     continue
 
                 spread_cost = self.config.default_spread_pips * pip_value_in_account_currency(
-                    pair, po.lots, self.config.account_currency, fill_price
+                    pair, po.lots, self.config.account_currency, fill_price,
+                    self.conversion_rates, candle.timestamp, self.max_conversion_age,
                 )
                 slip_cost = self.config.default_slippage_pips * pip_value_in_account_currency(
-                    pair, po.lots, self.config.account_currency, fill_price
+                    pair, po.lots, self.config.account_currency, fill_price,
+                    self.conversion_rates, candle.timestamp, self.max_conversion_age,
                 )
-                comm_cost = self.config.commission_per_lot_usd * po.lots
+                comm_cost = self._usd_cost_in_account_currency(
+                    self.config.commission_per_lot_usd * po.lots,
+                    candle.timestamp,
+                )
 
                 self.total_spread_drag += spread_cost
                 self.total_slippage_drag += slip_cost
@@ -668,7 +738,10 @@ class ForexBacktestEngine:
             days_passed = (curr_date - self._last_swap_date).days
             if self.config.swap_per_day_usd > 0.0 and self.open_trades:
                 for t in self.open_trades:
-                    swap_cost = self.config.swap_per_day_usd * t.lots * days_passed
+                    swap_cost = self._usd_cost_in_account_currency(
+                        self.config.swap_per_day_usd * t.lots * days_passed,
+                        candle.timestamp,
+                    )
                     t.swap += swap_cost
                     self.total_swap_drag += swap_cost
         self._last_swap_date = curr_date
@@ -728,6 +801,9 @@ class ForexBacktestEngine:
             entry_price=candle.open,
             leverage=self.config.leverage,
             account_currency=self.config.account_currency,
+            conversions=self.conversion_rates,
+            as_of_utc=candle.timestamp,
+            max_conversion_age=self.max_conversion_age,
         )
         if req_margin > free_margin:
             return None
@@ -745,12 +821,17 @@ class ForexBacktestEngine:
 
         # Track friction costs
         spread_cost = self.config.default_spread_pips * pip_value_in_account_currency(
-            pair, lots, self.config.account_currency, fill_price
+            pair, lots, self.config.account_currency, fill_price,
+            self.conversion_rates, candle.timestamp, self.max_conversion_age,
         )
         slip_cost = self.config.default_slippage_pips * pip_value_in_account_currency(
-            pair, lots, self.config.account_currency, fill_price
+            pair, lots, self.config.account_currency, fill_price,
+            self.conversion_rates, candle.timestamp, self.max_conversion_age,
         )
-        comm_cost = self.config.commission_per_lot_usd * lots
+        comm_cost = self._usd_cost_in_account_currency(
+            self.config.commission_per_lot_usd * lots,
+            candle.timestamp,
+        )
 
         self.total_spread_drag += spread_cost
         self.total_slippage_drag += slip_cost
@@ -809,6 +890,7 @@ class ForexBacktestEngine:
         lower_tf_candles: Sequence[ForexBar] | None = None,
     ) -> None:
         """Execute a single discrete-time simulation step on a new incoming bar."""
+        self._as_of_utc = candle.timestamp
         # 1. Update excursion extremes for open trades
         self._update_open_positions_excursions(candle, pair)
 
@@ -831,7 +913,10 @@ class ForexBacktestEngine:
         pip_sz = pip_size_for(pair)
         for t in self.open_trades:
             if t.pair == pair:
-                pv = pip_value_in_account_currency(pair, t.lots, self.config.account_currency, candle.close)
+                pv = pip_value_in_account_currency(
+                    pair, t.lots, self.config.account_currency, candle.close,
+                    self.conversion_rates, candle.timestamp, self.max_conversion_age,
+                )
                 if t.action == ForexAction.LONG:
                     pips = (candle.close - t.entry_price) / pip_sz
                 else:

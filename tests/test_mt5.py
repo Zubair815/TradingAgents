@@ -592,6 +592,10 @@ class TestMT5ObserverSymbols:
         assert constraints.max_volume == 100.0
         assert constraints.volume_step == 0.01
         assert constraints.contract_size == 100000.0
+        assert constraints.broker_symbol in ("EURUSD", "EURUSDm")
+        assert constraints.digits == 5
+        assert constraints.point == 0.00001
+        assert constraints.pip_size == 0.0001
 
     def test_unknown_symbol_raises_symbol_error(self):
         mock_api = MockMT5API()
@@ -672,6 +676,14 @@ class TestMT5ObserverTicksAndCandles:
         assert set(mtf.candles.keys()) == {"M15", "H1", "H4", "D1"}
         assert len(mtf.candles["H1"]) == 15
 
+    def test_get_atr_pips_uses_completed_mt5_candles(self):
+        mock_api = MockMT5API()
+        mgr = MT5ConnectionManager(mt5_api=mock_api)
+        observer = MT5Observer(connection=mgr)
+
+        atr_pips = observer.get_atr_pips("EURUSD", "H1")
+        assert atr_pips > 0.0
+
 
 class TestMT5ObserverPositionsAndOrders:
     """Test live open positions, unrealized pips, pending orders, and deals."""
@@ -750,6 +762,17 @@ class TestMT5ObserverPositionsAndOrders:
         assert len(limited_deals) == 1
         assert limited_deals[0].ticket == 7002
 
+    def test_daily_realized_pnl_uses_utc_deal_history(self):
+        mock_api = MockMT5API()
+        mgr = MT5ConnectionManager(mt5_api=mock_api)
+        observer = MT5Observer(connection=mgr)
+        cutoff = datetime(2026, 9, 30, 14, tzinfo=timezone.utc)
+
+        realized, day_start = observer.get_daily_realized_pnl(cutoff)
+
+        assert realized == 485.0
+        assert day_start == datetime(2026, 9, 30, tzinfo=timezone.utc)
+
     def test_get_orders_history(self):
         mock_api = MockMT5API()
         mgr = MT5ConnectionManager(mt5_api=mock_api)
@@ -807,12 +830,9 @@ class TestEndToEndEngineIntegration:
             open_positions=existing_positions,
         )
 
-        assert result.recommended_lot_size > 0.0
-        assert result.recommended_lot_size >= broker_constraints.min_volume
-        assert result.recommended_lot_size <= broker_constraints.max_volume
-        assert result.stop_distance_pips == pytest.approx(40.0, 0.1)
-        assert result.margin_required > 0.0
-        assert result.margin_level_percent > account_profile.margin_call_level
+        assert result.is_executable is False
+        assert result.recommended_lot_size == 0.0
+        assert "unbounded" in (result.rejection_reason or "")
 
 
 class TestForexPackageExports:

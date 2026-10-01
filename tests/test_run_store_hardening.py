@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import threading
 import time
@@ -14,7 +15,14 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
+from tradingagents.agents.schemas_forex import (
+    ForexAction,
+    ForexRiskDecision,
+    ForexRiskDecisionAction,
+    ForexTraderProposal,
+)
 from tradingagents.database.journal import ForexTradeJournal
+from tradingagents.graph.forex_graph import create_forex_portfolio_manager
 from tradingagents.research.contracts import AnalysisRequest
 from web import forex_routes, server
 from web.retention import RetentionPolicy
@@ -122,7 +130,17 @@ def test_forex_cancel_is_cooperative_terminal_and_never_persists_success(
     graph.stream.side_effect = stream
     worker = threading.Thread(
         target=forex_routes._run_forex_analysis,
-        args=(run_id, AnalysisRequest(account_source="manual")),
+        args=(
+            run_id,
+            AnalysisRequest(
+                account_source="manual",
+                account_balance=100000.0,
+                account_equity=100000.0,
+                account_free_margin=100000.0,
+                account_leverage=100.0,
+                account_currency="USD",
+            ),
+        ),
     )
     with patch("web.forex_routes.ForexTradingAgentsGraph", return_value=graph):
         worker.start()
@@ -143,6 +161,150 @@ def test_forex_cancel_is_cooperative_terminal_and_never_persists_success(
         if event["type"] in {"complete", "error", "cancelled"}
     ]
     assert terminal_events == ["cancelled"]
+
+
+def test_forex_cancel_wins_at_proposal_persistence_boundary(isolated_transient_stores):
+    run_id = "fx-cancel-at-persist"
+    started = _iso(time.time())
+    forex_routes._forex_runs[run_id] = {
+        "run_id": run_id,
+        "status": "running",
+        "started_at": started,
+        "last_activity_at": started,
+    }
+    forex_routes._forex_run_events[run_id] = []
+    forex_routes._forex_cancellations[run_id] = threading.Event()
+    journal = ForexTradeJournal(":memory:")
+    boundary_reached = threading.Event()
+    continue_persistence = threading.Event()
+
+    @contextlib.contextmanager
+    def synchronized_guard():
+        boundary_reached.set()
+        assert continue_persistence.wait(timeout=2)
+        with forex_routes._forex_proposal_persistence_guard(run_id):
+            yield
+
+    manager = create_forex_portfolio_manager(
+        journal=journal,
+        cancellation_check=lambda: forex_routes._forex_cancel_requested(run_id),
+        persistence_guard=synchronized_guard,
+    )
+    proposal = ForexTraderProposal(
+        pair="EURUSD",
+        action=ForexAction.LONG,
+        entry_price=1.08,
+        stop_loss=1.07,
+        take_profit_1=1.10,
+        reasoning="Cancellation boundary regression",
+    )
+    decision = ForexRiskDecision(
+        pair="EURUSD",
+        decision=ForexRiskDecisionAction.APPROVE,
+        original_action=ForexAction.LONG,
+        approved_action=ForexAction.LONG,
+        executive_rationale="Approved before cancellation",
+    )
+    state = {
+        "company_of_interest": "EURUSD",
+        "trade_date": "2026-10-01",
+        "forex_proposal": proposal.model_dump(),
+        "forex_risk_decision": decision.model_dump(),
+        "final_trade_decision": "APPROVE",
+    }
+    failure = []
+
+    def persist():
+        try:
+            manager(state)
+        except RuntimeError as exc:
+            failure.append(str(exc))
+
+    worker = threading.Thread(target=persist)
+    worker.start()
+    assert boundary_reached.wait(timeout=2)
+    cancelled = asyncio.run(forex_routes.cancel_forex_run(run_id))
+    continue_persistence.set()
+    worker.join(timeout=2)
+
+    assert cancelled["status"] == "cancelled"
+    assert failure == ["analysis cancelled"]
+    assert forex_routes._forex_runs[run_id]["status"] == "cancelled"
+    assert journal.list_proposals() == []
+    assert run_id not in forex_routes._forex_completed_reports
+    assert all(event["type"] != "complete" for event in forex_routes._forex_run_events[run_id])
+
+
+def test_committed_proposal_finalization_cannot_be_relabelled_cancelled(
+    isolated_transient_stores,
+):
+    run_id = "fx-persist-wins"
+    forex_routes._forex_runs[run_id] = {"run_id": run_id, "status": "running"}
+    forex_routes._forex_run_events[run_id] = []
+    forex_routes._forex_cancellations[run_id] = threading.Event()
+    journal = ForexTradeJournal(":memory:")
+    proposal = ForexTraderProposal(
+        pair="EURUSD",
+        action=ForexAction.NO_TRADE,
+        reasoning="Persistence linearization regression",
+    )
+
+    with forex_routes._forex_proposal_persistence_guard(run_id):
+        journal.save_proposal(proposal)
+
+    first = asyncio.run(forex_routes.cancel_forex_run(run_id))
+    second = asyncio.run(forex_routes.cancel_forex_run(run_id))
+
+    assert first["status"] == second["status"] == "finalizing"
+    assert forex_routes._forex_runs[run_id]["status"] == "finalizing"
+    assert forex_routes._forex_cancellations[run_id].is_set() is False
+    assert len(journal.list_proposals()) == 1
+    assert forex_routes._forex_run_events[run_id] == []
+
+
+@pytest.mark.parametrize("terminal_status", ["failed", "completed"])
+def test_forex_cancel_does_not_rewrite_other_terminal_states(
+    isolated_transient_stores, terminal_status
+):
+    run_id = f"fx-terminal-{terminal_status}"
+    forex_routes._forex_runs[run_id] = {
+        "run_id": run_id,
+        "status": terminal_status,
+        "finished_at": _iso(time.time()),
+    }
+    forex_routes._forex_run_events[run_id] = []
+    forex_routes._forex_cancellations[run_id] = threading.Event()
+
+    result = asyncio.run(forex_routes.cancel_forex_run(run_id))
+
+    assert result["status"] == terminal_status
+    assert forex_routes._forex_runs[run_id]["status"] == terminal_status
+    assert forex_routes._forex_run_events[run_id] == []
+
+
+def test_cancelled_forex_sse_emits_terminal_event_and_exits(isolated_transient_stores):
+    run_id = "fx-cancelled-sse"
+    forex_routes._forex_runs[run_id] = {
+        "run_id": run_id,
+        "status": "cancelled",
+        "finished_at": _iso(time.time()),
+    }
+    forex_routes._forex_run_events[run_id] = [
+        {
+            "type": "cancelled",
+            "data": {"run_id": run_id, "status": "cancelled"},
+            "ts": time.time(),
+            "_seq": 0,
+        }
+    ]
+    with TestClient(server.app) as client:
+        client.get("/")
+        with client.stream("GET", f"/api/forex/runs/{run_id}/events") as response:
+            body = "".join(response.iter_text())
+
+    assert response.status_code == 200
+    assert "event: cancelled" in body
+    assert "event: complete" not in body
 
 
 def test_terminal_count_eviction_releases_events_and_report_aliases(isolated_transient_stores):

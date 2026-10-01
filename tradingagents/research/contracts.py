@@ -48,18 +48,40 @@ class AnalysisRequest(Record):
     provider: str | None = None
     quick_model: str | None = None
     deep_model: str | None = None
-    account_balance: float = Field(default=100000.0, gt=0)
+    account_balance: float | None = Field(default=None, gt=0)
+    account_equity: float | None = Field(default=None, gt=0)
     account_free_margin: float | None = Field(default=None, ge=0)
+    account_leverage: float | None = Field(default=None, ge=1)
     risk_percent: float = Field(default=1.0, gt=0, le=5.0)
     higher_timeframes: tuple[str, ...] = ("D1", "H4")
-    account_currency: str = "USD"
+    account_currency: str | None = None
     session: str | None = None
     requirements: tuple[str, ...] = ()
     research_depth: str = "deep"
     min_rr: float | None = None
     max_spread_pips: float | None = None
+    max_open_positions: int = Field(default=5, ge=1)
+    max_account_risk_percent: float = Field(default=6.0, gt=0, le=100)
+    max_currency_exposure_percent: float = Field(default=5.0, gt=0, le=100)
+    max_daily_loss_percent: float | None = Field(default=None, gt=0, le=100)
+    max_daily_loss_amount: float | None = Field(default=None, gt=0)
     economic_blackout: bool = True
-    account_source: str = "mt5"
+    account_source: Literal["mt5", "manual"] = "mt5"
+
+    @model_validator(mode="after")
+    def manual_account_is_complete(self):
+        if self.account_source == "manual":
+            required = {
+                "account_balance": self.account_balance,
+                "account_equity": self.account_equity,
+                "account_free_margin": self.account_free_margin,
+                "account_leverage": self.account_leverage,
+                "account_currency": self.account_currency,
+            }
+            missing = [name for name, value in required.items() if value is None]
+            if missing:
+                raise ValueError(f"manual account mode requires: {', '.join(missing)}")
+        return self
 
     @model_validator(mode="before")
     @classmethod
@@ -124,6 +146,8 @@ class AnalysisRequest(Record):
     @field_validator("account_currency")
     @classmethod
     def valid_currency(cls, value):
+        if value is None:
+            return None
         value = value.upper()
         if len(value) != 3 or not value.isascii() or not value.isalpha():
             raise ValueError("Account currency must be a three-letter currency code")

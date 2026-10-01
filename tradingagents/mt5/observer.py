@@ -25,7 +25,9 @@ from tradingagents.dataflows.forex_quality import (
     utc_timestamp,
     validate_quote,
 )
+from tradingagents.forex.conversion import AvailabilityStatus, ForexConversionRate
 from tradingagents.forex.domain import Timeframe, normalize_forex_pair
+from tradingagents.forex.indicators import calculate_atr_pips
 from tradingagents.forex.pips import pip_size_for
 from tradingagents.forex.symbols import canonical_to_broker
 from tradingagents.mt5.connection import MT5ConnectionManager
@@ -260,9 +262,16 @@ class MT5Observer:
 
         pip_sz = spec.pip_size
         settings = get_config()
-        validate_quote(bid, ask, dt, pip_size=pip_sz,
-                       max_age_seconds=settings.get("forex_quote_max_age_seconds", 30),
-                       max_spread_pips=settings.get("forex_max_spread_pips", 5.0))
+        validate_quote(
+            bid,
+            ask,
+            dt,
+            pip_size=pip_sz,
+            max_age_seconds=settings.get("forex_quote_max_age_seconds", 30),
+            # Risk policy is enforced by ForexRiskEngine. This bound only rejects
+            # structurally implausible observations before they enter context.
+            max_spread_pips=settings.get("forex_quote_sanity_max_spread_pips", 1000.0),
+        )
         spread_price = ask - bid
         spread_pips = round(spread_price / pip_sz, 1) if pip_sz > 0 else 0.0
         point = spec.point
@@ -342,6 +351,66 @@ class MT5Observer:
             candles[tf] = bars_to_frame(self.get_candles(symbol, tf, count, cutoff), tf)
         return MultiTimeframeData(symbol=normalize_forex_pair(symbol), candles=candles, as_of=cutoff)
 
+    def get_atr_pips(
+        self,
+        symbol: str,
+        timeframe: str | Timeframe = "H1",
+        *,
+        period: int = 14,
+        as_of: datetime | None = None,
+    ) -> float:
+        """Calculate ATR from the same completed MT5 candle contract used by analysis."""
+        tf = Timeframe(str(timeframe).upper()) if not isinstance(timeframe, Timeframe) else timeframe
+        bars = self.get_candles(symbol, tf, max(period * 3, period + 1), as_of)
+        values = calculate_atr_pips(bars_to_frame(bars, tf), normalize_forex_pair(symbol), period)
+        valid = values.dropna()
+        if valid.empty or float(valid.iloc[-1]) <= 0:
+            raise DataInsufficientError("deterministic MT5 ATR is unavailable")
+        return float(valid.iloc[-1])
+
+    def get_conversion_observations(
+        self,
+        pair: str,
+        account_currency: str,
+    ) -> tuple[ForexConversionRate, ...]:
+        """Observe the base/quote conversion pairs needed by sizing and margin."""
+        canon = normalize_forex_pair(pair)
+        account = account_currency.upper()
+        required = {canon[:3], canon[3:6]} - {account}
+        observations: list[ForexConversionRate] = []
+        for currency in sorted(required):
+            found = False
+            for symbol in (f"{currency}{account}", f"{account}{currency}"):
+                try:
+                    tick = self.get_current_tick(symbol)
+                except (MT5DataError, MT5SymbolError, DataInsufficientError):
+                    continue
+                midpoint = (tick.bid + tick.ask) / 2.0
+                observations.append(
+                    ForexConversionRate(
+                        from_currency=symbol[:3],
+                        to_currency=symbol[3:6],
+                        status=AvailabilityStatus.AVAILABLE,
+                        rate=midpoint,
+                        conversion_path=(tick.broker_symbol or symbol,),
+                        source=tick.source,
+                        observed_at=tick.time,
+                    )
+                )
+                found = True
+                break
+            if not found:
+                observations.append(
+                    ForexConversionRate(
+                        from_currency=currency,
+                        to_currency=account,
+                        status=AvailabilityStatus.UNAVAILABLE,
+                        conversion_path=(f"{currency}->{account}",),
+                        source="MT5",
+                    )
+                )
+        return tuple(observations)
+
     # -----------------------------------------------------------------------
     # 4. Open Positions & Pending Orders Inspection
     # -----------------------------------------------------------------------
@@ -389,9 +458,34 @@ class MT5Observer:
 
         return positions
 
-    def to_open_positions(self, symbol: str | None = None) -> list[OpenPosition]:
+    def to_open_positions(
+        self,
+        symbol: str | None = None,
+        *,
+        account_currency: str = "USD",
+        conversions: tuple[ForexConversionRate, ...] = (),
+        as_of_utc: datetime | None = None,
+        max_conversion_age: timedelta | None = None,
+    ) -> list[OpenPosition]:
         """Convert MT5 positions to domain OpenPosition objects for portfolio risk controls."""
-        return [p.to_open_position() for p in self.get_open_positions(symbol=symbol)]
+        raw_positions = self.get_open_positions(symbol=symbol)
+        observed = list(conversions)
+        seen = {(item.from_currency, item.to_currency) for item in observed}
+        for position in raw_positions:
+            for item in self.get_conversion_observations(position.symbol, account_currency):
+                key = (item.from_currency, item.to_currency)
+                if key not in seen:
+                    observed.append(item)
+                    seen.add(key)
+        return [
+            p.to_open_position(
+                account_currency=account_currency,
+                conversions=tuple(observed),
+                as_of_utc=as_of_utc,
+                max_conversion_age=max_conversion_age,
+            )
+            for p in raw_positions
+        ]
 
     def get_pending_orders(
         self, symbol: str | None = None, ticket: int | None = None
@@ -476,7 +570,8 @@ class MT5Observer:
 
         raw_deals = mt5.history_deals_get(**kwargs)
         if raw_deals is None:
-            return []
+            code, desc = self.connection._get_last_error()
+            raise MT5DataError(f"Failed to fetch MT5 deal history: {desc}", code=code)
 
         if count is not None and count > 0 and len(raw_deals) > count:
             raw_deals = raw_deals[-count:]
@@ -488,7 +583,12 @@ class MT5Observer:
             e_val = _get_field(d, "entry", 0)
             entry_str = entry_map.get(e_val, str(e_val) if isinstance(e_val, str) else "IN")
             d_type = _get_field(d, "type", 0)
-            deal_type_str = "DEAL_TYPE_BUY" if (d_type == 0 or d_type == "DEAL_TYPE_BUY") else "DEAL_TYPE_SELL"
+            if d_type == 0 or d_type == "DEAL_TYPE_BUY":
+                deal_type_str = "DEAL_TYPE_BUY"
+            elif d_type == 1 or d_type == "DEAL_TYPE_SELL":
+                deal_type_str = "DEAL_TYPE_SELL"
+            else:
+                deal_type_str = str(d_type)
 
             deals.append(
                 MT5Deal(
@@ -512,6 +612,18 @@ class MT5Observer:
             )
 
         return deals
+
+    def get_daily_realized_pnl(self, as_of_utc: datetime | None = None) -> tuple[float, datetime]:
+        """Return broker-realized net P&L for the current UTC trading day."""
+        cutoff = utc_timestamp(as_of_utc) if as_of_utc is not None else datetime.now(timezone.utc)
+        day_start = cutoff.replace(hour=0, minute=0, second=0, microsecond=0)
+        deals = self.get_deals(date_from=day_start, date_to=cutoff)
+        realized = sum(
+            deal.profit + deal.commission + deal.swap + deal.fee
+            for deal in deals
+            if deal.type in {"DEAL_TYPE_BUY", "DEAL_TYPE_SELL"}
+        )
+        return round(realized, 2), day_start
 
     def get_orders_history(
         self,

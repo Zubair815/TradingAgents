@@ -10,6 +10,23 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Final Forex correctness remediation
 
+- Introduce an immutable deterministic Forex risk context carrying market,
+  account, broker, portfolio, and directional conversion evidence into live and
+  historical sizing without fabricated fallbacks.
+- Correct account-currency pip value, margin, P&L, and cost conversion for
+  USD-base and cross pairs; missing or stale required conversion now fails closed.
+- Wire live MT5 spread, ATR, broker volume constraints, open positions, and UTC
+  realized daily P&L into portfolio risk, while keeping MT5 strictly read-only.
+- Enforce cumulative stop risk, currency stop-risk concentration, maximum live
+  positions, daily loss, and conservative handling of positions without stops.
+- Make MT5/manual account modes explicit and label standalone proposal sizing as
+  a non-broker-verified manual estimate with disclosed assumptions.
+- Use cutoff-safe simulated positions and directional historical conversion data
+  for historical sizing, P&L, margin, commissions, spread, slippage, and swap.
+- Define nonpositive-development-return WFE as unavailable and use expanding
+  multi-split windows whose disjoint OOS blocks account for the complete tail.
+- Linearize cancellation with proposal persistence and apply an authoritative
+  terminal cancel response immediately in the browser while retaining SSE exit.
 - Eliminate walk-forward same-bar-open lookahead; completed-bar decisions execute
   at the close and pending orders cannot inspect the decision candle retroactively.
 - Supply legitimate pre-period warm-up history without permitting warm-up trades.

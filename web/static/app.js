@@ -2617,7 +2617,19 @@
       });
       const data = await response.json();
       if (!response.ok) throw new Error(apiErrorMessage(data, 'Cancellation failed'));
-      showToast('Analysis cancellation requested', 'info');
+      if (data.status === 'cancelled') {
+        if (eventSource) {
+          eventSource.close();
+          eventSource = null;
+        }
+        const pct = document.getElementById('progressPercent');
+        if (pct) pct.textContent = 'Cancelled';
+        resetRunButton();
+        showToast('Forex analysis cancelled', 'info');
+        loadRuns();
+      } else {
+        showToast('Analysis cancellation requested', 'info');
+      }
     } catch (error) {
       if (DOM.btnCancelAnalysis) DOM.btnCancelAnalysis.disabled = false;
       showToast(error.message || 'Cancellation failed', 'error');

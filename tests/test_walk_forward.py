@@ -158,7 +158,37 @@ class TestSplitGeneration:
         candles = make_trending_candles(200, datetime(2025, 1, 1, tzinfo=timezone.utc))
         validator = ForexWalkForwardValidator()
         splits = validator.generate_splits(candles, n_splits=3, dev_ratio=0.5, val_ratio=0.2, oos_ratio=0.3)
-        assert len(splits) >= 2  # at least 2 splits with 200 candles
+        assert len(splits) == 3
+
+        timestamp_to_index = {candle.timestamp: index for index, candle in enumerate(candles)}
+        oos_ranges = [
+            range(
+                timestamp_to_index[split.out_of_sample.start_time],
+                timestamp_to_index[split.out_of_sample.end_time] + 1,
+            )
+            for split in splits
+        ]
+        assert all(
+            set(left).isdisjoint(right)
+            for left, right in zip(oos_ranges, oos_ranges[1:], strict=False)
+        )
+        assert oos_ranges[-1].stop == len(candles)
+
+        initial_prefix = set(
+            range(
+                timestamp_to_index[splits[0].development.start_time],
+                timestamp_to_index[splits[0].out_of_sample.start_time],
+            )
+        )
+        accounted = initial_prefix | set().union(*(set(indices) for indices in oos_ranges))
+        assert accounted == set(range(len(candles)))
+
+        for split in splits:
+            in_sample_end = split.validation.end_time if split.validation else split.development.end_time
+            assert in_sample_end < split.out_of_sample.start_time
+
+        assert splits[1].development.start_time == splits[0].development.start_time
+        assert splits[1].out_of_sample.start_time > splits[0].out_of_sample.end_time
 
     def test_insufficient_candles_raises(self):
         candles = make_trending_candles(5, datetime(2025, 1, 1, tzinfo=timezone.utc))
@@ -297,15 +327,62 @@ class TestFullValidation:
         assert len(report.splits) == 1
         assert EvaluationPeriodType.DEVELOPMENT.value in report.period_reports
         assert EvaluationPeriodType.OUT_OF_SAMPLE.value in report.period_reports
-        assert report.robustness_verdict in ("ROBUST", "MARGINAL", "OVERFITTED", "TAINTED")
+        assert report.robustness_verdict in (
+            "ROBUST", "MARGINAL", "OVERFITTED", "UNAVAILABLE", "TAINTED"
+        )
 
     def test_wfe_and_degradation_computed(self):
-        """Walk-Forward Efficiency and PF degradation must be numeric."""
+        """Zero-return exploratory runs must not fabricate WFE."""
         candles = make_trending_candles(100, datetime(2025, 1, 1, tzinfo=timezone.utc))
         validator = ForexWalkForwardValidator()
         report = validator.validate(candles=candles, pair="EURUSD", timeframe="H1")
-        assert isinstance(report.walk_forward_efficiency_ratio, float)
+        assert report.walk_forward_efficiency_ratio is None
+        assert report.walk_forward_efficiency_status == "UNAVAILABLE_NONPOSITIVE_DEVELOPMENT_RETURN"
+        assert report.robustness_verdict == "UNAVAILABLE"
         assert isinstance(report.profit_factor_degradation, float)
+
+    @pytest.mark.parametrize("development_return", [0.0, -5.0])
+    def test_nonpositive_development_return_makes_wfe_unavailable(self, development_return):
+        candles = make_trending_candles(100, datetime(2025, 1, 1, tzinfo=timezone.utc))
+
+        class ControlledValidator(ForexWalkForwardValidator):
+            def run_period_backtest(self, *args, **kwargs):
+                report = super().run_period_backtest(*args, **kwargs)
+                if report.period_type == EvaluationPeriodType.DEVELOPMENT:
+                    report.result.total_return_pct = development_return
+                    report.result.profit_factor = 1.5
+                elif report.period_type == EvaluationPeriodType.OUT_OF_SAMPLE:
+                    report.result.total_return_pct = 5.0
+                    report.result.profit_factor = 1.4
+                    report.result.expectancy_r = 0.2
+                return report
+
+        report = ControlledValidator().validate(candles, include_forward_demo=False)
+        assert report.walk_forward_efficiency_ratio is None
+        assert report.walk_forward_efficiency_status == "UNAVAILABLE_NONPOSITIVE_DEVELOPMENT_RETURN"
+        assert report.robustness_verdict == "UNAVAILABLE"
+        assert "Unavailable" in report.markdown_summary
+
+    def test_positive_development_return_produces_descriptive_wfe(self):
+        candles = make_trending_candles(100, datetime(2025, 1, 1, tzinfo=timezone.utc))
+
+        class ControlledValidator(ForexWalkForwardValidator):
+            def run_period_backtest(self, *args, **kwargs):
+                report = super().run_period_backtest(*args, **kwargs)
+                if report.period_type == EvaluationPeriodType.DEVELOPMENT:
+                    report.result.total_return_pct = 10.0
+                    report.result.profit_factor = 1.5
+                elif report.period_type == EvaluationPeriodType.OUT_OF_SAMPLE:
+                    report.result.total_return_pct = 7.0
+                    report.result.profit_factor = 1.4
+                    report.result.expectancy_r = 0.2
+                return report
+
+        report = ControlledValidator().validate(candles, include_forward_demo=False)
+        assert report.walk_forward_efficiency_ratio == pytest.approx(0.7)
+        assert report.walk_forward_efficiency_status == "AVAILABLE"
+        assert report.robustness_verdict == "ROBUST"
+        assert "not statistical validation" in report.markdown_summary
 
     def test_markdown_summary_rendered(self):
         candles = make_trending_candles(100, datetime(2025, 1, 1, tzinfo=timezone.utc))

@@ -12,6 +12,7 @@ Validates:
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
@@ -32,14 +33,90 @@ from tradingagents.backtest.agent_backtester import (
 )
 from tradingagents.backtest.forex_engine import (
     ForexBacktestConfig,
+    ForexBacktestEngine,
 )
 from tradingagents.database.models import TradeExitReason
 from tradingagents.dataflows.forex_data import ForexBar
+from tradingagents.forex.conversion import AvailabilityStatus, ForexConversionRate
 from web.server import app
 
 # ---------------------------------------------------------------------------
 # Test Helpers & Fixtures
 # ---------------------------------------------------------------------------
+
+
+def test_historical_non_usd_costs_pnl_margin_and_swap_use_timestamped_conversion():
+    observed_at = datetime(2025, 1, 6, tzinfo=timezone.utc)
+    conversion = ForexConversionRate(
+        from_currency="USD",
+        to_currency="EUR",
+        status=AvailabilityStatus.AVAILABLE,
+        rate=0.8,
+        conversion_path=("EURUSD",),
+        source="historical fixture",
+        observed_at=observed_at,
+    )
+    margin_conversion = ForexConversionRate(
+        from_currency="GBP",
+        to_currency="EUR",
+        status=AvailabilityStatus.AVAILABLE,
+        rate=0.88,
+        conversion_path=("GBPUSD", "EURUSD"),
+        source="historical fixture",
+        observed_at=observed_at,
+    )
+    engine = ForexBacktestEngine(
+        config=ForexBacktestConfig(
+            initial_balance=10000.0,
+            account_currency="EUR",
+            leverage=100.0,
+            default_spread_pips=2.0,
+            default_slippage_pips=1.0,
+            commission_per_lot_usd=10.0,
+            swap_per_day_usd=5.0,
+        ),
+        conversion_rates=(conversion, margin_conversion),
+    )
+    entry_bar = ForexBar(
+        timestamp=observed_at,
+        open=1.1000,
+        high=1.1010,
+        low=1.0990,
+        close=1.1000,
+    )
+    proposal = ForexTraderProposal(
+        pair="GBPUSD",
+        action=ForexAction.LONG,
+        order_type=OrderType.MARKET,
+        entry_price=1.1000,
+        stop_loss=1.0500,
+        take_profit_1=1.1500,
+        suggested_lot_size=1.0,
+        reasoning="Converted historical accounting",
+    )
+    trade = engine.execute_proposal(proposal, entry_bar)
+    assert trade is not None
+    assert trade.commission == pytest.approx(8.0)
+    assert engine.total_spread_drag == pytest.approx(16.0)
+    assert engine.total_slippage_drag == pytest.approx(8.0)
+    snapshot = engine.account_snapshot()
+    assert snapshot.used_margin == pytest.approx(880.0)
+
+    next_day = replace(
+        entry_bar,
+        timestamp=observed_at + timedelta(days=1),
+        open=1.11,
+        high=1.12,
+        low=1.10,
+        close=1.11,
+    )
+    engine._last_swap_date = observed_at.date()
+    engine.step(next_day, "GBPUSD")
+    assert trade.swap == pytest.approx(4.0)
+    assert engine.equity == pytest.approx(10000.0 + 784.0, abs=0.01)
+
+    engine._settle_trade(trade, 1.11, next_day.timestamp, TradeExitReason.MANUAL)
+    assert trade.net_profit == pytest.approx(772.0, abs=0.01)
 
 
 def make_candle(

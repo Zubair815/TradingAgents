@@ -114,6 +114,9 @@ class ForexRiskLimits(BaseModel):
         ge=0.01,
         description="Maximum allowable spread-to-ATR ratio (e.g. spread consuming >15% of ATR)",
     )
+    max_open_positions: int = Field(default=5, ge=1, description="Maximum live open positions; pending orders excluded")
+    max_daily_loss_percent: float | None = Field(default=None, gt=0.0, le=100.0)
+    max_daily_loss_amount: float | None = Field(default=None, gt=0.0)
     require_take_profit: bool = Field(
         default=True,
         description="Whether a defined take-profit level is strictly mandatory for directional setups",
@@ -149,6 +152,10 @@ class ForexRiskEngine:
         account_balance: float | None = None,
         account_currency: str = "USD",
         limits: ForexRiskLimits | None = None,
+        open_position_count: int = 0,
+        daily_realized_pnl: float | None = None,
+        day_start_balance: float | None = None,
+        daily_pnl_available: bool = False,
     ) -> ForexRiskDecision:
         """Validate a ForexTraderProposal against non-negotiable risk limits.
 
@@ -186,6 +193,34 @@ class ForexRiskEngine:
         checks_passed: list[str] = []
         violations: list[str] = []
         modifications: list[str] = []
+
+        if open_position_count >= eff_limits.max_open_positions:
+            violations.append(
+                f"Maximum open positions reached ({open_position_count}/{eff_limits.max_open_positions}); pending orders are excluded."
+            )
+
+        daily_limits = [
+            value
+            for value in (
+                eff_limits.max_daily_loss_amount,
+                (
+                    day_start_balance * eff_limits.max_daily_loss_percent / 100.0
+                    if day_start_balance is not None and eff_limits.max_daily_loss_percent is not None
+                    else None
+                ),
+            )
+            if value is not None
+        ]
+        if eff_limits.max_daily_loss_percent is not None or eff_limits.max_daily_loss_amount is not None:
+            if not daily_pnl_available or daily_realized_pnl is None or not daily_limits:
+                violations.append("Daily realized P&L is unavailable while the daily-loss rule is enabled.")
+            else:
+                daily_loss = max(0.0, -daily_realized_pnl)
+                daily_limit = min(daily_limits)
+                if daily_loss >= daily_limit:
+                    violations.append(
+                        f"Daily realized loss ({daily_loss:.2f}) reached limit ({daily_limit:.2f})."
+                    )
 
         # -------------------------------------------------------------------
         # 2. Market Open / Weekend / Holiday Check
@@ -450,6 +485,7 @@ class ForexRiskEngine:
                     stop_loss_price=proposal.stop_loss,
                     pair=proposal.pair,
                     account_currency=account_currency,
+                    current_quote_price=proposal.entry_price,
                 )
                 approved_lot_size = sizing["lot_size"]
                 checks_passed.append(
@@ -458,7 +494,8 @@ class ForexRiskEngine:
                 )
             except Exception as e:
                 logger.warning("Lot sizing calculation failed: %s", e)
-                approved_lot_size = proposal.suggested_lot_size
+                approved_lot_size = 0.0
+                violations.append(f"Position sizing data insufficient: {e}")
         else:
             approved_lot_size = proposal.suggested_lot_size if len(violations) == 0 else 0.0
 
