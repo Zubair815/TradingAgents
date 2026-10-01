@@ -2,7 +2,7 @@
 
 Evidence date: 2026-10-01 (Asia/Karachi)
 
-Status: **PARTIAL - XM DEMO ACCEPTANCE BLOCKED**
+Status: **PARTIAL - XM CONNECTIVITY VERIFIED; MANUAL LIFECYCLE PENDING**
 
 This record separates directly observed target-host evidence from automated tests
 and from broker checks that require a connected XM demo account and manual tester
@@ -95,3 +95,23 @@ Automated evidence does not replace the manual XM demo checklist.
    action performed manually in MT5.
 4. Run a longer resource soak during real analysis and observation.
 5. Repeat restart/recovery with non-empty trade, deal, reflection, and lesson data.
+
+## 2026-10-02 XM connectivity recheck
+
+- Correct XM executable: `C:\Program Files\XM Global MT5\terminal64.exe`.
+- XM Global demo account connectivity verified without recording the account ID.
+- Terminal build 6230, XM company identity and `XMGlobal-MT5 2` server verified.
+- Account, 1,639 symbols, live EURUSD bid/ask, verified-empty open positions,
+  verified-empty pending orders, 11 recent deals and 8 historical orders were
+  available through read-only MT5 APIs.
+- Dashboard connection succeeded, displayed a masked login and correct server,
+  and started the observation service.
+- Live acceptance exposed and drove correction of two observer defects: native
+  MT5 reads now serialize across web/background threads, and history date ranges
+  use the official positional API signature.
+- After correction, 20 concurrent dashboard account/position/order/deal requests
+  completed with zero failures; every deal request returned all 11 recent deals.
+
+This advances the connection/read-only-data portion of the XM checklist. It does
+not establish manual position observation, modification, partial/final close,
+post-close learning, or persistence across restart.

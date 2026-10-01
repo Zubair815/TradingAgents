@@ -262,3 +262,41 @@ See `docs/PHASE5_ACCEPTANCE_EVIDENCE.md` for measured evidence and
 
 The project MUST remain below `XM_DEMO_ACCEPTED` until the connected-account,
 manual trade lifecycle, costs, learning and non-empty restart checks are completed.
+
+## Phase 6 - Final Release Verification
+
+Status: local engineering gates complete in the current working tree; commit,
+GitHub CI, and the manual XM trade lifecycle remain pending.
+
+### Implemented and verified
+
+- Corrected MT5 deal and order history calls to use the vendor API's positional
+  date-range signature while retaining keyword filters for position and ticket.
+- Serialized native MT5 reads with a process-wide reentrant lock because the
+  vendor module is process-global and is accessed by both background observation
+  and dashboard request threads.
+- Added regression coverage for date-range signatures, keyword filters, and
+  cross-observer concurrent access.
+- Verified the XM Global demo terminal read-only path: connected demo account,
+  1,639 symbols, EURUSD tick, positions, pending orders, 11 recent deals, and 8
+  historical orders.
+- Verified 20 concurrent dashboard read requests on a fresh server with zero
+  failures. No broker order submission, modification, or close path exists.
+
+### Release gates
+
+- Full non-browser suite: 2,193 passed, 5 skipped, 22 warnings, 88 subtests.
+- Chromium E2E: 6 passed.
+- Ruff, Python compilation, JavaScript syntax, and `git diff --check`: passed.
+- GitHub CI: pending commit and push of the Phase 6 patch.
+
+### Acceptance boundary
+
+The local working tree is `READY_FOR_XM_DEMO`, not `XM_DEMO_ACCEPTED`. The
+analysis-to-proposal flow, user-performed open/modify/partial-close/final-close
+lifecycle, resulting costs and learning, and non-empty restart persistence still
+require manual evidence in `docs/XM_MT5_DEMO_ACCEPTANCE.md`.
+
+### Suggested commit
+
+`fix(mt5): serialize reads and correct history queries`

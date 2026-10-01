@@ -271,6 +271,8 @@ class MockMT5API:
         self.should_fail_login: bool = False
         self.last_err: tuple[int, str] = (1, "Success")
         self.terminal_connected: bool = True
+        self.history_deals_calls: list[tuple[tuple, dict]] = []
+        self.history_orders_calls: list[tuple[tuple, dict]] = []
         self.known_symbols: dict[str, MockSymbolInfoData] = {
             "EURUSD": MockSymbolInfoData("EURUSD", spread=10, bid=1.08500, ask=1.08510),
             "EURUSDm": MockSymbolInfoData("EURUSDm", spread=12, bid=1.08500, ask=1.08512),
@@ -371,7 +373,8 @@ class MockMT5API:
             orders = [o for o in orders if o.ticket == ticket]
         return orders
 
-    def history_deals_get(self, **kwargs) -> list[MockDealData]:
+    def history_deals_get(self, *args, **kwargs) -> list[MockDealData]:
+        self.history_deals_calls.append((args, kwargs))
         deals = [
             MockDealData(ticket=7001, order=6001, position_id=5001, type=0, entry=0, profit=0.0),
             MockDealData(ticket=7002, order=6005, position_id=5001, type=1, entry=1, profit=500.0),
@@ -381,7 +384,8 @@ class MockMT5API:
             deals = [d for d in deals if d.position_id == pos]
         return deals
 
-    def history_orders_get(self, **kwargs) -> list[MockOrderData]:
+    def history_orders_get(self, *args, **kwargs) -> list[MockOrderData]:
+        self.history_orders_calls.append((args, kwargs))
         return [
             MockOrderData(ticket=6000, symbol="EURUSD", type=2, state="FILLED"),
         ]
@@ -740,6 +744,8 @@ class TestMT5ObserverPositionsAndOrders:
         observer = MT5Observer(connection=mgr)
 
         deals = observer.get_deals()
+        assert len(mock_api.history_deals_calls[-1][0]) == 2
+        assert mock_api.history_deals_calls[-1][1] == {}
         assert len(deals) == 2
         assert deals[0].ticket == 7001
         assert deals[0].entry == "IN"
@@ -749,6 +755,7 @@ class TestMT5ObserverPositionsAndOrders:
 
         # Test position keyword argument
         pos_deals = observer.get_deals(position=5001)
+        assert mock_api.history_deals_calls[-1] == ((), {"position": 5001})
         assert len(pos_deals) == 2
         no_deals = observer.get_deals(position=9999)
         assert len(no_deals) == 0
@@ -779,6 +786,8 @@ class TestMT5ObserverPositionsAndOrders:
         observer = MT5Observer(connection=mgr)
 
         past_orders = observer.get_orders_history()
+        assert len(mock_api.history_orders_calls[-1][0]) == 2
+        assert mock_api.history_orders_calls[-1][1] == {}
         assert len(past_orders) == 1
         assert past_orders[0].ticket == 6000
         assert past_orders[0].state == "FILLED"

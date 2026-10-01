@@ -1,6 +1,6 @@
 # Windows + XM Demo manual acceptance checklist
 
-Status: **ATTEMPTED 2026-10-01 - BLOCKED BEFORE CONNECTIVITY**
+Status: **IN PROGRESS - CONNECTIVITY VERIFIED 2026-10-02**
 
 This checklist requires a Windows machine with XM MetaTrader 5, a demo account,
 market connectivity, and user-controlled broker actions. Repository tests use
@@ -9,11 +9,11 @@ mocks and cannot substitute for this acceptance run.
 Record the date, commit, MT5 build, XM demo server, tester, and evidence links
 before marking any item complete. Never record a password or API key.
 
-- [ ] 1. Launch XM MT5 and log into the demo account.
+- [x] 1. Launch XM MT5 and log into the demo account.
 - [ ] 2. Start the TradingAgents dashboard from the audited commit.
-- [ ] 3. Connect the read-only MT5 integration.
-- [ ] 4. Confirm masked account and server status are correct.
-- [ ] 5. Confirm open positions, pending orders, and deals are visible.
+- [x] 3. Connect the read-only MT5 integration.
+- [x] 4. Confirm masked account and server status are correct.
+- [x] 5. Confirm open positions, pending orders, and deals are visible.
 - [ ] 6. Launch a Forex analysis.
 - [ ] 7. Confirm the selected execution and context timeframes reach the report.
 - [ ] 8. Confirm the result is `LONG`, `SHORT`, or `NO_TRADE` with a proposal.
@@ -35,7 +35,7 @@ before marking any item complete. Never record a password or API key.
 - [ ] 24. Restart the dashboard.
 - [ ] 25. Confirm journal, deal, reflection, and lesson data remain available.
 
-Acceptance result: **NOT XM DEMO ACCEPTED — the checklist remains incomplete.**
+Acceptance result: **NOT XM DEMO ACCEPTED - the manual trade lifecycle remains incomplete.**
 
 ## 2026-10-01 attempt
 
@@ -47,5 +47,10 @@ obtained and no manual broker action was performed.
 
 Host, restart, resource, and sanitized failure evidence is recorded in
 `docs/PHASE5_ACCEPTANCE_EVIDENCE.md`.
+
+The original IPC blocker was resolved on 2026-10-02 by selecting the XM-specific
+terminal executable. Items 1, 3, 4 and 5 are now supported by sanitized live
+evidence. Item 2 remains unchecked until the final Phase 6 patch is committed,
+and items 6-25 still require the manual acceptance workflow.
 
 Acceptance result remains: **NOT XM DEMO ACCEPTED**.

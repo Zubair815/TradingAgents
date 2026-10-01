@@ -10,6 +10,12 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Final Forex correctness remediation
 
+- Add shared CLI/browser Forex account-context construction, safe SQLite
+  backup/restore, authenticated health/readiness, provider-reported token usage,
+  bounded rotating logs, provider timeouts/retries and graceful worker shutdown.
+- Serialize process-global native MT5 reads and use the official positional
+  history date-range signature, verified against an XM Global demo terminal.
+
 - Introduce an immutable deterministic Forex risk context carrying market,
   account, broker, portfolio, and directional conversion evidence into live and
   historical sizing without fabricated fallbacks.

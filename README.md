@@ -269,6 +269,11 @@ read-only risk context used by the browser. Missing account, quote, symbol,
 portfolio, ATR, or conversion evidence fails closed; it never falls back to a
 fabricated manual account:
 
+For XM, select the broker-specific executable in the dashboard, normally
+`C:\Program Files\XM Global MT5\terminal64.exe`, and log in to the XM demo
+account in that terminal first. A generic MetaTrader installation can open a
+different terminal profile even when both desktop shortcuts look similar.
+
 ```bash
 tradingagents run EURJPY --account-source mt5 --timeframe M15 \
   --context-timeframes H1,H4

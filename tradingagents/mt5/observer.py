@@ -8,7 +8,9 @@ Never places, modifies, or cancels trading orders.
 from __future__ import annotations
 
 import logging
+import threading
 from datetime import datetime, timedelta, timezone
+from functools import wraps
 from numbers import Real
 from typing import Any
 
@@ -50,6 +52,16 @@ from tradingagents.risk.sizing import (
 )
 
 logger = logging.getLogger(__name__)
+_MT5_API_LOCK = threading.RLock()
+
+
+def _serialized_mt5(method):
+    """Serialize native MT5 IPC; the vendor module is process-global and not thread-safe."""
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        with _MT5_API_LOCK:
+            return method(self, *args, **kwargs)
+    return wrapped
 
 
 def _get_field(obj: Any, key: str, default: Any = None) -> Any:
@@ -115,6 +127,7 @@ class MT5Observer:
     # 1. Account Inspection
     # -----------------------------------------------------------------------
 
+    @_serialized_mt5
     def get_account_info(self) -> MT5AccountInfo:
         """Fetch current account balance, equity, margin, and trading permissions."""
         self._ensure_connected()
@@ -154,6 +167,7 @@ class MT5Observer:
     # 2. Symbol Specification & Quotes
     # -----------------------------------------------------------------------
 
+    @_serialized_mt5
     def get_symbol_info(self, symbol: str) -> MT5SymbolInfo:
         """Fetch broker contract specifications, spread, and pricing for a symbol."""
         self._ensure_connected()
@@ -220,6 +234,7 @@ class MT5Observer:
         """Derive broker execution constraints for position sizing."""
         return self.get_symbol_info(symbol).to_broker_constraints()
 
+    @_serialized_mt5
     def get_symbols(self, group: str | None = None) -> list[MT5SymbolInfo]:
         """Query multiple symbols from the MT5 broker catalogue."""
         self._ensure_connected()
@@ -241,6 +256,7 @@ class MT5Observer:
     # 3. Market Ticks & Candle Streaming
     # -----------------------------------------------------------------------
 
+    @_serialized_mt5
     def get_current_tick(self, symbol: str) -> MT5Tick:
         """Fetch the most recent market tick for a symbol."""
         self._ensure_connected()
@@ -319,6 +335,7 @@ class MT5Observer:
         validate_forex_candles(bars_to_frame(bars, timeframe), timeframe=timeframe)
         return bars
 
+    @_serialized_mt5
     def get_candles(self, symbol, timeframe="H1", count=100, as_of=None):
         """Fetch completed bars; MT5 timestamps identify UTC candle opens."""
         self._ensure_connected()
@@ -330,6 +347,7 @@ class MT5Observer:
         rates = self.api.copy_rates_from(spec.name, tf.mt5_timeframe, cutoff, count + 1)
         return self._bars_from_rates(rates, spec, tf, cutoff)[-count:]
 
+    @_serialized_mt5
     def get_candles_range(self, symbol, timeframe, date_from, date_to):
         """Fetch complete bars in an explicitly bounded UTC interval."""
         self._ensure_connected()
@@ -415,6 +433,7 @@ class MT5Observer:
     # 4. Open Positions & Pending Orders Inspection
     # -----------------------------------------------------------------------
 
+    @_serialized_mt5
     def get_open_positions(
         self, symbol: str | None = None, ticket: int | None = None
     ) -> list[MT5Position]:
@@ -487,6 +506,7 @@ class MT5Observer:
             for p in raw_positions
         ]
 
+    @_serialized_mt5
     def get_pending_orders(
         self, symbol: str | None = None, ticket: int | None = None
     ) -> list[MT5Order]:
@@ -541,6 +561,7 @@ class MT5Observer:
     # 5. Historical Deals & Orders Inspection
     # -----------------------------------------------------------------------
 
+    @_serialized_mt5
     def get_deals(
         self,
         date_from: datetime | None = None,
@@ -568,7 +589,10 @@ class MT5Observer:
             kwargs["date_from"] = datetime.now(timezone.utc) - timedelta(days=30)
             kwargs["date_to"] = datetime.now(timezone.utc)
 
-        raw_deals = mt5.history_deals_get(**kwargs)
+        if "position" in kwargs:
+            raw_deals = mt5.history_deals_get(position=kwargs["position"])
+        else:
+            raw_deals = mt5.history_deals_get(kwargs["date_from"], kwargs["date_to"])
         if raw_deals is None:
             code, desc = self.connection._get_last_error()
             raise MT5DataError(f"Failed to fetch MT5 deal history: {desc}", code=code)
@@ -625,6 +649,7 @@ class MT5Observer:
         )
         return round(realized, 2), day_start
 
+    @_serialized_mt5
     def get_orders_history(
         self,
         date_from: datetime | None = None,
@@ -647,7 +672,10 @@ class MT5Observer:
             kwargs["date_from"] = datetime.now(timezone.utc) - timedelta(days=30)
             kwargs["date_to"] = datetime.now(timezone.utc)
 
-        raw_orders = mt5.history_orders_get(**kwargs)
+        if "ticket" in kwargs:
+            raw_orders = mt5.history_orders_get(ticket=kwargs["ticket"])
+        else:
+            raw_orders = mt5.history_orders_get(kwargs["date_from"], kwargs["date_to"])
         if raw_orders is None:
             return []
 

@@ -3,7 +3,9 @@ from __future__ import annotations
 import logging
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -11,6 +13,9 @@ from tradingagents.database import backup
 from tradingagents.database.backup import recover_stale_maintenance_marker
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 from tradingagents.llm_clients.openai_client import OPENAI_COMPATIBLE_PROVIDERS
+from tradingagents.mt5.connection import MT5ConnectionManager
+from tradingagents.mt5.models import MT5ConnectionStatus
+from tradingagents.mt5.observer import MT5Observer
 from tradingagents.operations.logging import configure_bounded_logging
 
 
@@ -109,3 +114,40 @@ def test_invalid_log_bounds_fail_loudly(tmp_path, monkeypatch, name, value):
             configure_bounded_logging(tmp_path)
     finally:
         _remove_operational_handler()
+
+
+def test_native_mt5_reads_are_serialized_across_observer_threads():
+    class ConcurrencyDetectingAPI:
+        def __init__(self):
+            self.active = 0
+            self.overlapped = False
+
+        def terminal_info(self):
+            return SimpleNamespace(connected=True)
+
+        def _read(self, value):
+            self.active += 1
+            self.overlapped = self.overlapped or self.active > 1
+            time.sleep(0.02)
+            self.active -= 1
+            return value
+
+        def account_info(self):
+            return self._read({"login": 1, "currency": "USD"})
+
+        def history_deals_get(self, *args, **kwargs):
+            return self._read(())
+
+    api = ConcurrencyDetectingAPI()
+    connection = MT5ConnectionManager(mt5_api=api)
+    connection.status = MT5ConnectionStatus.CONNECTED
+    observer = MT5Observer(connection=connection, auto_connect=False)
+    second_observer = MT5Observer(connection=connection, auto_connect=False)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        account = pool.submit(observer.get_account_info)
+        deals = pool.submit(second_observer.get_deals)
+        assert account.result().login == 1
+        assert deals.result() == []
+
+    assert not api.overlapped

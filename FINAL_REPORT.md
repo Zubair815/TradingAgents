@@ -1,9 +1,9 @@
 # TradingAgents Forex remediation final verification report
 
-- Verification date: 2026-10-01
-- Current HEAD: `4d2152914fc3ae85249b04126645339eaf755e79` (`Version2.0`)
-- Forex remediation: uncommitted working-tree changes; no newer commit SHA exists
-- Release status: **READY FOR XM DEMO ACCEPTANCE**
+- Verification date: 2026-10-02
+- Base HEAD: `9267df1222a357a068493a83e661edb1ac231bda` (`Version 2.4`)
+- Phase 6 status: verified working-tree changes; commit and GitHub CI pending
+- Release status: **READY FOR XM DEMO ACCEPTANCE; NOT XM DEMO ACCEPTED**
 
 This status means the automated engineering gates pass. It is not a trading
 performance recommendation, and it does not claim live XM acceptance.
@@ -58,19 +58,13 @@ There is no automated Forex broker-order submission path.
 | Gate | Result |
 | --- | --- |
 | `ruff check .` | PASS |
-| `pytest -q -m "not e2e"` | PASS — 2,161 passed, 5 skipped, 6 deselected, 22 warnings, 88 subtests |
-| `pytest -q -m e2e` | PASS — 6 passed, 2,166 deselected |
+| `pytest -q --ignore=tests/test_browser_e2e.py` | PASS — 2,193 passed, 5 skipped, 22 warnings, 88 subtests |
+| `pytest -q tests/test_browser_e2e.py` | PASS — 6 passed |
 | `python -m compileall tradingagents web cli` | PASS |
 | JavaScript syntax checks | PASS |
 | `git diff --check` | PASS |
 | Fresh local Python 3.12 install and package/CLI import | PASS |
-| GitHub Python 3.10 | PASS |
-| GitHub Python 3.11 | PASS |
-| GitHub Python 3.12 | PASS |
-| GitHub Python 3.13 | PASS |
-| GitHub clean-install smoke | PASS |
-| GitHub Chromium E2E | PASS |
-| GitHub Ruff | PASS |
+| GitHub checks for Phase 6 patch | PENDING — changes are not committed or pushed |
 
 No GitHub Actions result is available for the uncommitted remediation worktree;
 current-worktree CI remains pending commit and push. The five local skips are
@@ -99,7 +93,7 @@ an implemented path whose real-world or statistical acceptance remains limited.
 | Position sizing | COMPLETE | Deterministic account/risk/broker-constraint sizing is API and regression tested. |
 | Proposals | COMPLETE | Immutable proposal and risk evidence are persisted independently from broker execution. |
 | Proposal lifecycle | COMPLETE | Explicit approve/skip/expire transitions reach API and UI without placing orders. |
-| MT5 | COMPLETE | One read-only worker, bounded lifecycle, offline startup, reconnect protection, and status UI are tested. |
+| MT5 | COMPLETE | One read-only worker, process-wide serialized native reads, correct positional history queries, bounded lifecycle, reconnect protection, and live XM demo read-only observations are verified. |
 | Matching | COMPLETE | Confidence-based proposal/execution matching and unplanned/manual classification persist evidence. |
 | Journal | COMPLETE | SQLite is authoritative for trades, deals, costs, proposals, and lifecycle truth. |
 | Timeline | COMPLETE | Ordered lifecycle and broker-observation events are persisted and displayed. |
@@ -127,7 +121,7 @@ an implemented path whose real-world or statistical acceptance remains limited.
 | Authentication | COMPLETE | Protected Forex router, in-memory key, HttpOnly cookie, strict origin/cookie policy, and sanitized errors are tested. |
 | E2E | COMPLETE | Six mandatory real-Chromium workflows pass locally; current-worktree GitHub Actions remains pending commit and push. |
 | Runtime retention | COMPLETE | Age/count bounds, event caps, locks, tombstones, SSE exit, and journal preservation are stress tested. |
-| Documentation | COMPLETE | README, this evidence report, phase integrity docs, and XM checklist reflect the audited commit. |
+| Documentation | COMPLETE | README, this report, phase evidence, and XM checklist reflect the verified Phase 6 working tree. |
 
 ## Security result
 
@@ -168,14 +162,21 @@ comparison; historical rankings remain descriptive only. All performance outputs
 
 ## Live XM status
 
-**NOT EXECUTED.** No live XM terminal, demo credentials, broker session, or M1
-holding-window evidence was supplied. Execute
-[docs/XM_MT5_DEMO_ACCEPTANCE.md](docs/XM_MT5_DEMO_ACCEPTANCE.md) before promoting
-the release from local-demo readiness to full live-environment acceptance.
+**CONNECTIVITY VERIFIED; MANUAL LIFECYCLE PENDING.** The XM Global demo terminal
+initialized successfully with the broker-specific executable, reported a connected
+demo account, exposed 1,639 symbols, returned a live EURUSD tick, and returned
+positions, pending orders, 11 recent deals, and 8 historical orders. A fresh
+dashboard instance completed 20 concurrent read-only account/position/order/deal
+requests without a failure.
+
+This does not establish XM demo acceptance. Analysis, proposal approval, manual
+open/modify/partial-close/final-close actions, post-close metrics and learning,
+and non-empty restart persistence remain unchecked in
+[docs/XM_MT5_DEMO_ACCEPTANCE.md](docs/XM_MT5_DEMO_ACCEPTANCE.md).
 
 ## Known limitations
 
-1. Live XM/MT5 behavior and broker-specific netting/partial-close behavior are unverified.
+1. XM connectivity and read-only observation are verified, but broker-specific manual trade modification and partial-close behavior remain unverified.
 2. Native MT5 IPC cannot be force-cancelled; a permanently stalled call may retain deferred resources until process exit.
 3. Positions opened and closed entirely between observer polls may require manual reconciliation.
 4. Historical results are descriptive, not statistically validated or predictive.
@@ -184,9 +185,12 @@ the release from local-demo readiness to full live-environment acceptance.
 
 ## Release truth
 
-All repository-local automated engineering gates pass for the current working
-tree. GitHub CI must run after this remediation is committed and pushed. The remaining environment gate is the explicitly
-manual Windows + XM Demo acceptance run. Therefore the objective local release
-classification is:
+All repository-local automated engineering gates pass for the Phase 6 working
+tree. GitHub CI must run after these changes are committed and pushed. The
+remaining environment gate is the explicitly manual XM demo trade lifecycle.
+The objective local classification is therefore:
 
 **READY FOR XM DEMO ACCEPTANCE**
+
+It must not be promoted to **XM DEMO ACCEPTED** until every required manual
+checklist item has recorded evidence.
