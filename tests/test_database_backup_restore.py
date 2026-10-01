@@ -186,7 +186,12 @@ def test_cli_backup_and_confirmed_restore(tmp_path: Path):
         ["journal", "restore", str(backup_path), "--database", str(database)],
     )
     assert refused.exit_code != 0
-    assert "--confirm" in refused.output
+    # Missing confirmation must fail closed. Do not assert Rich/Typer's rendered
+    # error text: its terminal-width wrapping differs between Windows and the
+    # Ubuntu GitHub Actions runners.
+    assert journal.get_trade("original") is not None
+    assert journal.get_trade("later") is not None
+    assert not (tmp_path / "safety").exists()
 
     restored = runner.invoke(
         cli_main.app,
