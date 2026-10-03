@@ -1104,3 +1104,389 @@ class TestProposalLifecycleComplete:
         assert record_after.suggested_lot_size == 0.45
         assert record_after.reasoning == "Original deep reasoning thesis that must never be altered."
 
+
+class TestForexJournalSchemaAndProvenance:
+    """Tests for DOM-010 and DOM-011 schema versioning and provenance contracts."""
+
+    def test_trade_record_has_schema_version(self, memory_journal: ForexTradeJournal):
+        trade = memory_journal.record_trade_open(
+            pair="EURUSD",
+            action=ForexAction.LONG,
+            open_price=1.0850,
+            stop_loss=1.0810,
+            take_profit=1.0930,
+            lots=0.5,
+        )
+        assert trade.schema_version == 1
+
+        retrieved = memory_journal.get_trade(trade.trade_id)
+        assert retrieved is not None
+        assert retrieved.schema_version == 1
+        assert retrieved.pair == "EURUSD"
+
+    def test_trades_table_has_schema_version_column(self, memory_journal: ForexTradeJournal):
+        conn = memory_journal._get_connection()
+        try:
+            cursor = conn.execute("PRAGMA table_info(trades);")
+            cols = {row[1] for row in cursor.fetchall()}
+            assert "schema_version" in cols
+        finally:
+            if conn != memory_journal._mem_conn:
+                conn.close()
+
+    def test_migration_5_upgrade_preserves_historical_trades(self, tmp_path, monkeypatch):
+        import sqlite3
+
+        from tradingagents.database import migrations
+
+        db_path = tmp_path / "legacy_trades.db"
+        with monkeypatch.context() as patch:
+            patch.setattr(migrations, "MIGRATIONS", migrations.MIGRATIONS[:1])
+            assert migrations.run_migrations(db_path) == 1
+
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO trades (
+                    trade_id, pair, action, status, open_time_utc, open_price, stop_loss, lots
+                ) VALUES ('leg_1', 'EURUSD', 'LONG', 'OPEN', '2026-09-01T00:00:00+00:00', 1.08, 1.075, 0.1);
+                """
+            )
+
+        applied = migrations.run_migrations(db_path)
+        assert applied == len(migrations.MIGRATIONS) - 1
+
+        with ForexTradeJournal(db_path=db_path) as journal:
+            trade = journal.get_trade("leg_1")
+            assert trade is not None
+            assert trade.trade_id == "leg_1"
+            assert trade.schema_version == 1
+            assert trade.open_price == 1.08
+
+    def test_strategy_version_provenance_round_trip(self, memory_journal: ForexTradeJournal):
+        import hashlib
+        prompt = "System prompt for Forex institutional trader"
+        prompt_hash = hashlib.sha256(prompt.encode()).hexdigest()
+
+        rec = memory_journal.record_strategy_version(
+            strategy_name="ForexBreakoutV1",
+            prompt_hash=prompt_hash,
+            model_name="gpt-4.1",
+            parameters={"timeframe": "H1", "risk_percent": 1.0},
+        )
+        assert rec.version_id.startswith("v_")
+        assert rec.schema_version == 1
+        assert rec.prompt_hash == prompt_hash
+
+        fetched = memory_journal.get_strategy_version(rec.version_id)
+        assert fetched is not None
+        assert fetched.version_id == rec.version_id
+        assert fetched.prompt_hash == prompt_hash
+        assert fetched.parameters["risk_percent"] == 1.0
+
+
+class TestProposalLifecycleAndJournalCompletion:
+    """Phase 6: Comprehensive tests for deterministic proposal expiry, lifecycle transitions,
+    immutability preservation, user-note isolation, and export functionality.
+    """
+
+    def test_expiry_boundary(self, memory_journal: ForexTradeJournal):
+        mgr = TradeLifecycleManager(journal=memory_journal)
+        cutoff_str = "2026-10-03T12:00:00+00:00"
+        cutoff_dt = datetime.fromisoformat(cutoff_str)
+
+        prop_id = mgr.submit_proposal(
+            make_proposal("EURUSD", entry=1.0850, valid_until=cutoff_str)
+        )
+
+        # 1 second before cutoff: must NOT expire
+        res_before = mgr.check_and_expire_proposals(
+            current_time=datetime(2026, 10, 3, 11, 59, 59, tzinfo=timezone.utc)
+        )
+        assert res_before == []
+        rec_before = memory_journal.get_proposal(prop_id)
+        assert rec_before.status == ProposalStatus.PROPOSED
+
+        # Exactly at cutoff boundary: MUST expire
+        res_exact = mgr.check_and_expire_proposals(current_time=cutoff_dt)
+        assert res_exact == [prop_id]
+        rec_exact = memory_journal.get_proposal(prop_id)
+        assert rec_exact.status == ProposalStatus.EXPIRED
+
+        # Verify timeline event
+        events = mgr.timeline.get_timeline_for_proposal(prop_id)
+        exp_events = [e for e in events if e.event_type == EventType.PROPOSAL_EXPIRED]
+        assert len(exp_events) == 1
+        assert "Proposal validity window elapsed" in exp_events[0].description
+
+    def test_already_executed_proposal_cannot_expire(self, memory_journal: ForexTradeJournal):
+        mgr = TradeLifecycleManager(journal=memory_journal)
+        cutoff_str = "2026-10-03T12:00:00+00:00"
+
+        prop_id = mgr.submit_proposal(
+            make_proposal("EURUSD", entry=1.0850, lots=0.5, valid_until=cutoff_str)
+        )
+        mgr.evaluate_risk(
+            prop_id,
+            ForexRiskDecision(
+                pair="EURUSD",
+                decision=ForexRiskDecisionAction.APPROVE,
+                original_action=ForexAction.LONG,
+                approved_action=ForexAction.LONG,
+                executive_rationale="Approved within risk boundaries.",
+            ),
+        )
+        mgr.open_position_from_proposal(proposal_id=prop_id, open_price=1.0850, lots=0.5)
+
+        # Check proposal is executed
+        rec = memory_journal.get_proposal(prop_id)
+        assert rec.status == ProposalStatus.EXECUTED
+
+        # Running check_and_expire_proposals past validity window must NOT expire it
+        after_cutoff = datetime(2026, 10, 3, 13, 0, 0, tzinfo=timezone.utc)
+        res = mgr.check_and_expire_proposals(current_time=after_cutoff)
+        assert res == []
+        assert memory_journal.get_proposal(prop_id).status == ProposalStatus.EXECUTED
+
+        # Direct expiration call must raise LifecycleTransitionError
+        with pytest.raises(LifecycleTransitionError):
+            mgr.expire_proposal(prop_id)
+
+    def test_rejected_proposal_cannot_expire(self, memory_journal: ForexTradeJournal):
+        mgr = TradeLifecycleManager(journal=memory_journal)
+        cutoff_str = "2026-10-03T12:00:00+00:00"
+
+        prop_id = mgr.submit_proposal(
+            make_proposal("EURUSD", entry=1.0850, valid_until=cutoff_str)
+        )
+        mgr.evaluate_risk(
+            prop_id,
+            ForexRiskDecision(
+                pair="EURUSD",
+                decision=ForexRiskDecisionAction.REJECT,
+                original_action=ForexAction.LONG,
+                approved_action=ForexAction.NO_TRADE,
+                executive_rationale="Risk limit exceeded.",
+            ),
+        )
+        assert memory_journal.get_proposal(prop_id).status == ProposalStatus.REJECTED
+
+        # Cannot expire via automated check
+        after_cutoff = datetime(2026, 10, 3, 13, 0, 0, tzinfo=timezone.utc)
+        res = mgr.check_and_expire_proposals(current_time=after_cutoff)
+        assert res == []
+        assert memory_journal.get_proposal(prop_id).status == ProposalStatus.REJECTED
+
+        # Direct expiration call must raise LifecycleTransitionError
+        with pytest.raises(LifecycleTransitionError):
+            mgr.expire_proposal(prop_id)
+
+    def test_superseded_proposal_cannot_expire(self, memory_journal: ForexTradeJournal):
+        mgr = TradeLifecycleManager(journal=memory_journal)
+        cutoff_str = "2026-10-03T12:00:00+00:00"
+
+        prop_id1 = mgr.submit_proposal(
+            make_proposal("EURUSD", entry=1.0850, valid_until=cutoff_str)
+        )
+        mgr.supersede_proposal(prop_id1, reason="Superseded by newer analysis")
+        assert memory_journal.get_proposal(prop_id1).status == ProposalStatus.SUPERSEDED
+
+        # Cannot expire via automated check
+        after_cutoff = datetime(2026, 10, 3, 13, 0, 0, tzinfo=timezone.utc)
+        res = mgr.check_and_expire_proposals(current_time=after_cutoff)
+        assert res == []
+        assert memory_journal.get_proposal(prop_id1).status == ProposalStatus.SUPERSEDED
+
+        # Direct expiration call must raise LifecycleTransitionError
+        with pytest.raises(LifecycleTransitionError):
+            mgr.expire_proposal(prop_id1)
+
+    def test_repeated_expiry_processing_idempotent(self, memory_journal: ForexTradeJournal):
+        mgr = TradeLifecycleManager(journal=memory_journal)
+        cutoff_str = "2026-10-03T10:00:00+00:00"
+
+        prop_id = mgr.submit_proposal(
+            make_proposal("EURUSD", entry=1.0850, valid_until=cutoff_str)
+        )
+        after_cutoff = datetime(2026, 10, 3, 11, 0, 0, tzinfo=timezone.utc)
+
+        # First run expires proposal
+        res1 = mgr.check_and_expire_proposals(current_time=after_cutoff)
+        assert res1 == [prop_id]
+        assert memory_journal.get_proposal(prop_id).status == ProposalStatus.EXPIRED
+
+        # Second run is completely idempotent
+        res2 = mgr.check_and_expire_proposals(current_time=after_cutoff)
+        assert res2 == []
+
+        # Direct expire_proposal call on already-expired proposal is safe no-op
+        mgr.expire_proposal(prop_id)
+        assert memory_journal.get_proposal(prop_id).status == ProposalStatus.EXPIRED
+
+        # Exactly 1 PROPOSAL_EXPIRED event exists in timeline
+        events = mgr.timeline.get_timeline_for_proposal(prop_id)
+        exp_events = [e for e in events if e.event_type == EventType.PROPOSAL_EXPIRED]
+        assert len(exp_events) == 1
+
+    def test_restart_and_persistence_of_proposals_and_expiry(self, tmp_path):
+        db_file = tmp_path / "persistence_test_journal.db"
+        cutoff_str = "2026-10-03T10:00:00+00:00"
+
+        # Session 1: Create proposal with past validity
+        with ForexTradeJournal(db_path=db_file, auto_migrate=True) as j1:
+            mgr1 = TradeLifecycleManager(journal=j1)
+            prop_id = mgr1.submit_proposal(
+                make_proposal("GBPUSD", entry=1.2850, valid_until=cutoff_str)
+            )
+            # Expire proposal in session 1
+            res1 = mgr1.check_and_expire_proposals(
+                current_time=datetime(2026, 10, 3, 10, 30, 0, tzinfo=timezone.utc)
+            )
+            assert res1 == [prop_id]
+
+        # Session 2: Reopen journal and manager from disk
+        with ForexTradeJournal(db_path=db_file, auto_migrate=True) as j2:
+            rec = j2.get_proposal(prop_id)
+            assert rec is not None
+            assert rec.status == ProposalStatus.EXPIRED
+
+            mgr2 = TradeLifecycleManager(journal=j2)
+            # Repeated check across restarts produces no extra events or errors
+            res2 = mgr2.check_and_expire_proposals(
+                current_time=datetime(2026, 10, 3, 11, 0, 0, tzinfo=timezone.utc)
+            )
+            assert res2 == []
+
+            # Timeline event persisted across restart
+            events = mgr2.timeline.get_timeline_for_proposal(prop_id)
+            exp_events = [e for e in events if e.event_type == EventType.PROPOSAL_EXPIRED]
+            assert len(exp_events) == 1
+
+    def test_user_note_protection_preserves_immutable_evidence(self, memory_journal: ForexTradeJournal):
+        import sqlite3
+        mgr = TradeLifecycleManager(journal=memory_journal)
+        prop_id = mgr.submit_proposal(
+            make_proposal("USDJPY", entry=155.20, sl=154.80, tp1=156.00, lots=0.40)
+        )
+        mgr.evaluate_risk(
+            prop_id,
+            ForexRiskDecision(
+                pair="USDJPY",
+                decision=ForexRiskDecisionAction.APPROVE,
+                original_action=ForexAction.LONG,
+                approved_action=ForexAction.LONG,
+                executive_rationale="Approved.",
+            ),
+        )
+        trade_id = mgr.open_position_from_proposal(prop_id, open_price=155.22, lots=0.40, ticket=55001)
+
+        # Query raw SQLite evidence before user edit
+        with memory_journal._lock:
+            conn = memory_journal._get_connection()
+            row_ev_before = conn.execute(
+                "SELECT payload_json, content_hash FROM proposal_evidence WHERE proposal_id = ?;",
+                (prop_id,),
+            ).fetchone()
+            row_tr_before = conn.execute(
+                "SELECT open_price, lots, stop_loss, schema_version FROM trades WHERE trade_id = ?;",
+                (trade_id,),
+            ).fetchone()
+
+        # User updates reflection and notes on trade
+        user_reflection = "Clean trend breakout setup with minor slippage."
+        user_notes = "Execution rating 9/10"
+        memory_journal.update_trade_reflection(
+            trade_id=trade_id,
+            reflection=user_reflection,
+            tags=["Breakout", "Tokyo-London"],
+            notes=user_notes,
+        )
+
+        # Verify evidence remains bit-for-bit identical in SQLite
+        with memory_journal._lock:
+            conn = memory_journal._get_connection()
+            row_ev_after = conn.execute(
+                "SELECT payload_json, content_hash FROM proposal_evidence WHERE proposal_id = ?;",
+                (prop_id,),
+            ).fetchone()
+            row_tr_after = conn.execute(
+                "SELECT open_price, lots, stop_loss, schema_version FROM trades WHERE trade_id = ?;",
+                (trade_id,),
+            ).fetchone()
+
+        assert row_ev_before == row_ev_after, "Immutable proposal_evidence was mutated by user note update!"
+        assert row_tr_before == row_tr_after, "Broker trade execution fields were mutated by user reflection!"
+
+        # Direct SQL mutation attempts on immutable proposal evidence are rejected by SQLite triggers
+        with memory_journal._lock:
+            conn = memory_journal._get_connection()
+            with pytest.raises(sqlite3.IntegrityError, match="Proposal evidence is immutable"):
+                conn.execute(
+                    "UPDATE proposals SET metadata_json = '{\"hack\": true}' WHERE proposal_id = ?;",
+                    (prop_id,),
+                )
+            with pytest.raises(sqlite3.IntegrityError, match="Immutable research record"):
+                conn.execute(
+                    "UPDATE proposal_evidence SET payload_json = '{\"hack\": true}' WHERE proposal_id = ?;",
+                    (prop_id,),
+                )
+
+        trade_after = memory_journal.get_trade(trade_id)
+        assert trade_after.reflection == user_reflection
+        assert trade_after.notes == user_notes
+        assert trade_after.tags == ["Breakout", "Tokyo-London"]
+        assert trade_after.open_price == 155.22
+        assert trade_after.lots == 0.40
+
+    def test_export_trades_correctness(self, memory_journal: ForexTradeJournal):
+        memory_journal.record_trade_open(
+            pair="EURUSD",
+            action=ForexAction.LONG,
+            open_price=1.0850,
+            stop_loss=1.0810,
+            take_profit=1.0920,
+            lots=0.5,
+            trade_id="trd_exp_1",
+            open_time_utc="2026-10-01T10:00:00+00:00",
+        )
+        memory_journal.record_trade_close(
+            trade_id="trd_exp_1",
+            close_price=1.0920,
+            close_time_utc="2026-10-01T15:30:00+00:00",
+            exit_reason=TradeExitReason.TAKE_PROFIT,
+        )
+        memory_journal.record_trade_open(
+            pair="GBPJPY",
+            action=ForexAction.SHORT,
+            open_price=190.50,
+            stop_loss=191.20,
+            take_profit=189.00,
+            lots=0.2,
+            trade_id="trd_exp_2",
+            open_time_utc="2026-10-02T08:00:00+00:00",
+        )
+
+        # JSON export
+        import json
+        json_str = memory_journal.export_trades(fmt="json")
+        data = json.loads(json_str)
+        assert isinstance(data, list)
+        assert len(data) == 2
+        trade_ids = {item["trade_id"] for item in data}
+        assert trade_ids == {"trd_exp_1", "trd_exp_2"}
+
+        # CSV export
+        import csv
+        import io
+        csv_str = memory_journal.export_trades(fmt="csv")
+        reader = list(csv.reader(io.StringIO(csv_str)))
+        assert len(reader) == 3  # Header + 2 data rows
+        header = reader[0]
+        assert "trade_id" in header
+        assert "net_profit" in header
+        assert "schema_version" in header
+
+        # Invalid format
+        with pytest.raises(ValueError, match="Unsupported export format"):
+            memory_journal.export_trades(fmt="xml")
+

@@ -13,6 +13,7 @@ from tradingagents.database.journal import ForexTradeJournal
 from tradingagents.database.models import TradeStatus
 from tradingagents.journal.manager import ForexJournalManager
 from tradingagents.journal.models import EventType
+from tradingagents.mt5.errors import MT5DataError
 from tradingagents.mt5.models import MT5Deal, MT5Order, MT5Position
 from tradingagents.mt5.service import MT5ObservationService
 
@@ -342,4 +343,70 @@ def test_mt5_service_detects_pending_orders(memory_journal_mgr: ForexJournalMana
     # Re-polling should be idempotent
     res_repeat = service.poll_once()
     assert res_repeat["events_count"] == 0
+
+
+def test_mt5_service_records_unavailable_poll_and_recovers_without_state_loss(
+    memory_journal_mgr: ForexJournalManager,
+):
+    observer = MagicMock()
+    observer.get_open_positions.return_value = []
+    observer.get_pending_orders.return_value = []
+    observer.get_deals.return_value = []
+    service = MT5ObservationService(observer=observer, journal_mgr=memory_journal_mgr)
+
+    service.poll_once()
+    first_success = service.last_successful_poll_at
+    observer.get_open_positions.side_effect = MT5DataError(
+        "vendor IPC detail", code=-10005
+    )
+
+    with pytest.raises(MT5DataError):
+        service.poll_once()
+
+    assert service.last_error == "MT5DataError"
+    assert service.last_successful_poll_at == first_success
+    assert service._known_positions == {}
+    assert service._known_orders == {}
+    assert memory_journal_mgr.journal.list_trades() == []
+
+    observer.get_open_positions.side_effect = None
+    observer.get_open_positions.return_value = []
+    recovered = service.poll_once()
+
+    assert recovered["events_count"] == 0
+    assert service.last_error is None
+    assert service.last_successful_poll_at is not None
+
+
+def test_mt5_service_history_failure_does_not_commit_partial_snapshot(
+    memory_journal_mgr: ForexJournalManager,
+):
+    observer = MagicMock()
+    observer.get_open_positions.return_value = []
+    pending = MT5Order(
+        ticket=77002,
+        time_setup=datetime.now(timezone.utc),
+        type="ORDER_TYPE_BUY_STOP",
+        state="ORDER_STATE_PLACED",
+        symbol="EURUSD",
+        volume_initial=0.2,
+        volume_current=0.2,
+        price_open=1.09,
+    )
+    observer.get_pending_orders.return_value = [pending]
+    observer.get_deals.side_effect = MT5DataError("history unavailable", code=-10005)
+    service = MT5ObservationService(observer=observer, journal_mgr=memory_journal_mgr)
+
+    with pytest.raises(MT5DataError):
+        service.poll_once()
+
+    assert service._known_orders == {}
+    assert memory_journal_mgr.timeline.get_events() == []
+
+    observer.get_deals.side_effect = None
+    observer.get_deals.return_value = []
+    recovered = service.poll_once()
+
+    assert recovered["events"] == [{"type": "NEW_ORDER", "ticket": 77002}]
+    assert service.last_error is None
 

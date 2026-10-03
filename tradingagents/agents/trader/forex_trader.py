@@ -7,6 +7,7 @@ represented by a typed ``ForexTraderProposal``.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -255,6 +256,8 @@ def create_forex_trader(llm: Any):
             f"{NO_EXTERNAL_TOOLS}{get_language_instruction()}"
         )
 
+        prompt_hash = hashlib.sha256(system_prompt.encode("utf-8")).hexdigest()
+
         user_content = "\n".join(prompt_sections)
         messages = [
             {"role": "system", "content": system_prompt},
@@ -294,12 +297,21 @@ def create_forex_trader(llm: Any):
             content = getattr(raw_resp, "content", str(raw_resp))
             proposal = parse_forex_proposal_from_text(content, pair, default_timeframe=selected_tf)
 
-        if proposal is not None and selected_tf and proposal.timeframe != selected_tf:
-            proposal = proposal.model_copy(update={"timeframe": selected_tf})
-
         applied_ids = state.get("applied_lesson_ids") or []
-        if proposal is not None and applied_ids and not proposal.applied_lesson_ids:
-            proposal = proposal.model_copy(update={"applied_lesson_ids": list(applied_ids)})
+        if proposal is not None:
+            updates: dict[str, Any] = {
+                "prompt_hash": prompt_hash,
+                "prompt_version": getattr(proposal, "prompt_version", None) or "1.0.0",
+                "strategy_version": getattr(proposal, "strategy_version", None) or "1.0.0",
+            }
+            model_name = getattr(llm, "model_name", None) or getattr(llm, "model", None)
+            if model_name and not getattr(proposal, "deep_model", None):
+                updates["deep_model"] = str(model_name)
+            if selected_tf and proposal.timeframe != selected_tf:
+                updates["timeframe"] = selected_tf
+            if applied_ids and not proposal.applied_lesson_ids:
+                updates["applied_lesson_ids"] = list(applied_ids)
+            proposal = proposal.model_copy(update=updates)
 
         # Render institutional markdown proposal
         rendered_plan = render_forex_trader_proposal(proposal)
@@ -307,8 +319,9 @@ def create_forex_trader(llm: Any):
         return {
             "messages": [AIMessage(content=rendered_plan)],
             "trader_investment_plan": rendered_plan,
-            "forex_proposal": proposal.model_dump(),
-            "applied_lesson_ids": proposal.applied_lesson_ids,
+            "forex_proposal": proposal.model_dump() if proposal is not None else None,
+            "forex_prompt_hash": prompt_hash,
+            "applied_lesson_ids": proposal.applied_lesson_ids if proposal is not None else [],
             "sender": name,
         }
 

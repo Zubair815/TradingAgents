@@ -37,29 +37,73 @@ def _are_compatible_timeframes(tf1: str, tf2: str) -> bool:
     return (t1 in intraday and t2 in intraday) or (t1 in swing and t2 in swing)
 
 
-def _calculate_recency_bonus(lsn: ForexLesson) -> float:
-    """Calculate recency boost for recently observed/validated lessons."""
-    timestamp = lsn.last_validated_at or lsn.created_at
-    if not timestamp:
-        return 0.0
+def _parse_timestamp(ts: datetime | str | None) -> datetime | None:
+    """Parse string or datetime to UTC timezone-aware datetime."""
+    if ts is None:
+        return None
+    if isinstance(ts, datetime):
+        return ts if ts.tzinfo is not None else ts.replace(tzinfo=timezone.utc)
     try:
-        ts = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-        now = datetime.now(timezone.utc)
-        days = (now - ts).total_seconds() / 86400.0
-        if days <= 7:
-            return 0.04
-        elif days <= 30:
-            return 0.02
-        return 0.0
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
     except Exception:
-        return 0.0
+        return None
+
+
+def calculate_age_decay(
+    lsn: ForexLesson,
+    as_of: datetime | str | None = None,
+    half_life_days: float = 30.0,
+) -> tuple[float, float]:
+    """Calculate elapsed days and exponential age decay factor for a lesson (LEARN-010).
+
+    Returns:
+        (elapsed_days, decay_factor) where decay_factor = 2 ** (-elapsed_days / half_life_days).
+    """
+    ref_dt = _parse_timestamp(as_of) or datetime.now(timezone.utc)
+
+    # Determine relevant timestamp known as-of ref_dt
+    created_dt = _parse_timestamp(lsn.created_at)
+    val_dt = _parse_timestamp(lsn.last_validated_at)
+
+    # If last validation is in the future relative to ref_dt, cap to created_dt
+    effective_dt = val_dt if (val_dt and val_dt <= ref_dt) else created_dt
+    if effective_dt is None:
+        return 0.0, 1.0
+
+    elapsed_seconds = (ref_dt - effective_dt).total_seconds()
+    elapsed_days = 0.0 if elapsed_seconds < 0 else elapsed_seconds / 86400.0
+
+    if half_life_days <= 0:
+        return elapsed_days, 1.0
+
+    decay = 2.0 ** (-elapsed_days / half_life_days)
+    return elapsed_days, max(0.0, min(1.0, decay))
+
+
+def _calculate_recency_bonus(
+    lsn: ForexLesson,
+    as_of: datetime | str | None = None,
+    half_life_days: float = 30.0,
+) -> float:
+    """Calculate recency boost for recently observed/validated lessons using continuous exponential decay (LEARN-010)."""
+    _, decay = calculate_age_decay(lsn, as_of=as_of, half_life_days=half_life_days)
+    # 0.05 base bonus scaled continuously by exponential decay
+    return round(0.05 * decay, 4)
 
 
 class LessonRetriever:
     """Ranks and retrieves historical trading lessons relevant to current market setups (Phase 16)."""
 
-    def __init__(self, store: ForexLessonStore) -> None:
+    def __init__(
+        self,
+        store: ForexLessonStore,
+        default_min_support: int = 1,
+        default_half_life_days: float = 30.0,
+    ) -> None:
         self.store = store
+        self.default_min_support = max(1, default_min_support)
+        self.default_half_life_days = max(0.1, default_half_life_days)
 
     def retrieve_lessons(
         self,
@@ -76,6 +120,9 @@ class LessonRetriever:
         limit: int = 5,
         min_relevance: float = 0.25,
         active_only: bool = True,
+        min_support: int | None = None,
+        half_life_days: float | None = None,
+        as_of: datetime | str | None = None,
     ) -> list[RetrievedLesson]:
         """Query memory and rank lessons by multidimensional relevance (Phase 16).
 
@@ -87,8 +134,9 @@ class LessonRetriever:
         - Trading session (e.g. LONDON, NEW_YORK, TOKYO)
         - Market regime (e.g. TRENDING_BULLISH, RANGING)
         - Volatility regime and news environment tags
-        - Empirical validation strength (evidence count)
-        - Recency of observation
+        - Empirical validation strength (evidence count with configurable min_support)
+        - Continuous exponential age decay (half_life_days)
+        - Point-in-time retrieval cutoff (as_of)
         - Statistical confidence multiplier
         """
         all_lessons = self.store.list_lessons(limit=200)
@@ -106,10 +154,30 @@ class LessonRetriever:
         target_news = (news_environment or "").strip().upper()
         target_tags = {t.lower() for t in (tags or [])}
 
+        as_of_dt = _parse_timestamp(as_of)
+        effective_min_support = (
+            max(1, min_support) if min_support is not None else self.default_min_support
+        )
+        effective_half_life = (
+            max(0.1, half_life_days)
+            if half_life_days is not None
+            else self.default_half_life_days
+        )
+
         scored: list[RetrievedLesson] = []
 
         for lsn in all_lessons:
             if active_only and not lsn.active:
+                continue
+
+            # Point-in-Time Cutoff: Exclude lessons created in the future of as_of
+            if as_of_dt is not None:
+                created_dt = _parse_timestamp(lsn.created_at)
+                if created_dt and created_dt > as_of_dt:
+                    continue
+
+            # Configurable Minimum Support Filter (LEARN-006)
+            if lsn.evidence_count < effective_min_support:
                 continue
 
             score = 0.0
@@ -178,19 +246,32 @@ class LessonRetriever:
                     score += overlap_pts
                     reasons.append(f"Context tags overlap: {sorted(common)}")
 
-            # 9. Recency Bonus (up to 0.04)
-            rec_bonus = _calculate_recency_bonus(lsn)
-            if rec_bonus > 0:
+            # 9. Recency Bonus with Continuous Exponential Age Decay (LEARN-010)
+            elapsed_days, decay = calculate_age_decay(
+                lsn, as_of=as_of_dt, half_life_days=effective_half_life
+            )
+            rec_bonus = round(0.05 * decay, 4)
+            if rec_bonus > 0.005:
                 score += rec_bonus
-                reasons.append(f"Recent validation (+{rec_bonus:.2f})")
+                reasons.append(
+                    f"Recent validation (+{rec_bonus:.2f}, {elapsed_days:.1f}d ago, decay: {decay:.2f})"
+                )
 
             # 10. Empirical Evidence Strength Bonus (up to 0.04)
             if lsn.evidence_count >= 6:
                 score += 0.04
-                reasons.append(f"Strong accumulated evidence ({lsn.evidence_count} observations)")
+                reasons.append(
+                    f"Strong accumulated evidence ({lsn.evidence_count} observations >= {effective_min_support} min)"
+                )
             elif lsn.evidence_count >= 3:
                 score += 0.02
-                reasons.append(f"Moderate evidence ({lsn.evidence_count} observations)")
+                reasons.append(
+                    f"Moderate evidence ({lsn.evidence_count} observations >= {effective_min_support} min)"
+                )
+            elif lsn.evidence_count >= effective_min_support:
+                reasons.append(
+                    f"Meets evidence support threshold ({lsn.evidence_count} >= {effective_min_support})"
+                )
 
             # Scale score by statistical confidence
             conf = max(0.4, min(1.0, float(lsn.confidence)))
@@ -224,6 +305,7 @@ class LessonRetriever:
         lines: list[str] = [
             title,
             f"*Institutional memory applied ({len(retrieved)} active lessons, IDs: {', '.join(applied_ids)}):*",
+            "*ADVISORY EVIDENCE ONLY: Historical heuristics inform hypothesis generation but do not override deterministic risk rules, sizing limits, or broker constraints.*",
             "",
         ]
 

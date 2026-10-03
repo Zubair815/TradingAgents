@@ -25,6 +25,9 @@ from cli.utils import (
     detect_asset_type,
     filter_analysts_for_asset_type,
 )
+from tradingagents.dataflows.forex_quality import DataInsufficientError
+from tradingagents.mt5.errors import MT5ConnectionError, MT5Error
+from tradingagents.risk.sizing import BrokerExecutionConstraints, ForexAccountProfile
 
 
 class TestCliForexDetection:
@@ -208,6 +211,161 @@ class TestCliForexRunCommand:
         }
         assert "broker verified" in result.output
         assert "broker_verified=true" in result.output
+
+    def test_run_forex_mt5_exposure_failure_is_nonzero_and_never_runs_graph(
+        self, mock_forex_graph
+    ):
+        observer = MagicMock()
+        with (
+            patch("tradingagents.forex.ForexTradingAgentsGraph") as graph_cls,
+            patch("tradingagents.mt5.observer.MT5Observer", return_value=observer),
+            patch(
+                "tradingagents.forex.application.build_mt5_application_context",
+                side_effect=DataInsufficientError(
+                    "complete MT5 risk context is unavailable"
+                ),
+            ),
+        ):
+            result = CliRunner().invoke(
+                m.app,
+                ["run", "EURUSD", "--account-source", "mt5"],
+            )
+
+        assert result.exit_code == 1
+        assert "complete MT5 risk context is unavailable" in result.output
+        observer.connection.disconnect.assert_called_once_with()
+        graph_cls.assert_not_called()
+
+    def test_run_forex_mt5_end_to_end_shared_builder_populates_risk_context(
+        self, mock_forex_graph
+    ):
+        observed_at = datetime.datetime.now(datetime.timezone.utc)
+        observer = MagicMock()
+        observer.connection.is_connected.return_value = True
+        observer.to_sizing_account_profile.return_value = ForexAccountProfile(
+            balance=50_000.0,
+            equity=49_800.0,
+            free_margin=45_000.0,
+            currency="USD",
+            leverage=100.0,
+        )
+        observer.get_current_tick.return_value = SimpleNamespace(
+            bid=1.0850,
+            ask=1.0852,
+            spread_pips=2.0,
+            source="MT5",
+            broker_symbol="EURUSD",
+            time=observed_at,
+        )
+        observer.to_broker_constraints.return_value = BrokerExecutionConstraints(
+            broker_symbol="EURUSD",
+            digits=5,
+            point=0.00001,
+            pip_size=0.0001,
+        )
+        observer.get_atr_pips.return_value = 15.0
+        observer.get_conversion_observations.return_value = ()
+        observer.get_pending_orders.return_value = []
+        observer.to_open_positions.return_value = []
+
+        with (
+            patch("tradingagents.forex.ForexTradingAgentsGraph", return_value=mock_forex_graph) as mock_cls,
+            patch("tradingagents.mt5.observer.MT5Observer", return_value=observer),
+        ):
+            runner = CliRunner()
+            result = runner.invoke(
+                m.app,
+                [
+                    "run", "EURUSD",
+                    "--account-source", "mt5",
+                    "--timeframe", "H1",
+                    "--context-timeframes", "H4,D1",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        observer.connection.connect.assert_called_once_with()
+        observer.connection.disconnect.assert_called_once_with()
+
+        call_kwargs = mock_cls.call_args[1]
+        assert call_kwargs["sizing_account"].balance == 50_000.0
+        assert call_kwargs["sizing_account"].currency == "USD"
+        risk_context = call_kwargs["risk_context"]
+        assert risk_context is not None
+        assert risk_context.account.balance == 50_000.0
+        assert risk_context.market.bid == 1.0850
+        assert risk_context.market.ask == 1.0852
+        assert risk_context.market.spread_pips == 2.0
+        assert risk_context.market.atr_pips == 15.0
+        assert risk_context.broker.digits == 5
+        assert risk_context.portfolio.pending_order_count == 0
+        assert mock_forex_graph.run.call_args.kwargs["execution_timeframe"] == "H1"
+        assert mock_forex_graph.run.call_args.kwargs["context_timeframes"] == ["H4", "D1"]
+
+        assert "broker verified" in result.output
+        assert "broker_verified=true" in result.output
+        assert "Execution policy: MANUAL ONLY — no broker order was submitted." in result.output
+
+    def test_run_forex_mt5_connect_failure_fails_closed(self):
+        observer = MagicMock()
+        observer.connection.connect.side_effect = MT5ConnectionError(
+            "Failed to initialize MetaTrader 5"
+        )
+        with (
+            patch("tradingagents.forex.ForexTradingAgentsGraph") as graph_cls,
+            patch("tradingagents.mt5.observer.MT5Observer", return_value=observer),
+        ):
+            result = CliRunner().invoke(
+                m.app,
+                ["run", "EURUSD", "--account-source", "mt5"],
+            )
+
+        assert result.exit_code == 1
+        assert "Failed to initialize MetaTrader 5" in result.output
+        observer.connection.disconnect.assert_called_once_with()
+        graph_cls.assert_not_called()
+
+    def test_run_forex_mt5_tick_failure_fails_closed_in_real_builder(self):
+        observer = MagicMock()
+        observer.connection.is_connected.return_value = True
+        observer.to_sizing_account_profile.return_value = ForexAccountProfile(
+            balance=50_000.0,
+            equity=50_000.0,
+            free_margin=50_000.0,
+            currency="USD",
+            leverage=100.0,
+        )
+        observer.get_current_tick.side_effect = MT5Error("Failed to copy ticks")
+        with (
+            patch("tradingagents.forex.ForexTradingAgentsGraph") as graph_cls,
+            patch("tradingagents.mt5.observer.MT5Observer", return_value=observer),
+        ):
+            result = CliRunner().invoke(
+                m.app,
+                ["run", "EURUSD", "--account-source", "mt5"],
+            )
+
+        assert result.exit_code == 1
+        assert "complete MT5 risk context is unavailable" in result.output
+        observer.connection.disconnect.assert_called_once_with()
+        graph_cls.assert_not_called()
+
+    def test_run_forex_mt5_disconnected_status_fails_closed(self):
+        observer = MagicMock()
+        observer.connection.is_connected.return_value = False
+        with (
+            patch("tradingagents.forex.ForexTradingAgentsGraph") as graph_cls,
+            patch("tradingagents.mt5.observer.MT5Observer", return_value=observer),
+        ):
+            result = CliRunner().invoke(
+                m.app,
+                ["run", "EURUSD", "--account-source", "mt5"],
+            )
+
+        assert result.exit_code == 1
+        assert "MT5 account is not connected" in result.output
+        observer.connection.disconnect.assert_called_once_with()
+        graph_cls.assert_not_called()
 
     def test_run_forex_rejects_invalid_analysts(self):
         runner = CliRunner()

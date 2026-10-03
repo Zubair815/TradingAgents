@@ -760,7 +760,7 @@
   }
 
   function renderLoadError(container, label) {
-    if (container) container.innerHTML = `<div class="empty-state"><div class="empty-state-title">Unable to load ${escapeText(label)}</div><div class="empty-state-desc">The previous values may be stale. Retry when the local service is available.</div></div>`;
+    if (container) container.innerHTML = `<div class="empty-state"><div class="empty-state-title">Unavailable: ${escapeText(label)}</div><div class="empty-state-desc">The previous values may be stale. Retry when the local service is available.</div></div>`;
   }
 
   function maskAccountLogin(login) {
@@ -2681,6 +2681,10 @@
         sampling_interval: payload.sampling_interval,
         max_analysis_points: payload.max_analysis_points,
         analyst_count: payload.analyst_selection ? payload.analyst_selection.length : 3,
+        provider: payload.provider || 'openai',
+        quick_model: payload.quick_model || 'gpt-4.1-mini',
+        deep_model: payload.deep_model || 'gpt-4.1',
+        research_depth: payload.research_depth || 'standard',
       };
       const estRes = await apiFetch('/api/forex/backtest/estimate', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(estReq),
@@ -2689,20 +2693,26 @@
       let proceed = true;
       if (est) {
         const analyses = est.expected_analyses_count ?? 'Unavailable';
-        const calls = est.estimated_llm_calls || est.estimated_calls || 0;
-        const tokens = est.estimated_tokens || est.estimated_token_usage || 0;
-        const cost = est.estimated_cost_usd || est.estimated_cost || 0;
+        const calls = est.estimated_llm_calls ?? est.estimated_calls ?? 'Unavailable';
+        const inputTokens = est.estimated_input_tokens ?? 'Unavailable';
+        const outputTokens = est.estimated_output_tokens ?? 'Unavailable';
+        const tokens = est.estimated_tokens ?? est.estimated_token_usage ?? 'Unavailable';
+        const cost = est.estimated_cost_usd ?? est.estimated_cost;
+        const costText = cost == null
+          ? 'Unavailable (model pricing not configured)'
+          : `$${Number(cost).toFixed(4)} (range $${Number(est.estimated_cost_low_usd).toFixed(4)}–$${Number(est.estimated_cost_high_usd).toFixed(4)})`;
+        const callsByModel = `${est.estimated_quick_model_calls ?? 'Unavailable'} quick / ${est.estimated_deep_model_calls ?? 'Unavailable'} deep`;
         if (DOM.backtestEstimate) {
           DOM.backtestEstimate.style.display = 'block';
-          DOM.backtestEstimate.innerHTML = `<strong>Pre-launch estimate</strong><br>Analyses: ${escapeText(analyses)} · LLM calls: ${escapeText(calls)} · Tokens: ${escapeText(tokens)} · Estimated cost: $${escapeText(Number(cost).toFixed(2))}<br>Sampling interval: ${escapeText(payload.sampling_interval)} bars · Maximum analysis points: ${escapeText(payload.max_analysis_points ?? 'Uncapped')}`;
+          DOM.backtestEstimate.innerHTML = `<strong>Pre-launch estimate — not actual usage</strong><br>Analyses: ${escapeText(analyses)} · LLM calls: ${escapeText(calls)} (${escapeText(callsByModel)})<br>Input tokens: ${escapeText(inputTokens)} · Output tokens: ${escapeText(outputTokens)} · Total tokens: ${escapeText(tokens)}<br>Estimated cost: ${escapeText(costText)}<br>Sampling interval: ${escapeText(payload.sampling_interval)} bars · Maximum analysis points: ${escapeText(payload.max_analysis_points ?? 'Uncapped')}<br><span class="stat-sub">Retries, tool loops, caching, prompt size, and provider price changes can alter actual cost.</span>`;
         }
         // require confirmation for large jobs
-        if (cost >= 1) {
+        if (cost != null && cost >= 1) {
           proceed = confirm(`Estimated analyses: ${analyses}\nEstimated LLM calls: ${calls}\nEstimated tokens: ${tokens}\nEstimated cost: $${Number(cost).toFixed(2)}\nSampling interval: ${payload.sampling_interval}\nMaximum analysis points: ${payload.max_analysis_points ?? 'Uncapped'}\n\nProceed with backtest?`);
           if (proceed) payload.confirm_expensive = true;
         }
         // show a small summary in pipeline area
-        showToast(`Estimate: ${calls} analyses, ${tokens} tokens, $${Number(cost||0).toFixed(2)}`, 'info');
+        showToast(`Estimate: ${calls} LLM calls, ${tokens} tokens, ${cost == null ? 'cost unavailable' : '$' + Number(cost).toFixed(4)}`, 'info');
       }
       if (!proceed) return;
     } catch (e) {

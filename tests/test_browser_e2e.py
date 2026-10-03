@@ -28,6 +28,7 @@ from tradingagents.journal.manager import ForexJournalManager
 from tradingagents.learning.manager import ForexLearningManager
 from tradingagents.learning.models import ForexLesson
 from tradingagents.metrics.manager import ForexMetricsManager
+from tradingagents.mt5.errors import MT5DataError
 from tradingagents.mt5.models import (
     MT5AccountInfo,
     MT5ConnectionStatus,
@@ -457,7 +458,14 @@ def test_analysis_cancellation_is_terminal_in_browser(e2e_environment):
 
 
 def test_proposals_mt5_journal_and_learning_workflows(e2e_environment):
-    with quality_page(e2e_environment, allowed_failed_paths=("/api/forex/mt5/account",)) as page:
+    with quality_page(
+        e2e_environment,
+        allowed_failed_paths=(
+            "/api/forex/mt5/account",
+            "/api/forex/mt5/positions",
+            "/api/forex/mt5/orders",
+        ),
+    ) as page:
         page.locator("#tab-proposals").click()
         page.locator("#proposalsTableContainer").get_by_text("prop_e2e").wait_for()
         page.locator("#proposalsTableContainer button", has_text="View").click()
@@ -494,6 +502,29 @@ def test_proposals_mt5_journal_and_learning_workflows(e2e_environment):
         positions_text = page.locator("#mt5PositionsContainer").inner_text()
         assert "BUY" in positions_text and "SELL" in positions_text
         assert "150.001" in positions_text and "1.08500" in positions_text
+
+        e2e_environment.observer.get_open_positions.side_effect = MT5DataError(
+            "internal position IPC detail", code=-10005
+        )
+        e2e_environment.observer.get_pending_orders.side_effect = MT5DataError(
+            "internal order IPC detail", code=-10005
+        )
+        page.locator("#btnMT5RefreshStatus").click()
+        page.locator("#mt5PositionsContainer").get_by_text(
+            "Unavailable: MT5 positions"
+        ).wait_for()
+        page.locator("#mt5OrdersContainer").get_by_text(
+            "Unavailable: MT5 orders"
+        ).wait_for()
+        assert "internal" not in page.locator("#view-mt5").inner_text()
+
+        e2e_environment.observer.get_open_positions.side_effect = None
+        e2e_environment.observer.get_pending_orders.side_effect = None
+        e2e_environment.observer.get_open_positions.return_value = positions
+        e2e_environment.observer.get_pending_orders.return_value = []
+        page.locator("#btnMT5RefreshStatus").click()
+        page.locator("#mt5PositionsContainer").get_by_text("BUY", exact=True).wait_for()
+        page.locator("#mt5OrdersContainer").get_by_text("No Pending Orders").wait_for()
 
         page.locator("#tab-journal").click()
         page.locator("#journalTableContainer [data-trade-id]").click()

@@ -164,6 +164,21 @@ class TestHealthEndpoints:
         assert body["components"]["database"]["status"] == "ready"
         assert body["components"]["mt5"] == {"status": "degraded", "connected": False}
 
+    def test_resource_sample_is_authenticated_and_contains_no_configuration(self):
+        client = TestClient(app)
+        assert client.get("/api/health/resources").status_code == 401
+
+        response = client.get(
+            "/api/health/resources",
+            headers={"X-Session-Token": server._SESSION_TOKEN},
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["process_id"] > 0
+        assert body["thread_count"] >= 1
+        assert "environment" not in body
+        assert "api_key" not in body
+
 
 # ---------------------------------------------------------------------------
 # CORS Configuration Tests

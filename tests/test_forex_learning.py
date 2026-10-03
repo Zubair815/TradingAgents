@@ -1367,3 +1367,291 @@ def test_learning_api_filters_and_reports_missing_sources(tmp_path: Path):
     assert missing.json()["detail"] == "Run not found"
 
 
+# ===========================================================================
+# 10. Phase 7 Learning and Analytics Completion Tests (LEARN-006, LEARN-010, AN-007)
+# ===========================================================================
+
+
+class TestLearningAndAnalyticsCompletion:
+    """Comprehensive verification for Phase 7 remediation requirements."""
+
+    def test_min_support_threshold_boundary(self, tmp_path: Path):
+        """Verify configurable min_support boundary filtering (LEARN-006)."""
+        store = ForexLessonStore(db_path=tmp_path / "test_min_support.db")
+
+        # 3 lessons with varying empirical evidence
+        store.save_lesson(
+            ForexLesson(
+                lesson_id="lsn_sup_1",
+                pair="EURUSD",
+                setup_type="TREND_CONTINUATION",
+                evidence_count=1,
+                actionable_rule="Single observation rule",
+            )
+        )
+        store.save_lesson(
+            ForexLesson(
+                lesson_id="lsn_sup_2",
+                pair="EURUSD",
+                setup_type="TREND_CONTINUATION",
+                evidence_count=2,
+                actionable_rule="Two observations rule",
+            )
+        )
+        store.save_lesson(
+            ForexLesson(
+                lesson_id="lsn_sup_4",
+                pair="EURUSD",
+                setup_type="TREND_CONTINUATION",
+                evidence_count=4,
+                actionable_rule="Four observations rule",
+            )
+        )
+
+        retriever = LessonRetriever(store=store)
+
+        # min_support=1 -> all 3 returned
+        res_1 = retriever.retrieve_lessons(pair="EURUSD", min_support=1)
+        assert len(res_1) == 3
+
+        # min_support=2 -> evidence_count=1 excluded
+        res_2 = retriever.retrieve_lessons(pair="EURUSD", min_support=2)
+        assert len(res_2) == 2
+        ids_2 = {r.lesson.lesson_id for r in res_2}
+        assert ids_2 == {"lsn_sup_2", "lsn_sup_4"}
+
+        # min_support=3 -> evidence_count=1 and 2 excluded
+        res_3 = retriever.retrieve_lessons(pair="EURUSD", min_support=3)
+        assert len(res_3) == 1
+        assert res_3[0].lesson.lesson_id == "lsn_sup_4"
+
+        # min_support=5 -> none meet threshold
+        res_5 = retriever.retrieve_lessons(pair="EURUSD", min_support=5)
+        assert res_5 == []
+
+    def test_insufficient_evidence_excluded(self, tmp_path: Path):
+        """Verify that an exact match is strictly excluded when evidence is insufficient."""
+        store = ForexLessonStore(db_path=tmp_path / "test_insufficient.db")
+        store.save_lesson(
+            ForexLesson(
+                lesson_id="lsn_perfect_anecdote",
+                pair="GBPUSD",
+                setup_type="BREAKOUT",
+                timeframe="M15",
+                direction="LONG",
+                confidence=1.0,
+                evidence_count=1,
+                actionable_rule="Anecdotal breakout rule",
+            )
+        )
+
+        retriever = LessonRetriever(store=store)
+        # Default min_support=1 returns it
+        assert len(retriever.retrieve_lessons(pair="GBPUSD", setup_type="BREAKOUT")) == 1
+
+        # Explicit min_support=2 excludes it
+        res = retriever.retrieve_lessons(
+            pair="GBPUSD", setup_type="BREAKOUT", min_support=2
+        )
+        assert res == []
+
+    def test_configurable_age_decay_half_life(self, tmp_path: Path):
+        """Verify continuous exponential age decay and half-life parameterization (LEARN-010)."""
+        from tradingagents.learning.retriever import calculate_age_decay
+
+        now = datetime.now(timezone.utc)
+        lsn_fresh = ForexLesson(
+            pair="EURUSD",
+            created_at=now.isoformat(),
+            actionable_rule="Fresh rule",
+        )
+        lsn_30d = ForexLesson(
+            pair="EURUSD",
+            created_at=(now - timedelta(days=30)).isoformat(),
+            actionable_rule="30d old rule",
+        )
+        lsn_60d = ForexLesson(
+            pair="EURUSD",
+            created_at=(now - timedelta(days=60)).isoformat(),
+            actionable_rule="60d old rule",
+        )
+
+        # Mathematical half-life verification:
+        # At 0 days -> decay = 1.0
+        days_0, decay_0 = calculate_age_decay(lsn_fresh, as_of=now, half_life_days=30.0)
+        assert days_0 < 0.01
+        assert pytest.approx(decay_0, 0.01) == 1.0
+
+        # At 30 days with half_life=30 -> decay = 0.5
+        days_30, decay_30 = calculate_age_decay(lsn_30d, as_of=now, half_life_days=30.0)
+        assert pytest.approx(days_30, 0.1) == 30.0
+        assert pytest.approx(decay_30, 0.02) == 0.5
+
+        # At 60 days with half_life=30 -> decay = 0.25 (2 half-lives)
+        days_60, decay_60 = calculate_age_decay(lsn_60d, as_of=now, half_life_days=30.0)
+        assert pytest.approx(days_60, 0.1) == 60.0
+        assert pytest.approx(decay_60, 0.02) == 0.25
+
+        # Faster decay: half_life=7 days -> at 30 days decay = 2^(-30/7) ~= 0.051
+        _, decay_fast = calculate_age_decay(lsn_30d, as_of=now, half_life_days=7.0)
+        assert decay_fast < 0.06
+
+        # Slower decay: half_life=365 days -> at 30 days decay = 2^(-30/365) ~= 0.944
+        _, decay_slow = calculate_age_decay(lsn_30d, as_of=now, half_life_days=365.0)
+        assert decay_slow > 0.93
+
+        # Store-level retrieval scoring verification:
+        store = ForexLessonStore(db_path=tmp_path / "test_decay_retrieval.db")
+        store.save_lesson(lsn_fresh)
+        store.save_lesson(lsn_60d)
+
+        retriever = LessonRetriever(store=store)
+        results = retriever.retrieve_lessons(pair="EURUSD", half_life_days=30.0)
+        assert len(results) == 2
+        # Fresh lesson must have higher relevance score due to age decay on older lesson
+        assert results[0].lesson.lesson_id == lsn_fresh.lesson_id
+        assert results[0].relevance_score > results[1].relevance_score
+
+    def test_point_in_time_retrieval_cutoff(self, tmp_path: Path):
+        """Verify strict point-in-time retrieval cutoff prevents future lesson lookahead."""
+        store = ForexLessonStore(db_path=tmp_path / "test_pit_cutoff.db")
+
+        # Lesson 1: Created Jan 1, 2025
+        store.save_lesson(
+            ForexLesson(
+                lesson_id="lsn_jan_01",
+                pair="EURUSD",
+                created_at="2025-01-01T00:00:00Z",
+                actionable_rule="Jan 1 rule",
+            )
+        )
+        # Lesson 2: Created Jan 10, 2025
+        store.save_lesson(
+            ForexLesson(
+                lesson_id="lsn_jan_10",
+                pair="EURUSD",
+                created_at="2025-01-10T00:00:00Z",
+                actionable_rule="Jan 10 rule",
+            )
+        )
+        # Lesson 3: Created Jan 25, 2025 (future relative to Jan 15 cutoff)
+        store.save_lesson(
+            ForexLesson(
+                lesson_id="lsn_jan_25",
+                pair="EURUSD",
+                created_at="2025-01-25T00:00:00Z",
+                actionable_rule="Jan 25 future rule",
+            )
+        )
+
+        retriever = LessonRetriever(store=store)
+
+        # Query as of Jan 15, 2025
+        cutoff = datetime(2025, 1, 15, 0, 0, tzinfo=timezone.utc)
+        results = retriever.retrieve_lessons(pair="EURUSD", as_of=cutoff)
+
+        retrieved_ids = [r.lesson.lesson_id for r in results]
+        assert "lsn_jan_25" not in retrieved_ids, "Future lesson must be excluded by as_of cutoff"
+        assert "lsn_jan_10" in retrieved_ids
+        assert "lsn_jan_01" in retrieved_ids
+
+        # Verify age decay was computed relative to Jan 15 cutoff:
+        # lsn_jan_10 is exactly 5 days old as of Jan 15
+        top = next(r for r in results if r.lesson.lesson_id == "lsn_jan_10")
+        assert any("5.0d ago" in reason for reason in top.match_reasons)
+
+    def test_learning_advisory_boundary_prompt_framing(self, tmp_path: Path):
+        """Verify prompt formatting explicitly states lessons are advisory evidence."""
+        store = ForexLessonStore(db_path=tmp_path / "test_advisory.db")
+        store.save_lesson(
+            ForexLesson(
+                lesson_id="lsn_adv_1",
+                pair="EURUSD",
+                setup_type="TREND_CONTINUATION",
+                actionable_rule="Advisory observation only",
+            )
+        )
+        retriever = LessonRetriever(store=store)
+        results = retriever.retrieve_lessons(pair="EURUSD")
+        prompt = retriever.format_lessons_for_prompt(results)
+
+        assert "ADVISORY EVIDENCE ONLY" in prompt
+        assert "do not override deterministic risk rules" in prompt
+
+    def test_analytics_stop_target_calibration_advisory_separation(self):
+        """Verify AN-007 calibration is strictly marked as advisory empirical research."""
+        from tradingagents.analytics.calibration import RiskStopCalibrator
+
+        calibrator = RiskStopCalibrator(default_atr_pips=20.0)
+
+        # Synthetic trade excursions
+        synthetic_trades = [
+            {"mae_pips": 8.0, "mfe_pips": 45.0, "mfe_r": 2.2, "mae_r": 0.4, "pips_gained": 40.0, "net_profit": 400.0},
+            {"mae_pips": 12.0, "mfe_pips": 35.0, "mfe_r": 1.7, "mae_r": 0.6, "pips_gained": 30.0, "net_profit": 300.0},
+            {"mae_pips": 25.0, "mfe_pips": 10.0, "mfe_r": 0.5, "mae_r": 1.25, "pips_gained": -25.0, "net_profit": -250.0},
+        ]
+
+        calibration = calibrator.calibrate(synthetic_trades, pair="EURUSD")
+
+        # Verify strict advisory separation
+        assert calibration.is_advisory_only is True
+        assert calibration.applied_automatically is False
+        assert "Descriptive empirical research" in calibration.evidence_note
+        assert any("ADVISORY NOTICE" in r for r in calibration.recommendations)
+
+        # Verify empty calibration fallback also preserves advisory boundary
+        empty_calib = calibrator.calibrate([], pair="GBPUSD")
+        assert empty_calib.is_advisory_only is True
+        assert empty_calib.applied_automatically is False
+        assert any("ADVISORY NOTICE" in r for r in empty_calib.recommendations)
+
+    def test_learning_retrieval_route_with_support_and_decay(self, tmp_path: Path):
+        """Verify web API /learning/retrieve accepts min_support, half_life_days, and as_of."""
+        journal = ForexTradeJournal(db_path=tmp_path / "route_learning.db")
+        manager = ForexLearningManager(journal=journal)
+
+        manager.store.save_lesson(
+            ForexLesson(
+                lesson_id="lsn_api_1",
+                pair="EURUSD",
+                setup_type="TREND_CONTINUATION",
+                evidence_count=1,
+                created_at="2025-01-01T00:00:00Z",
+                actionable_rule="Single evidence rule",
+            )
+        )
+        manager.store.save_lesson(
+            ForexLesson(
+                lesson_id="lsn_api_3",
+                pair="EURUSD",
+                setup_type="TREND_CONTINUATION",
+                evidence_count=3,
+                created_at="2025-01-10T00:00:00Z",
+                actionable_rule="Triple evidence rule",
+            )
+        )
+
+        set_forex_dependencies(journal=journal, learning_manager=manager)
+        app = FastAPI()
+        app.include_router(router)
+        from web.server import _SESSION_TOKEN, DASHBOARD_API_KEY
+
+        client = TestClient(app, headers={"X-API-Key": DASHBOARD_API_KEY or _SESSION_TOKEN})
+
+        # Query with min_support=2 -> should return only lsn_api_3
+        res = client.get("/api/forex/learning/retrieve?pair=EURUSD&min_support=2")
+        assert res.status_code == 200
+        data = res.json()
+        assert data["count"] == 1
+        assert data["applied_lesson_ids"] == ["lsn_api_3"]
+        assert "ADVISORY EVIDENCE ONLY" in data["markdown_prompt"]
+
+        # Query with as_of cutoff before Jan 10 -> should return lsn_api_1 (if min_support=1)
+        res_cutoff = client.get(
+            "/api/forex/learning/retrieve?pair=EURUSD&min_support=1&as_of=2025-01-05T00:00:00Z"
+        )
+        assert res_cutoff.status_code == 200
+        data_cutoff = res_cutoff.json()
+        assert data_cutoff["applied_lesson_ids"] == ["lsn_api_1"]
+
+

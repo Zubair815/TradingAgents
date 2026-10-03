@@ -218,6 +218,14 @@ MIGRATIONS: list[dict[str, Any]] = [
             ON llm_usage_records(run_id, observed_at_utc);
         """,
     },
+    {
+        "version": 5,
+        "description": "Add schema_version to trades table (DOM-010)",
+        "sql": """
+        -- Idempotently handled by migration engine helper
+        SELECT 1;
+        """,
+    },
 ]
 
 
@@ -316,10 +324,22 @@ def run_migrations(conn_or_path: sqlite3.Connection | str | Path) -> int:
 
         _upgrade_trade_events_if_needed(conn)
         _ensure_confidence_columns(conn)
+        _ensure_trades_schema_version(conn)
         return count
     finally:
         if should_close:
             conn.close()
+
+
+def _ensure_trades_schema_version(conn: sqlite3.Connection) -> None:
+    """Ensure trades table has the schema_version column (DOM-010)."""
+    try:
+        cursor = conn.execute("PRAGMA table_info(trades);")
+        cols = {row[1] for row in cursor.fetchall()}
+        if cols and "schema_version" not in cols:
+            conn.execute("ALTER TABLE trades ADD COLUMN schema_version INTEGER NOT NULL DEFAULT 1;")
+    except Exception as exc:
+        logger.debug("Failed checking/adding schema_version column to trades: %s", exc)
 
 
 def _ensure_confidence_columns(conn: sqlite3.Connection) -> None:

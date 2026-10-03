@@ -8,6 +8,16 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ## [Unreleased]
 
+### Master Forex Remediation Plan Completion (Phases 1–11)
+
+- **Domain Contracts, Provenance & PIT Integrity (Phases 1–5):** Enforced canonical `AnalysisRun`, `MarketSnapshot`, `AgentReport`, `BrokerEvent`, and `AnalysisRequest` contracts; added SQLite Migration 5 with `schema_version = 1` for `trades`; attached SHA-256 system prompt hashes to proposal evidence; applied strict point-in-time publication cutoffs (`published_at_utc <= cutoff`) and post-cache filtering (`DATA-008`, `TIME-006`, `DOM-009`, `DOM-010`, `DOM-011`, `AGENT-007`).
+- **Deterministic Sizing & Portfolio Risk Authority (Phase 4):** Derived price rounding precision dynamically from `BrokerExecutionConstraints.digits`; enforced fail-closed rejection for unbounded position risk and pending broker orders lacking objective stops; reserved pending order stop-risk against portfolio ceilings and net currency stop-risk exposure without duplicate-ticket double counting (`SIZE-008`, `PORT-005`, `PORT-006`, `PORT-010`, `PORT-011`, `PORT-012`).
+- **Proposal Lifecycle & Trigger-Protected Journal Immutability (Phase 6):** Wired automatic proposal expiry into MT5 observation polling loops and web proposal queries; enforced idempotent expiry transitions while forbidding expiry of executed/rejected proposals; added structured CSV/JSON journal export with schema versioning; protected immutable execution facts via SQLite database triggers (`PROP-006`, `JOURNAL-007`, `JOURNAL-008`).
+- **Continuous Age Decay & Advisory Analytics Boundary (Phase 7):** Added configurable empirical support threshold (`min_support`) and continuous exponential age decay ($2^{-\Delta t / T_{\text{half}}}$) with point-in-time reference cutoffs to `LessonRetriever`; strictly decoupled analytical MFE/MAE calibrations (`StopTargetCalibration`) as descriptive research rather than runtime parameter mutations (`LEARN-006`, `LEARN-010`, `AN-007`).
+- **Runtime Checkpoint/Resume Integrity & Truthful UI State (Phase 8):** Implemented checkpoint/resume input resolution in `ForexTradingAgentsGraph` resuming interrupted runs without duplicating initial state or re-executing completed analysts; emitted truthful MT5 service restart-required notifications on settings changes without false restart alerts for dynamic settings; ensured unavailable/error states render truthfully rather than fabricating zero balances or empty strings (`RUN-008`, `CFG-006`, `UI-005`).
+- **Normative Capability Review & Controlled Hygiene (Phases 9–10):** Classified `NEWS-006` and `WF-008` as `DEFERRED_OPTIONAL` (ADR-14); preserved debater backward-compatibility shims (`aggressive_debater.py`) and asset-class request model boundaries; retained `web/forex_routes.py` as a verified single-module router without fragmentation risk (ADR-15).
+- **Full Verification & Release Readiness (Phase 11):** Passed 2,301 automated tests (2,295 non-E2E unit/integration/regression + 6 Chromium E2E), zero broker-write capability verified via static search, and validated database schema migrations and restore integrity.
+
 ### Final Forex correctness remediation
 
 - Add shared CLI/browser Forex account-context construction, safe SQLite

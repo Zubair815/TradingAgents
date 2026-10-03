@@ -49,6 +49,7 @@ from tradingagents.risk.sizing import (
     BrokerExecutionConstraints,
     ForexAccountProfile,
     OpenPosition,
+    PendingExposure,
 )
 
 logger = logging.getLogger(__name__)
@@ -241,7 +242,8 @@ class MT5Observer:
         mt5 = self.api
         raw_symbols = mt5.symbols_get(group) if group else mt5.symbols_get()
         if raw_symbols is None:
-            return []
+            code, desc = self.connection._get_last_error()
+            raise MT5DataError(f"Failed to fetch MT5 symbol catalogue: {desc}", code=code)
         result = []
         for s in raw_symbols:
             try:
@@ -448,7 +450,8 @@ class MT5Observer:
 
         raw_positions = mt5.positions_get(**kwargs)
         if raw_positions is None:
-            return []
+            code, desc = self.connection._get_last_error()
+            raise MT5DataError(f"Failed to fetch MT5 open positions: {desc}", code=code)
 
         positions: list[MT5Position] = []
         for p in raw_positions:
@@ -521,7 +524,8 @@ class MT5Observer:
 
         raw_orders = mt5.orders_get(**kwargs)
         if raw_orders is None:
-            return []
+            code, desc = self.connection._get_last_error()
+            raise MT5DataError(f"Failed to fetch MT5 pending orders: {desc}", code=code)
 
         type_names = {
             2: "ORDER_TYPE_BUY_LIMIT",
@@ -556,6 +560,35 @@ class MT5Observer:
             )
 
         return orders
+
+    def to_pending_exposures(
+        self,
+        symbol: str | None = None,
+        *,
+        account_currency: str = "USD",
+        conversions: tuple[ForexConversionRate, ...] = (),
+        as_of_utc: datetime | None = None,
+        max_conversion_age: timedelta | None = None,
+    ) -> list[PendingExposure]:
+        """Convert MT5 pending orders to domain PendingExposure objects for portfolio risk controls."""
+        raw_orders = self.get_pending_orders(symbol=symbol)
+        observed = list(conversions)
+        seen = {(item.from_currency, item.to_currency) for item in observed}
+        for order in raw_orders:
+            for item in self.get_conversion_observations(order.symbol, account_currency):
+                key = (item.from_currency, item.to_currency)
+                if key not in seen:
+                    observed.append(item)
+                    seen.add(key)
+        return [
+            o.to_pending_exposure(
+                account_currency=account_currency,
+                conversions=tuple(observed),
+                as_of_utc=as_of_utc,
+                max_conversion_age=max_conversion_age,
+            )
+            for o in raw_orders
+        ]
 
     # -----------------------------------------------------------------------
     # 5. Historical Deals & Orders Inspection
@@ -677,7 +710,8 @@ class MT5Observer:
         else:
             raw_orders = mt5.history_orders_get(kwargs["date_from"], kwargs["date_to"])
         if raw_orders is None:
-            return []
+            code, desc = self.connection._get_last_error()
+            raise MT5DataError(f"Failed to fetch MT5 order history: {desc}", code=code)
 
         orders: list[MT5Order] = []
         for o in raw_orders:

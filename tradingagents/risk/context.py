@@ -14,6 +14,7 @@ from tradingagents.risk.sizing import (
     BrokerExecutionConstraints,
     ForexAccountProfile,
     OpenPosition,
+    PendingExposure,
 )
 
 
@@ -60,6 +61,9 @@ class ForexPortfolioContext(DeterministicContextRecord):
     """Point-in-time portfolio snapshot used by deterministic controls."""
 
     open_positions: tuple[OpenPosition, ...] = ()
+    pending_orders_status: AvailabilityStatus = AvailabilityStatus.NOT_APPLICABLE
+    pending_order_count: int | None = Field(default=None, ge=0)
+    pending_exposures: tuple[PendingExposure, ...] = ()
     daily_pnl_status: AvailabilityStatus = AvailabilityStatus.NOT_APPLICABLE
     realized_pnl_today: float | None = None
     day_start_balance: float | None = Field(default=None, gt=0.0)
@@ -73,6 +77,13 @@ class ForexPortfolioContext(DeterministicContextRecord):
 
     @model_validator(mode="after")
     def daily_pnl_is_consistent(self):
+        if self.pending_orders_status == AvailabilityStatus.AVAILABLE:
+            if self.pending_order_count is None:
+                object.__setattr__(self, "pending_order_count", len(self.pending_exposures))
+        elif self.pending_order_count is not None:
+            raise ValueError("unavailable or not-applicable pending orders cannot carry a count")
+        if self.pending_orders_status != AvailabilityStatus.AVAILABLE and self.pending_exposures:
+            raise ValueError("unavailable or not-applicable pending orders cannot carry pending exposures")
         values = (
             self.realized_pnl_today,
             self.day_start_balance,

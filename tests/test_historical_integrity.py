@@ -562,3 +562,146 @@ def test_historical_context_uses_shared_live_risk_sizing_math():
 
     assert results[0] == results[1]
     assert results[0].pip_value_per_lot == pytest.approx(6.67, abs=0.01)
+
+
+# ---------------------------------------------------------------------------
+# Point-in-Time Integrity & Provenance Tagging Tests (Phase 5: TIME-006, DATA-008, NEWS-004)
+# ---------------------------------------------------------------------------
+
+
+class TestPointInTimeIntegrityAndProvenance:
+    """Verifies that external objects carry immutable UTC provenance and never leak past cutoffs."""
+
+    def test_forex_bar_provenance_tagging(self):
+        opened = datetime(2026, 10, 2, 10, 0, tzinfo=timezone.utc)
+        closed = datetime(2026, 10, 2, 11, 0, tzinfo=timezone.utc)
+        retrieved = datetime(2026, 10, 2, 11, 0, 5, tzinfo=timezone.utc)
+        bar = ForexBar(
+            timestamp=opened,
+            open=1.0850,
+            high=1.0880,
+            low=1.0840,
+            close=1.0875,
+            volume=1250.0,
+            close_time=closed,
+            is_closed=True,
+            data_source="MT5",
+            broker="XM-Demo",
+            broker_symbol="EURUSD",
+            retrieved_at_utc=retrieved,
+        )
+        assert bar.timestamp.tzinfo is not None
+        assert bar.data_source == "MT5"
+        assert bar.broker == "XM-Demo"
+        assert bar.retrieved_at_utc == retrieved
+        assert bar.close_time == closed
+
+    def test_forex_news_article_provenance_and_pit(self):
+        from tradingagents.dataflows.forex_news import ForexNewsArticle
+
+        published = datetime(2026, 10, 2, 8, 30, tzinfo=timezone.utc)
+        retrieved = datetime(2026, 10, 2, 8, 35, tzinfo=timezone.utc)
+        article = ForexNewsArticle(
+            headline="Eurozone CPI in line with forecasts",
+            publisher="Reuters",
+            published_at_utc=published,
+            retrieved_at_utc=retrieved,
+            currencies=("EUR", "USD"),
+            relevance=1.0,
+            url="https://example.com/news/1",
+            source="Yahoo",
+        )
+        assert article.published_at_utc == published
+        assert article.retrieved_at_utc == retrieved
+        assert article.source == "Yahoo"
+        assert article.published_at_utc <= article.retrieved_at_utc
+
+    def test_broker_event_provenance_tagging(self):
+        from tradingagents.research.contracts import BrokerEvent, canonical_json
+
+        occurred = datetime(2026, 10, 2, 12, 0, 0, tzinfo=timezone.utc)
+        observed = datetime(2026, 10, 2, 12, 0, 1, tzinfo=timezone.utc)
+        event = BrokerEvent(
+            broker="XM",
+            account_ref="demo_12345",
+            external_id="deal_9999",
+            event_type="DEAL_ADD",
+            occurred_at_utc=occurred,
+            observed_at_utc=observed,
+            payload_json=canonical_json({"ticket": 9999, "action": "BUY", "volume": 0.5}),
+        )
+        assert event.broker == "XM"
+        assert event.occurred_at_utc == occurred
+        assert event.observed_at_utc == observed
+        assert event.occurred_at_utc <= event.observed_at_utc
+
+    def test_cache_point_in_time_safety_filter(self):
+        import pandas as pd
+
+        from tradingagents.dataflows.forex_data import filter_candles_by_cutoff
+
+        # 3 H1 candles: 10:00-11:00, 11:00-12:00, 12:00-13:00
+        dates = [
+            datetime(2026, 10, 2, 10, 0, tzinfo=timezone.utc),
+            datetime(2026, 10, 2, 11, 0, tzinfo=timezone.utc),
+            datetime(2026, 10, 2, 12, 0, tzinfo=timezone.utc),
+        ]
+        df = pd.DataFrame({
+            "Date": dates,
+            "Open": [1.080, 1.082, 1.084],
+            "High": [1.083, 1.085, 1.087],
+            "Low": [1.079, 1.081, 1.083],
+            "Close": [1.082, 1.084, 1.086],
+            "Volume": [100, 150, 200],
+        })
+
+        # Cutoff at 11:30: only the 10:00-11:00 candle completed by 11:30
+        cutoff_1130 = datetime(2026, 10, 2, 11, 30, tzinfo=timezone.utc)
+        filtered = filter_candles_by_cutoff(df, as_of=cutoff_1130, timeframe="H1")
+        assert len(filtered) == 1
+        assert filtered.iloc[0]["Date"] == dates[0]
+        assert bool(filtered.iloc[0]["is_closed"]) is True
+
+        # Cutoff at 12:00: both 10:00 and 11:00 completed
+        cutoff_1200 = datetime(2026, 10, 2, 12, 0, tzinfo=timezone.utc)
+        filtered_12 = filter_candles_by_cutoff(df, as_of=cutoff_1200, timeframe="H1")
+        assert len(filtered_12) == 2
+
+    def test_economic_event_publication_time_pit_safety(self):
+        from tradingagents.forex.calendar import EconomicEvent, EventImpact
+
+        # Event scheduled/known at 08:00 UTC, released at 14:00:05 UTC
+        event = EconomicEvent(
+            event_id="us_cpi_20261002",
+            currency="USD",
+            title="CPI m/m",
+            impact=EventImpact.HIGH,
+            date="2026-10-02",
+            time_utc="14:00",
+            actual=0.4,
+            forecast=0.3,
+            previous=0.2,
+            published_at_utc=datetime(2026, 10, 2, 14, 0, 5, tzinfo=timezone.utc),
+            known_at_utc=datetime(2026, 10, 2, 8, 0, 0, tzinfo=timezone.utc),
+            revision_at_utc=datetime(2026, 10, 2, 14, 30, 0, tzinfo=timezone.utc),
+            revised_previous=0.25,
+            previous_before_revision=0.2,
+        )
+
+        # Before publication (14:00:00): not released
+        assert not event.is_released_as_of("2026-10-02", "14:00:00")
+        clamped_before = event.clamp_to_as_of("2026-10-02", "14:00:00")
+        assert clamped_before.actual is None
+        assert clamped_before.previous == 0.2
+
+        # After publication (14:00:10): released, but revision hasn't occurred yet
+        assert event.is_released_as_of("2026-10-02", "14:00:10")
+        clamped_after = event.clamp_to_as_of("2026-10-02", "14:00:10")
+        assert clamped_after.actual == 0.4
+        assert clamped_after.revised_previous is None  # Revision at 14:30 masked
+        assert clamped_after.previous == 0.2
+
+        # After revision (14:35:00): revision is now visible
+        clamped_revised = event.clamp_to_as_of("2026-10-02", "14:35:00")
+        assert clamped_revised.actual == 0.4
+        assert clamped_revised.revised_previous == 0.25

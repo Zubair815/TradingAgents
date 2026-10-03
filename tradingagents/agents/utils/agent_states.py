@@ -83,3 +83,8 @@ class AgentState(MessagesState):
     forex_risk_decision: Annotated[dict | None, "Structured ForexRiskDecision data or serialized dict"]
     forex_as_of_utc: Annotated[str, "Immutable UTC observation cutoff for Forex data"]
     forex_proposal_id: Annotated[str | None, "Persisted identity returned by the proposal journal"]
+    forex_run_id: Annotated[str | None, "Analysis run identity (DOM-009)"]
+    forex_snapshot_id: Annotated[str | None, "Market snapshot identity (DOM-009)"]
+    forex_version_id: Annotated[str | None, "Strategy version identity (DOM-011)"]
+    forex_prompt_hash: Annotated[str | None, "Cryptographic hash of active strategy prompt (DOM-011)"]
+    forex_agent_reports: Annotated[dict[str, dict] | None, "Structured AgentReport metadata by agent role (AGENT-007)"]

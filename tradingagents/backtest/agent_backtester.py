@@ -28,6 +28,10 @@ from tradingagents.agents.schemas_forex import (
     ForexRiskDecisionAction,
     ForexTraderProposal,
 )
+from tradingagents.backtest.cost_estimator import (
+    AgentBacktestEstimate,
+    estimate_agent_analyses,
+)
 from tradingagents.backtest.forex_engine import (
     ForexBacktestConfig,
     ForexBacktestEngine,
@@ -79,63 +83,6 @@ class AgentBacktestConfig:
     backtest_config: ForexBacktestConfig = field(default_factory=ForexBacktestConfig)
     conversion_rates: tuple[ForexConversionRate, ...] = ()
     max_conversion_age: timedelta | None = None
-
-
-@dataclass
-class AgentBacktestEstimate:
-    """Pre-launch resource and financial estimation for historical AI runs."""
-
-    total_bars: int
-    sampling_interval: int
-    max_analysis_points: int | None
-    expected_analyses_count: int
-    estimated_llm_calls: int
-    estimated_tokens: int
-    estimated_cost_usd: float
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "total_bars": self.total_bars,
-            "sampling_interval": self.sampling_interval,
-            "max_analysis_points": self.max_analysis_points,
-            "expected_analyses_count": self.expected_analyses_count,
-            "estimated_llm_calls": self.estimated_llm_calls,
-            "estimated_tokens": self.estimated_tokens,
-            "estimated_cost_usd": self.estimated_cost_usd,
-        }
-
-
-def estimate_agent_analyses(
-    total_bars: int,
-    sampling_interval: int = 1,
-    max_analysis_points: int | None = None,
-    analyst_count: int = 3,
-    avg_tokens_per_analysis: int = 4000,
-    cost_per_1k_tokens: float = 0.003,
-) -> AgentBacktestEstimate:
-    """Compute deterministic pre-launch estimates of LLM invocations and costs."""
-    interval = max(1, sampling_interval)
-    raw_points = total_bars // interval
-    if max_analysis_points is not None and max_analysis_points > 0:
-        expected = min(raw_points, max_analysis_points)
-    else:
-        expected = raw_points
-
-    calls_per_run = analyst_count + 3  # Analysts + Bull/Bear + Manager + Trader + Risk
-    total_calls = expected * calls_per_run
-    est_tokens = expected * avg_tokens_per_analysis
-    est_cost = round((est_tokens / 1000.0) * cost_per_1k_tokens, 2)
-
-    return AgentBacktestEstimate(
-        total_bars=total_bars,
-        sampling_interval=interval,
-        max_analysis_points=max_analysis_points,
-        expected_analyses_count=expected,
-        estimated_llm_calls=total_calls,
-        estimated_tokens=est_tokens,
-        estimated_cost_usd=est_cost,
-    )
-
 
 # ---------------------------------------------------------------------------
 # Output Report Model
@@ -220,6 +167,11 @@ class HistoricalForexAgentBacktester:
             sampling_interval=self.config.sampling_interval,
             max_analysis_points=self.config.max_analysis_points,
             analyst_count=len(self.config.analyst_selection),
+            provider=self.config.provider,
+            quick_model=self.config.quick_model,
+            deep_model=self.config.deep_model,
+            debate_rounds=3 if self.config.research_depth == "deep" else 1,
+            workflow="BACKTEST",
         )
 
     def _require_historical_quote_conversion(self, pair: str, cutoff: datetime) -> None:

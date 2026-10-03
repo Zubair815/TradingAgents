@@ -17,6 +17,7 @@ from tradingagents.mt5.connection import MT5ConnectionManager
 from tradingagents.mt5.models import MT5ConnectionStatus
 from tradingagents.mt5.observer import MT5Observer
 from tradingagents.operations.logging import configure_bounded_logging
+from tradingagents.operations.soak import sample_process_resources
 
 
 def _remove_operational_handler() -> None:
@@ -151,3 +152,14 @@ def test_native_mt5_reads_are_serialized_across_observer_threads():
         assert deals.result() == []
 
     assert not api.overlapped
+
+
+def test_process_resource_sample_is_secret_free_and_well_formed():
+    sample = sample_process_resources()
+    assert sample.process_id > 0
+    assert sample.rss_bytes >= 0
+    assert sample.cpu_seconds >= 0
+    assert sample.thread_count >= 1
+    assert sample.log_file_count >= 0
+    assert sample.log_total_bytes >= 0
+    assert not hasattr(sample, "environment")

@@ -194,6 +194,13 @@ class MT5ObservationService:
                 deals = sorted(self.observer.get_deals(date_from=earliest, date_to=datetime.now(timezone.utc), count=None),
                                key=lambda d: (d.time, d.ticket))
                 events = []
+
+                # Automatic deterministic proposal expiry (PROP-006)
+                with contextlib.suppress(Exception):
+                    expired_prop_ids = self.journal_mgr.check_and_expire_proposals()
+                    for exp_id in expired_prop_ids:
+                        events.append({"type": "PROPOSAL_EXPIRED", "proposal_id": exp_id})
+
                 for ticket, order in current_orders.items():
                     if ticket not in self._known_orders:
                         self.journal_mgr.timeline.record_event(

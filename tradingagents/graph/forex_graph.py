@@ -23,7 +23,9 @@ Orchestrates the complete institutional Forex decision-support pipeline:
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import logging
+import uuid
 from collections.abc import Callable, Iterator, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
@@ -74,6 +76,14 @@ from tradingagents.graph.propagation import Propagator
 from tradingagents.graph.setup import DEBATE_PATH_MAP
 from tradingagents.llm_clients import create_llm_client
 from tradingagents.reporting import write_report_tree
+from tradingagents.research.contracts import (
+    AgentReport,
+    AnalysisRequest,
+    AnalysisRun,
+    MarketSnapshot,
+    RunStatus,
+    canonical_json,
+)
 from tradingagents.risk.context import ForexRiskContext
 from tradingagents.risk.engine import ForexRiskEngine, ForexRiskLimits
 from tradingagents.risk.sizing import (
@@ -158,6 +168,7 @@ def create_forex_risk_evaluator(
                 risk_context is not None
                 and risk_context.portfolio.daily_pnl_status.value == "AVAILABLE"
             ),
+            broker_digits=(constraints.digits if constraints else None),
         )
 
         # 3. Deterministic Position Sizing & Margin Validation
@@ -168,6 +179,7 @@ def create_forex_risk_evaluator(
             constraints=constraints,
             atr_pips=(risk_context.market.atr_pips if risk_context else None),
             open_positions=(risk_context.portfolio.open_positions if risk_context else None),
+            pending_exposures=(risk_context.portfolio.pending_exposures if risk_context else None),
             conversions=(risk_context.conversions if risk_context else ()),
             as_of_utc=(risk_context.as_of_utc if risk_context else None),
             daily_realized_pnl=(risk_context.portfolio.realized_pnl_today if risk_context else None),
@@ -298,7 +310,35 @@ def create_forex_portfolio_manager(
         proposal_id = None
         if cancellation_check is not None and cancellation_check():
             raise RuntimeError("analysis cancelled")
-        # SQLite Journal Auto-Logging
+
+        # SQLite Journal Auto-Logging and Run Envelopes (DOM-009, AGENT-007)
+        run_id = state.get("forex_run_id")
+        snapshot_id = state.get("forex_snapshot_id")
+        version_id = state.get("forex_version_id")
+        agent_reports_dict: dict[str, dict] = dict(state.get("forex_agent_reports") or {})
+
+        analyst_reports = {
+            "forex_technical": state.get("forex_technical_report"),
+            "forex_macro": state.get("forex_macro_report"),
+            "forex_news": state.get("forex_news_report"),
+        }
+        if journal is not None and hasattr(journal, "research") and run_id and snapshot_id and version_id:
+            for role, rep_text in analyst_reports.items():
+                if rep_text:
+                    try:
+                        rep = AgentReport(
+                            run_id=run_id,
+                            snapshot_id=snapshot_id,
+                            agent=role,
+                            content=str(rep_text),
+                            version_id=version_id,
+                            created_at_utc=datetime.now(timezone.utc),
+                        )
+                        journal.research.save_report(rep)
+                        agent_reports_dict[role] = rep.model_dump(mode="json")
+                    except Exception as rep_exc:
+                        logger.warning("Failed saving AgentReport for %s: %s", role, rep_exc)
+
         if journal is not None and proposal is not None:
             try:
                 status = ProposalStatus.PROPOSED
@@ -319,6 +359,9 @@ def create_forex_portfolio_manager(
                         risk_decision=decision,
                         status=status,
                         metadata={"trade_date": curr_date, "pair": pair},
+                        run_id=run_id,
+                        snapshot_id=snapshot_id,
+                        version_id=version_id,
                     )
 
                     # Newer analysis supersedes older unexecuted proposals for the same pair
@@ -328,12 +371,19 @@ def create_forex_portfolio_manager(
                     ):
                         journal.supersede_proposals(pair=pair, exclude_proposal_id=proposal_id)
 
+                    if run_id and hasattr(journal, "research"):
+                        try:
+                            journal.research.transition_run(run_id, RunStatus.COMPLETED)
+                        except Exception as tr_exc:
+                            logger.warning("Failed transitioning run %s to COMPLETED: %s", run_id, tr_exc)
+
             except Exception as exc:
                 logger.error("Failed auto-logging Forex proposal to journal: %s", exc, exc_info=True)
                 raise
 
         return {
             "forex_proposal_id": proposal_id,
+            "forex_agent_reports": agent_reports_dict,
             "messages": [AIMessage(content=final_summary)],
             "final_trade_decision": final_summary,
             "sender": name,
@@ -748,6 +798,7 @@ class ForexTradingAgentsGraph:
                     timeframe=exec_tf_str,
                     limit=5,
                     min_relevance=0.35,
+                    as_of=cutoff if historical_memory else None,
                 )
                 if historical_memory:
                     def known_by_cutoff(item):
@@ -781,6 +832,113 @@ class ForexTradingAgentsGraph:
         init_state["forex_proposal_id"] = None
         init_state["forex_proposal"] = None
         init_state["forex_risk_decision"] = None
+        # Canonical Run Identities & Research Contracts (DOM-009, DOM-011)
+        run_id = f"run_{uuid.uuid4().hex}"
+        snapshot_id = f"snap_{uuid.uuid4().hex[:12]}"
+        version_id = f"v_{uuid.uuid4().hex[:8]}"
+
+        default_prompt_hash = hashlib.sha256(
+            f"ForexInstitutionalStrategy:{canon_pair}:{exec_tf_str}".encode()
+        ).hexdigest()
+
+        if journal_obj is not None and hasattr(journal_obj, "research") and hasattr(journal_obj, "record_strategy_version"):
+            try:
+                model_name = (
+                    getattr(self.deep_thinking_llm, "model_name", None)
+                    or getattr(self.deep_thinking_llm, "model", None)
+                    or str(self.config.get("deep_think_llm") or "gpt-4.1")
+                )
+                journal_obj.record_strategy_version(
+                    strategy_name="ForexInstitutionalStrategy",
+                    prompt_hash=default_prompt_hash,
+                    model_name=str(model_name),
+                    parameters={"timeframe": exec_tf_str, "context_timeframes": list(ctx_tf_strs), "analysts": list(self.selected_analysts)},
+                    version_id=version_id,
+                )
+                valid_analysts = [a for a in self.selected_analysts if a in {"forex_technical", "forex_macro", "forex_news"}] or ["forex_technical"]
+                req_kwargs: dict[str, Any] = {
+                    "pair": canon_pair,
+                    "timeframe": exec_tf_str,
+                    "execution_timeframe": exec_tf_str,
+                    "context_timeframes": tuple(ctx_tf_strs),
+                    "higher_timeframes": tuple(ctx_tf_strs),
+                    "date": t_date,
+                    "analysts": valid_analysts,
+                    "account_source": "mt5",
+                }
+                if self.risk_context is not None:
+                    if self.risk_context.account.balance > 0:
+                        req_kwargs["account_balance"] = self.risk_context.account.balance
+                    if self.risk_context.account.equity > 0:
+                        req_kwargs["account_equity"] = self.risk_context.account.equity
+                    if self.risk_context.account.free_margin >= 0:
+                        req_kwargs["account_free_margin"] = self.risk_context.account.free_margin
+                    if self.risk_context.account.leverage >= 1:
+                        req_kwargs["account_leverage"] = self.risk_context.account.leverage
+                    if self.risk_context.account.currency:
+                        req_kwargs["account_currency"] = self.risk_context.account.currency
+                    if self.risk_context.source.value.lower() == "manual" and all(
+                        k in req_kwargs for k in ("account_balance", "account_equity", "account_free_margin", "account_leverage", "account_currency")
+                    ):
+                        req_kwargs["account_source"] = "manual"
+
+                analysis_req = AnalysisRequest(**req_kwargs)
+                utc_cutoff = cutoff if cutoff.tzinfo is not None else cutoff.replace(tzinfo=timezone.utc)
+                run = AnalysisRun(run_id=run_id, request=analysis_req, as_of_utc=utc_cutoff, status=RunStatus.QUEUED)
+                journal_obj.research.create_run(run)
+                journal_obj.research.transition_run(run_id, RunStatus.RUNNING)
+                journal_obj.research.link_version(run_id, "forex_trader", version_id)
+
+                snapshot_payload = canonical_json({
+                    "pair": canon_pair,
+                    "execution_timeframe": exec_tf_str,
+                    "context_timeframes": ctx_tf_strs,
+                    "as_of_utc": utc_cutoff.isoformat(),
+                    "instrument_context": f"Instrument: {canon_pair} ({exec_tf_str}) | Context: {', '.join(ctx_tf_strs)} | Date: {t_date}",
+                })
+                snapshot = MarketSnapshot(
+                    snapshot_id=snapshot_id,
+                    run_id=run_id,
+                    pair=canon_pair,
+                    as_of_utc=utc_cutoff,
+                    retrieved_at_utc=datetime.now(timezone.utc),
+                    source="forex_market_context",
+                    payload_json=snapshot_payload,
+                )
+                journal_obj.research.save_snapshot(snapshot)
+            except Exception as res_exc:
+                logger.warning("Failed creating research run/snapshot: %s", res_exc)
+
+        init_state["forex_run_id"] = run_id
+        init_state["forex_snapshot_id"] = snapshot_id
+        init_state["forex_version_id"] = version_id
+        init_state["forex_prompt_hash"] = default_prompt_hash
+        init_state["forex_agent_reports"] = {}
+        return init_state
+
+    def _resolve_graph_input(
+        self,
+        init_state: dict[str, Any],
+        thread_id: str | None,
+        args: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Resolve input for graph execution; returns None when resuming an existing checkpoint thread."""
+        if thread_id is None:
+            return init_state
+        args.setdefault("config", {}).setdefault("configurable", {})["thread_id"] = thread_id
+        if self.checkpointer is not None:
+            try:
+                cfg = {"configurable": {"thread_id": thread_id}}
+                state = self.graph.get_state(cfg)
+                if state and state.next:
+                    logger.info(
+                        "Resuming Forex graph from checkpoint for thread %s at node(s) %s",
+                        thread_id,
+                        state.next,
+                    )
+                    return None
+            except Exception as exc:
+                logger.debug("Failed checking checkpoint state for thread %s: %s", thread_id, exc)
         return init_state
 
     def run(
@@ -834,15 +992,18 @@ class ForexTradingAgentsGraph:
             timeframe=timeframe,
         )
         args = self.propagator.get_graph_args()
-
-        if thread_id is not None:
-            args.setdefault("config", {}).setdefault("configurable", {})["thread_id"] = thread_id
+        graph_input = self._resolve_graph_input(init_state, thread_id, args)
 
         try:
             with config_scope(self.config):
-                final_state = self.graph.invoke(init_state, **args)
+                final_state = self.graph.invoke(graph_input, **args)
         except Exception as exc:
             logger.error("Forex graph run failed for %s on %s: %s", canon_pair, resolved_date, exc, exc_info=True)
+            if self.journal and hasattr(self.journal, "research"):
+                r_id = init_state.get("forex_run_id")
+                if r_id:
+                    with contextlib.suppress(Exception):
+                        self.journal.research.transition_run(r_id, RunStatus.FAILED, error=str(exc))
             raise
 
         self.curr_state = final_state
@@ -874,18 +1035,24 @@ class ForexTradingAgentsGraph:
             timeframe=timeframe,
         )
         args = self.propagator.get_graph_args()
+        graph_input = self._resolve_graph_input(init_state, thread_id, args)
 
-        if thread_id is not None:
-            args.setdefault("config", {}).setdefault("configurable", {})["thread_id"] = thread_id
-
-        with config_scope(self.config):
-            for chunk in self.graph.stream(init_state, **args):
-                if isinstance(chunk, dict):
-                    if self.curr_state is None:
-                        self.curr_state = dict(chunk)
-                    else:
-                        self.curr_state.update(chunk)
-                yield chunk
+        try:
+            with config_scope(self.config):
+                for chunk in self.graph.stream(graph_input, **args):
+                    if isinstance(chunk, dict):
+                        if self.curr_state is None:
+                            self.curr_state = dict(chunk)
+                        else:
+                            self.curr_state.update(chunk)
+                    yield chunk
+        except Exception as exc:
+            if self.journal and hasattr(self.journal, "research"):
+                r_id = init_state.get("forex_run_id")
+                if r_id:
+                    with contextlib.suppress(Exception):
+                        self.journal.research.transition_run(r_id, RunStatus.FAILED, error=str(exc))
+            raise
 
     def process_signal(self, final_state_or_text: dict[str, Any] | str) -> str:
         """Extract directional trade action or risk verdict string."""
@@ -983,6 +1150,33 @@ class ForexTradingAgentsGraph:
                 / f"{safe_ticker_component(pair)}_{stamp}"
             )
         return write_report_tree(final_state, pair, save_path, trade_date=resolved_date)
+
+    def get_last_run(self) -> AnalysisRun | None:
+        """Return the canonical AnalysisRun record from the most recent run (DOM-009)."""
+        if not self.curr_state or not self.journal or not hasattr(self.journal, "research"):
+            return None
+        run_id = self.curr_state.get("forex_run_id")
+        return self.journal.research.get_run(run_id) if run_id else None
+
+    def get_last_snapshot(self) -> MarketSnapshot | None:
+        """Return the MarketSnapshot record from the most recent run (DOM-009)."""
+        if not self.curr_state or not self.journal or not hasattr(self.journal, "research"):
+            return None
+        snap_id = self.curr_state.get("forex_snapshot_id")
+        return self.journal.research.get_snapshot(snap_id) if snap_id else None
+
+    def get_last_agent_reports(self) -> list[AgentReport]:
+        """Return the list of AgentReport records from the most recent run (AGENT-007)."""
+        if not self.curr_state or not self.journal or not hasattr(self.journal, "research"):
+            return []
+        raw_reports = self.curr_state.get("forex_agent_reports") or {}
+        reports = []
+        for raw in raw_reports.values():
+            if isinstance(raw, dict) and "report_id" in raw:
+                rep = self.journal.research.get_report(raw["report_id"])
+                if rep:
+                    reports.append(rep)
+        return reports
 
     def checkpoint_input(self, initial_state: dict[str, Any]) -> dict[str, Any]:
         """Return input for graph execution matching TradingAgentsGraph interface."""

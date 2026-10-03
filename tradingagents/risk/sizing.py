@@ -195,6 +195,20 @@ class OpenPosition(BaseModel):
     risk_amount: float | None = Field(default=None, ge=0.0, description="Committed risk; absent when no objective bound exists")
 
 
+class PendingExposure(BaseModel):
+    """Pending broker order representing reserved future exposure (PORT-010, PORT-011)."""
+
+    order_id: str = Field(description="Unique broker order identifier / ticket")
+    pair: str = Field(description="Currency pair symbol, e.g. EURUSD")
+    action: ForexAction = Field(description="Order direction (LONG/SHORT)")
+    order_type: str = Field(default="LIMIT", description="Order type (LIMIT, STOP, etc.)")
+    lots: float = Field(ge=0.0, description="Order volume in standard lots")
+    trigger_price: float = Field(gt=0.0, description="Order trigger / entry price")
+    stop_loss: float | None = Field(default=None, gt=0.0, description="Planned stop-loss level; absent means uncomputable risk")
+    reserved_risk: float | None = Field(default=None, ge=0.0, description="Reserved stop-loss risk in account currency")
+    setup_time: datetime | None = Field(default=None, description="Order setup timestamp (UTC)")
+
+
 # ---------------------------------------------------------------------------
 # Position Sizing Result Model
 # ---------------------------------------------------------------------------
@@ -411,6 +425,7 @@ def calculate_portfolio_currency_exposure(
 def calculate_currency_risk_exposure(
     open_positions: Sequence[OpenPosition],
     *,
+    pending_exposures: Sequence[PendingExposure] | None = None,
     new_pair: str | None = None,
     new_action: ForexAction | None = None,
     new_risk_amount: float = 0.0,
@@ -420,6 +435,7 @@ def calculate_currency_risk_exposure(
     A long pair assigns ``+risk`` to its base currency and ``-risk`` to its quote;
     a short pair reverses those signs. Opposing positions therefore net naturally.
     This is risk attribution, not raw-lot or gross-notional exposure.
+    Pending orders are aggregated with open positions without double-counting (PORT-006, PORT-010, PORT-012).
     """
     exposures: dict[str, float] = {}
 
@@ -435,8 +451,18 @@ def calculate_currency_risk_exposure(
         exposures[base] = exposures.get(base, 0.0) + (sign * risk)
         exposures[quote] = exposures.get(quote, 0.0) - (sign * risk)
 
+    seen_ids: set[str] = set()
     for position in open_positions:
         add(position.pair, position.action, position.risk_amount)
+        seen_ids.add(position.position_id)
+
+    if pending_exposures:
+        for order in pending_exposures:
+            # PORT-012: Prevent double-counting if same broker ticket/id appears
+            if order.order_id in seen_ids:
+                continue
+            add(order.pair, order.action, order.reserved_risk)
+
     if new_pair and new_action:
         add(new_pair, new_action, new_risk_amount)
     return {currency: round(amount, 2) for currency, amount in exposures.items()}
@@ -519,6 +545,7 @@ class ForexPositionSizingEngine:
         win_loss_ratio: float | None = None,
         kelly_fraction: float = 0.25,
         open_positions: Sequence[OpenPosition] | None = None,
+        pending_exposures: Sequence[PendingExposure] | None = None,
         current_quote_price: float | None = None,
         conversions: Sequence[ForexConversionRate] = (),
         as_of_utc: datetime | None = None,
@@ -535,6 +562,7 @@ class ForexPositionSizingEngine:
         acc = account or self.default_account
         cons = constraints or self.default_constraints
         positions = open_positions or []
+        pending = pending_exposures or []
         pair_price = current_quote_price or entry_price
 
         adjustments: list[str] = []
@@ -573,13 +601,24 @@ class ForexPositionSizingEngine:
                 f"Maximum open positions reached ({len(positions)}/{acc.max_open_positions}); pending orders are excluded.",
             )
 
-        if any(position.risk_amount is None for position in positions):
+        # PORT-005: Existing position without a valid stop or uncomputable risk must fail closed
+        if any(position.stop_loss is None or position.risk_amount is None for position in positions):
             return self._build_unexecutable(
                 pair,
                 action,
                 sizing_method,
                 acc,
                 "Portfolio risk is unbounded because an open position has no objective stop-loss risk.",
+            )
+
+        # PORT-011: Pending broker order without a usable stop/risk estimate blocks additional exposure
+        if any(order.stop_loss is None or order.reserved_risk is None for order in pending):
+            return self._build_unexecutable(
+                pair,
+                action,
+                sizing_method,
+                acc,
+                "Portfolio risk is unbounded because a pending order has no objective stop-loss risk.",
             )
 
         # -------------------------------------------------------------------
@@ -748,8 +787,12 @@ class ForexPositionSizingEngine:
         units = round(clamped_lots * cons.contract_size, 1)
         total_pip_val = round(clamped_lots * pip_val_per_lot, 2)
 
+        seen_tickets = {position.position_id for position in positions}
+        deduped_pending = [order for order in pending if order.order_id not in seen_tickets]
+
         current_open_risk = sum(position.risk_amount or 0.0 for position in positions)
-        total_open_risk = current_open_risk + actual_risk_amount
+        pending_reserved_risk = sum(order.reserved_risk or 0.0 for order in deduped_pending)
+        total_open_risk = current_open_risk + pending_reserved_risk + actual_risk_amount
         total_open_risk_pct = (total_open_risk / acc.equity) * 100.0
         if total_open_risk_pct > acc.max_account_risk_percent:
             return self._build_unexecutable(
@@ -785,6 +828,7 @@ class ForexPositionSizingEngine:
 
         currency_risk = calculate_currency_risk_exposure(
             positions,
+            pending_exposures=deduped_pending,
             new_pair=pair,
             new_action=action,
             new_risk_amount=actual_risk_amount,
@@ -892,6 +936,7 @@ class ForexPositionSizingEngine:
         win_rate: float | None = None,
         win_loss_ratio: float | None = None,
         open_positions: Sequence[OpenPosition] | None = None,
+        pending_exposures: Sequence[PendingExposure] | None = None,
         current_quote_price: float | None = None,
         conversion_required: bool = False,
         conversions: Sequence[ForexConversionRate] = (),
@@ -912,6 +957,7 @@ class ForexPositionSizingEngine:
                 account=account,
                 constraints=constraints,
                 open_positions=open_positions,
+                pending_exposures=pending_exposures,
             )
 
         return self.compute_size(
@@ -927,6 +973,7 @@ class ForexPositionSizingEngine:
             win_rate=win_rate,
             win_loss_ratio=win_loss_ratio or proposal.risk_reward_ratio,
             open_positions=open_positions,
+            pending_exposures=pending_exposures,
             current_quote_price=current_quote_price,
             conversions=conversions,
             as_of_utc=as_of_utc,

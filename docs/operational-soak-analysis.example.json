@@ -1,0 +1,9 @@
+{
+  "pair": "EURUSD",
+  "execution_timeframe": "H1",
+  "context_timeframes": ["H4", "D1"],
+  "analysts": ["forex_technical", "forex_macro", "forex_news"],
+  "research_depth": "deep",
+  "account_source": "mt5",
+  "risk_percent": 1.0
+}

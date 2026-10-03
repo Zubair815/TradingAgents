@@ -18,6 +18,8 @@ Tests:
 
 from __future__ import annotations
 
+import pytest
+
 from tradingagents.agents.schemas_forex import (
     ForexAction,
     ForexTraderProposal,
@@ -29,9 +31,11 @@ from tradingagents.forex import (
     ForexAccountProfile,
     ForexPositionSizingEngine,
     OpenPosition,
+    PendingExposure,
     PositionSizingMethod,
     PositionSizingResult,
     calculate_correlation_exposure_factor,
+    calculate_currency_risk_exposure,
     calculate_forex_position_size,
     calculate_kelly_risk_percent,
     calculate_portfolio_currency_exposure,
@@ -566,3 +570,374 @@ class TestProposalSizingAndConvenience:
         assert get_pair_correlation("EURUSD", "USDCHF") == -0.88
         assert get_pair_correlation("EURUSD", "EURUSD") == 1.0
         assert get_pair_correlation("EURUSD", "UNKNOWN") == 0.0
+
+
+# ---------------------------------------------------------------------------
+# 10. Portfolio Risk Boundary & Fail-Closed Tests (Phase 4 / PORT-005, PORT-006, PORT-010, PORT-011, PORT-012)
+# ---------------------------------------------------------------------------
+
+
+class TestPortfolioFailClosedAndBoundaryRisks:
+    def test_open_position_without_stop_loss_fails_closed(self):
+        engine = ForexPositionSizingEngine()
+        account = ForexAccountProfile(equity=10000.0, balance=10000.0)
+        positions = [
+            OpenPosition(
+                position_id="unhedged-pos-1",
+                pair="EURUSD",
+                action=ForexAction.LONG,
+                lots=1.0,
+                entry_price=1.08500,
+                stop_loss=None,  # Unbounded risk
+                risk_amount=None,
+            )
+        ]
+
+        result = engine.compute_size(
+            pair="GBPUSD",
+            action=ForexAction.LONG,
+            entry_price=1.27000,
+            stop_loss=1.26700,
+            account=account,
+            open_positions=positions,
+        )
+
+        assert result.is_executable is False
+        assert "unbounded because an open position has no objective stop-loss risk" in (result.rejection_reason or "")
+
+    def test_open_position_without_risk_amount_fails_closed(self):
+        engine = ForexPositionSizingEngine()
+        account = ForexAccountProfile(equity=10000.0, balance=10000.0)
+        positions = [
+            OpenPosition(
+                position_id="unhedged-pos-2",
+                pair="EURUSD",
+                action=ForexAction.LONG,
+                lots=1.0,
+                entry_price=1.08500,
+                stop_loss=1.08000,
+                risk_amount=None,  # Uncomputed/unknown risk amount
+            )
+        ]
+
+        result = engine.compute_size(
+            pair="GBPUSD",
+            action=ForexAction.LONG,
+            entry_price=1.27000,
+            stop_loss=1.26700,
+            account=account,
+            open_positions=positions,
+        )
+
+        assert result.is_executable is False
+        assert "unbounded because an open position has no objective stop-loss risk" in (result.rejection_reason or "")
+
+    def test_calculate_currency_risk_exposure_raises_on_unbounded_risk(self):
+        positions = [
+            OpenPosition(
+                position_id="p1",
+                pair="EURUSD",
+                action=ForexAction.LONG,
+                lots=1.0,
+                entry_price=1.0850,
+                stop_loss=None,
+                risk_amount=None,
+            )
+        ]
+        with pytest.raises(ValueError, match="currency risk exposure is unknown for an unbounded position"):
+            calculate_currency_risk_exposure(positions)
+
+    def test_pending_order_without_stop_loss_fails_closed(self):
+        engine = ForexPositionSizingEngine()
+        account = ForexAccountProfile(equity=10000.0, balance=10000.0)
+        pending = [
+            PendingExposure(
+                order_id="pending-no-sl",
+                pair="EURUSD",
+                action=ForexAction.LONG,
+                lots=0.5,
+                trigger_price=1.08500,
+                stop_loss=None,
+                reserved_risk=None,
+            )
+        ]
+
+        result = engine.compute_size(
+            pair="GBPUSD",
+            action=ForexAction.LONG,
+            entry_price=1.27000,
+            stop_loss=1.26700,
+            account=account,
+            pending_exposures=pending,
+        )
+
+        assert result.is_executable is False
+        assert "unbounded because a pending order has no objective stop-loss risk" in (result.rejection_reason or "")
+
+
+class TestCurrencyRiskConcentration:
+    def test_net_stop_risk_exposure_multi_positions_and_pending(self):
+        # Open positions:
+        # Long EURUSD, risk $200 -> +EUR 200, -USD 200
+        # Long GBPUSD, risk $150 -> +GBP 150, -USD 150
+        positions = [
+            OpenPosition(
+                position_id="p1",
+                pair="EURUSD",
+                action=ForexAction.LONG,
+                lots=1.0,
+                entry_price=1.0850,
+                stop_loss=1.0830,
+                risk_amount=200.0,
+            ),
+            OpenPosition(
+                position_id="p2",
+                pair="GBPUSD",
+                action=ForexAction.LONG,
+                lots=0.8,
+                entry_price=1.2700,
+                stop_loss=1.2670,
+                risk_amount=150.0,
+            ),
+        ]
+        # Pending exposure: Short EURGBP, risk $100 -> -EUR 100, +GBP 100
+        pending = [
+            PendingExposure(
+                order_id="ord-1",
+                pair="EURGBP",
+                action=ForexAction.SHORT,
+                lots=0.5,
+                trigger_price=0.8550,
+                stop_loss=0.8600,
+                reserved_risk=100.0,
+            )
+        ]
+
+        # Calculate exposure before new trade:
+        # EUR: +200 - 100 = +100
+        # GBP: +150 + 100 = +250
+        # USD: -200 - 150 = -350
+        exposure = calculate_currency_risk_exposure(positions, pending_exposures=pending)
+        assert exposure["EUR"] == 100.0
+        assert exposure["GBP"] == 250.0
+        assert exposure["USD"] == -350.0
+
+        # Now include new proposed trade: Long USDJPY, risk $100 -> +USD 100, -JPY 100
+        # USD: -350 + 100 = -250
+        # JPY: -100
+        exposure_with_new = calculate_currency_risk_exposure(
+            positions,
+            pending_exposures=pending,
+            new_pair="USDJPY",
+            new_action=ForexAction.LONG,
+            new_risk_amount=100.0,
+        )
+        assert exposure_with_new["USD"] == -250.0
+        assert exposure_with_new["JPY"] == -100.0
+        assert exposure_with_new["EUR"] == 100.0
+        assert exposure_with_new["GBP"] == 250.0
+
+    def test_currency_concentration_limit_strictly_enforced(self):
+        engine = ForexPositionSizingEngine()
+        account = ForexAccountProfile(
+            equity=10000.0,
+            balance=10000.0,
+            max_currency_exposure_percent=5.0,
+            max_account_risk_percent=10.0,
+        )
+        # Open position risking $450 on EURUSD (USD exposure -450).
+        positions = [
+            OpenPosition(
+                position_id="p1",
+                pair="EURUSD",
+                action=ForexAction.LONG,
+                lots=1.5,
+                entry_price=1.08500,
+                stop_loss=1.08200,
+                risk_amount=450.0,
+            )
+        ]
+
+        # New trade risking $100 on GBPUSD (USD exposure -100).
+        # Cumulative USD exposure becomes -$550 = 5.5% > 5.0% -> REJECT
+        result = engine.compute_size(
+            pair="GBPUSD",
+            action=ForexAction.LONG,
+            entry_price=1.27000,
+            stop_loss=1.26700,
+            account=account,
+            risk_percent=1.0,
+            open_positions=positions,
+        )
+
+        assert result.is_executable is False
+        assert "Net currency stop-risk concentration exceeds 5.00% of equity: USD" in (result.rejection_reason or "")
+
+    def test_opposing_positions_net_currency_stop_risk_allowing_execution(self):
+        engine = ForexPositionSizingEngine()
+        account = ForexAccountProfile(
+            equity=10000.0,
+            balance=10000.0,
+            max_currency_exposure_percent=5.0,
+            max_account_risk_percent=10.0,
+        )
+        # Open position: Long EURUSD risking $450 (-USD 450)
+        positions = [
+            OpenPosition(
+                position_id="p1",
+                pair="EURUSD",
+                action=ForexAction.LONG,
+                lots=1.5,
+                entry_price=1.08500,
+                stop_loss=1.08200,
+                risk_amount=450.0,
+            )
+        ]
+
+        # New trade: Short EURUSD risking $100 (+USD 100)
+        # Net USD risk reduces from -$450 to -$350 = 3.5% <= 5.0% -> ALLOWED
+        result = engine.compute_size(
+            pair="EURUSD",
+            action=ForexAction.SHORT,
+            entry_price=1.08500,
+            stop_loss=1.08800,
+            account=account,
+            risk_percent=1.0,
+            open_positions=positions,
+        )
+
+        assert result.is_executable is True
+        assert result.recommended_lot_size > 0.0
+
+
+class TestPendingExposureReservationAndDeduplication:
+    def test_pending_order_reserves_cumulative_risk(self):
+        engine = ForexPositionSizingEngine()
+        account = ForexAccountProfile(
+            equity=10000.0,
+            balance=10000.0,
+            max_account_risk_percent=6.0,
+        )
+        positions = [
+            OpenPosition(
+                position_id="open-1",
+                pair="USDCHF",
+                action=ForexAction.LONG,
+                lots=0.5,
+                entry_price=0.9000,
+                stop_loss=0.8950,
+                risk_amount=300.0,
+            )
+        ]
+        pending = [
+            PendingExposure(
+                order_id="pending-1",
+                pair="EURUSD",
+                action=ForexAction.LONG,
+                lots=0.5,
+                trigger_price=1.08500,
+                stop_loss=1.0800,
+                reserved_risk=250.0,
+            )
+        ]
+
+        result = engine.compute_size(
+            pair="GBPUSD",
+            action=ForexAction.LONG,
+            entry_price=1.27000,
+            stop_loss=1.26700,
+            account=account,
+            risk_percent=1.0,
+            open_positions=positions,
+            pending_exposures=pending,
+        )
+
+        assert result.is_executable is False
+        assert "Cumulative portfolio risk (6.5%) would exceed account maximum risk ceiling" in (result.rejection_reason or "")
+
+    def test_pending_order_deduplicated_by_ticket_id(self):
+        engine = ForexPositionSizingEngine()
+        account = ForexAccountProfile(
+            equity=10000.0,
+            balance=10000.0,
+            max_account_risk_percent=6.0,
+        )
+        positions = [
+            OpenPosition(
+                position_id="ticket-100",
+                pair="USDCHF",
+                action=ForexAction.LONG,
+                lots=0.5,
+                entry_price=0.9000,
+                stop_loss=0.8950,
+                risk_amount=300.0,
+            )
+        ]
+        pending = [
+            PendingExposure(
+                order_id="ticket-100",
+                pair="USDCHF",
+                action=ForexAction.LONG,
+                lots=0.5,
+                trigger_price=0.9000,
+                stop_loss=0.8950,
+                reserved_risk=300.0,
+            )
+        ]
+
+        result = engine.compute_size(
+            pair="EURUSD",
+            action=ForexAction.LONG,
+            entry_price=1.08500,
+            stop_loss=1.08200,
+            account=account,
+            risk_percent=1.0,
+            open_positions=positions,
+            pending_exposures=pending,
+        )
+
+        assert result.is_executable is True
+        assert result.recommended_lot_size > 0.0
+
+
+class TestBrokerConstraintsAndVolumeStepping:
+    def test_volume_step_flooring_avoids_risk_overrun(self):
+        engine = ForexPositionSizingEngine()
+        account = ForexAccountProfile(equity=10000.0, balance=10000.0)
+        constraints = BrokerExecutionConstraints(
+            volume_step=0.05,
+            min_volume=0.05,
+            max_volume=100.0,
+        )
+
+        result = engine.compute_size(
+            pair="EURUSD",
+            action=ForexAction.LONG,
+            entry_price=1.08500,
+            stop_loss=1.08250,
+            account=account,
+            risk_percent=0.35,
+            constraints=constraints,
+        )
+
+        assert result.is_executable is True
+        assert result.recommended_lot_size == 0.10
+        assert result.risk_amount <= 35.0
+
+    def test_lot_size_below_broker_min_volume_rejected(self):
+        engine = ForexPositionSizingEngine()
+        account = ForexAccountProfile(equity=500.0, balance=500.0)
+        constraints = BrokerExecutionConstraints(min_volume=0.01)
+
+        result = engine.compute_size(
+            pair="EURUSD",
+            action=ForexAction.LONG,
+            entry_price=1.08500,
+            stop_loss=1.07500,
+            account=account,
+            risk_percent=0.5,
+            constraints=constraints,
+        )
+
+        assert result.is_executable is False
+        assert "is below broker minimum volume (0.01 lots)" in (result.rejection_reason or "")

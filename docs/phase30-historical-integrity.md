@@ -115,4 +115,24 @@ replaced with assertions of the corrected contract.
   graph tests use controlled pipeline doubles; no paid live LLM performance
   validation was performed. Five baseline environment-dependent skips remain.
 
+## Target-state completion classification
+
+Historical backtesting, walk-forward evaluation, and ablation are engineering
+complete against the target-state SRS. Their non-validated performance labels are
+mandatory safety behavior, not missing implementation.
+
+| Requirement group | Engineering status | Evidence boundary |
+| --- | --- | --- |
+| BT-001–005 | COMPLETE | Chronological cutoff-safe replay, post-decision eligibility, unfilled terminal proposals, and fail-closed sizing are enforced. |
+| BT-006–012 | COMPLETE | Explicit friction, evolving account/margin, shared risk rules, historical conversion/ATR, labelled broker assumptions, and conservative or lower-timeframe ambiguity handling are enforced. |
+| BT-013–014 | COMPLETE | Results retain `validated_strategy_performance=false` and report provenance, assumptions, ambiguity, and unavailable evidence. |
+| WF-001–006 | COMPLETE | Chronological development/OOS isolation, expanding windows, warmup exclusion, complete-tail accounting, unavailable nonpositive-return WFE, and heuristic-only labels are enforced. |
+| WF-007 | COMPLETE | Every ablation variant receives identical input candles and period boundaries. |
+| WF-008 | COMPLETE | OOS optimization is rejected or explicitly tainted; parameters cannot be presented as untouched OOS after fitting. |
+| AN-008 | COMPLETE | Ablation comparisons are descriptive and cannot become a validated strategy claim from trade count alone. |
+
+`STRATEGY_RESEARCH_VALIDATED` remains a separate release state requiring an
+explicit statistical research protocol and evidence. It is not required for
+engineering completeness and must not be inferred from these tools.
+
 Suggested commit: `Phase 30: Harden historical backtest integrity`

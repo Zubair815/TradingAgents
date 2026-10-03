@@ -577,11 +577,24 @@ DEFAULT_CORS_ORIGINS = [
     "http://localhost:8050",
     "http://127.0.0.1:8050",
 ]
-raw_origins = os.environ.get("TRADINGAGENTS_CORS_ORIGINS", "")
-if raw_origins.strip():
-    cors_origins = [orig.strip() for orig in raw_origins.split(",") if orig.strip()]
-else:
-    cors_origins = DEFAULT_CORS_ORIGINS
+
+
+def get_cors_origins() -> list[str]:
+    """Return the configured CORS origins, defaulting strictly to localhost."""
+    raw_origins = os.environ.get("TRADINGAGENTS_CORS_ORIGINS", "")
+    if raw_origins.strip():
+        return [orig.strip() for orig in raw_origins.split(",") if orig.strip()]
+    return list(DEFAULT_CORS_ORIGINS)
+
+
+def get_dashboard_bind_address() -> tuple[str, int]:
+    """Return the configured host and port for the dashboard, defaulting to local-only."""
+    host = os.environ.get("TRADINGAGENTS_DASHBOARD_HOST", "127.0.0.1")
+    port = int(os.environ.get("TRADINGAGENTS_DASHBOARD_PORT", "8050"))
+    return host, port
+
+
+cors_origins = get_cors_origins()
 
 app.add_middleware(
     CORSMiddleware,
@@ -723,6 +736,17 @@ async def health_ready(request: Request):
         "components": components,
         "checked_at": datetime.now().astimezone().isoformat(),
     }
+
+
+@app.get("/api/health/resources")
+async def health_resources(request: Request):
+    """Authenticated, secret-free resource sample for operational acceptance."""
+    verify_auth(request)
+    from dataclasses import asdict
+
+    from tradingagents.operations import sample_process_resources
+
+    return asdict(sample_process_resources())
 
 
 @app.post("/api/analyze")
@@ -1015,6 +1039,5 @@ async def get_history():
 
 if __name__ == "__main__":
     import uvicorn
-    host = os.environ.get("TRADINGAGENTS_DASHBOARD_HOST", "127.0.0.1")
-    port = int(os.environ.get("TRADINGAGENTS_DASHBOARD_PORT", "8050"))
+    host, port = get_dashboard_bind_address()
     uvicorn.run(app, host=host, port=port, log_level="info")

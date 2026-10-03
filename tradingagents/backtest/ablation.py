@@ -99,9 +99,7 @@ class AblationConfigVariant:
         count = len(self.analyst_selection)
         if self.enable_debate:
             count += 2  # Bull and Bear
-        if self.enable_memory:
-            count += 1  # Memory lookup/synthesis
-        count += 2  # Manager + Trader
+        count += 3  # Research manager + trader + portfolio manager
         return max(1, count)
 
 

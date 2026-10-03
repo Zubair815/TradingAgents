@@ -187,6 +187,10 @@ class RiskStopCalibrator:
                 f"Target crest falls off sharply above {best_tp_r:.1f}R: adopt trailing stops or scale out 70% at {best_tp_r:.1f}R rather than holding runners to 3.0R+."
             )
 
+        recs.append(
+            "ADVISORY NOTICE: Stop/target calibration is descriptive empirical research and is not applied automatically to live trading configuration."
+        )
+
         return StopTargetCalibration(
             pair=pair,
             optimal_sl_pips=best_sl_pips,
@@ -200,6 +204,12 @@ class RiskStopCalibrator:
             recommended_atr_tp_multiple=recommended_tp_atr,
             expected_gain_improvement_pct=lift_pct,
             recommendations=recs,
+            is_advisory_only=True,
+            applied_automatically=False,
+            evidence_note=(
+                "Descriptive empirical research based on historical trade excursions. "
+                "Does not automatically mutate runtime risk parameters or override deterministic risk limits."
+            ),
         )
 
     def _build_empty_calibration(self, pair: str) -> StopTargetCalibration:
@@ -215,5 +225,14 @@ class RiskStopCalibrator:
             recommended_atr_sl_multiple=1.5,
             recommended_atr_tp_multiple=2.5,
             expected_gain_improvement_pct=0.0,
-            recommendations=["Insufficient trade history for empirical calibration. Using baseline 1:2 R:R guidelines."],
+            recommendations=[
+                "Insufficient trade history for empirical calibration. Using baseline 1:2 R:R guidelines.",
+                "ADVISORY NOTICE: Stop/target calibration is descriptive empirical research and is not applied automatically to live trading configuration.",
+            ],
+            is_advisory_only=True,
+            applied_automatically=False,
+            evidence_note=(
+                "Descriptive empirical research based on historical trade excursions. "
+                "Does not automatically mutate runtime risk parameters or override deterministic risk limits."
+            ),
         )

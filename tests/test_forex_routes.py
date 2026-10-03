@@ -29,6 +29,7 @@ from tradingagents.agents.schemas_forex import (
 )
 from tradingagents.database.journal import ForexTradeJournal
 from tradingagents.dataflows import config as config_module
+from tradingagents.dataflows.forex_quality import DataInsufficientError
 from tradingagents.forex.conversion import AvailabilityStatus, ForexConversionRate
 from tradingagents.graph.forex_graph import create_forex_risk_evaluator
 from tradingagents.journal.manager import ForexJournalManager
@@ -756,6 +757,35 @@ class TestMT5Routes:
 
         res = client.get("/api/forex/mt5/account")
         assert res.status_code == 503
+        assert res.json()["error"]["code"] == "MT5_DATA_UNAVAILABLE"
+        assert "IPC" not in res.text
+
+    @pytest.mark.parametrize(
+        ("observer_method", "path"),
+        [
+            ("get_symbols", "/api/forex/mt5/symbols"),
+            ("get_open_positions", "/api/forex/mt5/positions"),
+            ("get_pending_orders", "/api/forex/mt5/orders"),
+            ("get_deals", "/api/forex/mt5/deals"),
+        ],
+    )
+    def test_mt5_collection_failure_is_structured_unavailable(
+        self, client, isolated_forex_env, observer_method, path
+    ):
+        _, _, mock_observer = isolated_forex_env
+        getattr(mock_observer, observer_method).side_effect = MT5DataError(
+            "IPC timeout with internal vendor detail", code=-10005
+        )
+
+        response = client.get(path)
+
+        assert response.status_code == 503
+        assert response.json()["error"] == {
+            "code": "MT5_DATA_UNAVAILABLE",
+            "message": "MetaTrader 5 data is temporarily unavailable.",
+            "details": {},
+        }
+        assert "internal vendor detail" not in response.text
 
     def test_mt5_symbol_info_and_tick(self, client, isolated_forex_env):
         _, _, mock_observer = isolated_forex_env
@@ -826,6 +856,24 @@ class TestMT5Routes:
         deal_filtered = client.get("/api/forex/mt5/deals?position=10101&count=5")
         assert deal_filtered.status_code == 200
         mock_observer.get_deals.assert_called_with(date_from=None, date_to=None, position=10101, count=5)
+
+    def test_reconciliation_fails_closed_when_positions_are_unavailable(
+        self, client, isolated_forex_env
+    ):
+        _, journal_mgr, mock_observer = isolated_forex_env
+        mock_observer.get_open_positions.side_effect = MT5DataError(
+            "Failed to fetch MT5 open positions: IPC timeout", code=-10005
+        )
+        journal_mgr.reconcile_broker_positions = MagicMock()
+
+        response = client.post(
+            "/api/forex/proposals/reconcile", json={"auto_reconcile": True}
+        )
+
+        assert response.status_code == 503
+        assert response.json()["error"]["code"] == "MT5_DATA_UNAVAILABLE"
+        assert "IPC timeout" not in response.text
+        journal_mgr.reconcile_broker_positions.assert_not_called()
 
     def test_mt5_status_contract_canonical_and_dual_keys(self, client, isolated_forex_env):
         """Verify canonical MT5 status and backward compatible dual keys."""
@@ -1460,6 +1508,36 @@ class TestForexAnalysisRuns:
 
         assert _forex_runs[run_id]["status"] == "failed"
         assert _forex_runs[run_id]["signal"] is None
+
+    def test_unavailable_mt5_exposure_never_reaches_graph_or_risk_approval(
+        self, isolated_forex_env
+    ):
+        run_id = "fx_mt5_exposure_unavailable"
+        _forex_runs[run_id] = {"status": "queued", "signal": None}
+        _forex_run_events[run_id] = []
+
+        with (
+            patch(
+                "web.forex_routes.build_mt5_application_context",
+                side_effect=DataInsufficientError(
+                    "complete MT5 risk context is unavailable"
+                ),
+            ),
+            patch("web.forex_routes.ForexTradingAgentsGraph") as factory,
+        ):
+            _run_forex_analysis(
+                run_id,
+                ForexAnalysisRequest(pair="EURUSD", account_source="mt5"),
+            )
+
+        factory.assert_not_called()
+        assert _forex_runs[run_id]["status"] == "failed"
+        assert _forex_runs[run_id]["signal"] is None
+        assert _forex_runs[run_id]["error_code"] == "DATA_INSUFFICIENT"
+        assert [event["type"] for event in _forex_run_events[run_id]] == [
+            "preparing_data",
+            "error",
+        ]
 
     def test_omitted_account_source_defaults_to_mt5_without_balance_fallback(
         self, isolated_forex_env

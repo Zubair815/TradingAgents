@@ -21,6 +21,7 @@ from tradingagents.risk.sizing import (
     BrokerExecutionConstraints,
     ForexAccountProfile,
     OpenPosition,
+    PendingExposure,
 )
 
 
@@ -210,6 +211,47 @@ class MT5Order(BaseModel):
     sl: float = Field(default=0.0, description="Stop-loss price")
     tp: float = Field(default=0.0, description="Take-profit price")
     comment: str = Field(default="", description="Order comment")
+
+    def to_pending_exposure(
+        self,
+        account_currency: str = "USD",
+        conversions: Sequence[ForexConversionRate] = (),
+        as_of_utc: datetime | None = None,
+        max_conversion_age: timedelta | None = None,
+    ) -> PendingExposure:
+        """Convert MT5Order to PendingExposure for portfolio risk controls (PORT-010, PORT-011)."""
+        normalized_pair = normalize_forex_pair(self.symbol)
+        stop_loss = self.sl if self.sl > 0 else None
+        action = ForexAction.LONG if "BUY" in self.type.upper() else ForexAction.SHORT
+        est_risk: float | None = None
+        if stop_loss is not None:
+            pip_sz = pip_size_for(normalized_pair)
+            stop_pips = abs(self.price_open - stop_loss) / pip_sz
+            try:
+                pip_value = pip_value_in_account_currency(
+                    normalized_pair,
+                    self.volume_current,
+                    account_currency,
+                    current_quote_price=self.price_open,
+                    conversions=conversions,
+                    as_of_utc=as_of_utc,
+                    max_conversion_age=max_conversion_age,
+                )
+                est_risk = round(stop_pips * pip_value, 2)
+            except FXConversionUnavailable:
+                est_risk = None
+
+        return PendingExposure(
+            order_id=str(self.ticket),
+            pair=normalized_pair,
+            action=action,
+            order_type=self.type,
+            lots=self.volume_current,
+            trigger_price=self.price_open,
+            stop_loss=stop_loss,
+            reserved_risk=est_risk,
+            setup_time=self.time_setup,
+        )
 
 
 class MT5Deal(BaseModel):

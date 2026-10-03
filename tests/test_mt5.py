@@ -793,6 +793,73 @@ class TestMT5ObserverPositionsAndOrders:
         assert past_orders[0].state == "FILLED"
 
 
+class TestMT5FailClosedDataSemantics:
+    """Distinguish MT5 API failure from a verified-empty broker response."""
+
+    def test_symbols_none_must_raise_data_error(self):
+        api = MockMT5API()
+        api.symbols_get = lambda group=None: None
+        api.last_err = (-10005, "IPC timeout")
+        manager = MT5ConnectionManager(mt5_api=api)
+        manager.status = MT5ConnectionStatus.CONNECTED
+
+        with pytest.raises(MT5DataError, match="symbol catalogue") as exc_info:
+            MT5Observer(connection=manager).get_symbols()
+        assert exc_info.value.code == -10005
+
+    def test_positions_none_must_raise_data_error(self):
+        api = MockMT5API()
+        api.positions_get = lambda **kwargs: None
+        api.last_err = (-10005, "IPC timeout")
+        manager = MT5ConnectionManager(mt5_api=api)
+        manager.status = MT5ConnectionStatus.CONNECTED
+
+        with pytest.raises(MT5DataError, match="open positions") as exc_info:
+            MT5Observer(connection=manager).get_open_positions()
+        assert exc_info.value.code == -10005
+
+    def test_pending_orders_none_must_raise_data_error(self):
+        api = MockMT5API()
+        api.orders_get = lambda **kwargs: None
+        api.last_err = (-10005, "IPC timeout")
+        manager = MT5ConnectionManager(mt5_api=api)
+        manager.status = MT5ConnectionStatus.CONNECTED
+
+        with pytest.raises(MT5DataError, match="pending orders") as exc_info:
+            MT5Observer(connection=manager).get_pending_orders()
+        assert exc_info.value.code == -10005
+
+    def test_historical_orders_none_must_raise_data_error(self):
+        api = MockMT5API()
+        api.history_orders_get = lambda *args, **kwargs: None
+        api.last_err = (-10005, "IPC timeout")
+        manager = MT5ConnectionManager(mt5_api=api)
+        manager.status = MT5ConnectionStatus.CONNECTED
+
+        with pytest.raises(MT5DataError, match="order history") as exc_info:
+            MT5Observer(connection=manager).get_orders_history()
+        assert exc_info.value.code == -10005
+
+    @pytest.mark.parametrize(
+        ("method_name", "api_method"),
+        [
+            ("get_symbols", "symbols_get"),
+            ("get_open_positions", "positions_get"),
+            ("get_pending_orders", "orders_get"),
+            ("get_orders_history", "history_orders_get"),
+        ],
+    )
+    def test_verified_empty_response_remains_empty(self, method_name, api_method):
+        api = MockMT5API()
+        setattr(api, api_method, lambda *args, **kwargs: ())
+        manager = MT5ConnectionManager(mt5_api=api)
+        manager.status = MT5ConnectionStatus.CONNECTED
+
+        result = getattr(MT5Observer(connection=manager), method_name)()
+
+        assert result == []
+
+
 class TestMT5ReadOnlySafety:
     """Verify strictly read-only guarantee: adapter has NO order execution capabilities."""
 

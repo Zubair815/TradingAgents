@@ -318,6 +318,7 @@ class ProposalRecord(BaseModel):
 class TradeJournalRecord(BaseModel):
     """Persistent representation of an executed trade in the Forex journal."""
 
+    schema_version: int = 1
     trade_id: str = Field(default_factory=lambda: f"trd_{uuid.uuid4().hex[:12]}")
     proposal_id: str | None = None
     pair: str
@@ -362,6 +363,7 @@ class TradeJournalRecord(BaseModel):
 class OrderExecutionRecord(BaseModel):
     """Individual broker deal/execution fill event."""
 
+    schema_version: int = 1
     deal_id: str = Field(default_factory=lambda: f"deal_{uuid.uuid4().hex[:12]}")
     trade_id: str
     proposal_id: str | None = None
@@ -384,6 +386,7 @@ class OrderExecutionRecord(BaseModel):
 class StrategyVersionRecord(BaseModel):
     """Metadata for tracking prompt version, LLM model, and strategy configuration."""
 
+    schema_version: int = 1
     version_id: str = Field(default_factory=lambda: f"v_{uuid.uuid4().hex[:8]}")
     strategy_name: str
     prompt_hash: str

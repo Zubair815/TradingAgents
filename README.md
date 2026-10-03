@@ -27,12 +27,11 @@ The current workspace was verified with the repository's supported Windows virtu
 D:\TradingAgents\.venv\Scripts\python.exe -m pytest -q -m "not e2e"
 ```
 
-Result on 2026-10-01 at HEAD `4d2152914fc3ae85249b04126645339eaf755e79`
-(`Version2.0`) plus the uncommitted Forex remediation: `2161 passed, 5 skipped,
-6 deselected, 0 failed, 22 warnings, 88 subtests passed`. Local Chromium E2E
-also passed (`6 passed, 2166 deselected`). Ruff, compileall, JavaScript syntax,
-and whitespace checks passed. Current-worktree GitHub CI is not available until
-the remediation is committed and pushed.
+Result on 2026-10-03 at HEAD `4c226137477c4d6cb3907c2397361d8ad45f7a26`
+plus the completed Forex remediation: `2295 passed, 5 skipped, 6 deselected, 0 failed,
+22 warnings, 88 subtests passed`. Local Chromium E2E also passed (`6 passed`).
+Ruff, compileall, JavaScript syntax, and whitespace checks passed. Current-worktree
+GitHub CI is not available until the remediation is committed and pushed.
 
 Release status: **READY FOR XM DEMO ACCEPTANCE**. Automated engineering gates
 pass, but the Windows + XM Demo checklist has not been executed. This status is
@@ -164,6 +163,13 @@ Open your browser to:
 | `TRADINGAGENTS_LOG_BACKUP_COUNT` | `3` | Rotated log files retained (1-20) |
 | `TRADINGAGENTS_LLM_TIMEOUT_SECONDS` | `120` | Per-request provider timeout (1-600 seconds) |
 | `TRADINGAGENTS_LLM_MAX_RETRIES` | `2` | Provider SDK retry limit (0-10) |
+
+### Deployment Security and Remote Access
+
+- **Local-Only Binding (`DEPLOY-002`)**: By default, the web dashboard binds strictly to `127.0.0.1` on port `8050`. It does NOT bind to `0.0.0.0` or expose raw endpoints across unauthenticated local network interfaces.
+- **Strict CORS Origins (`SEC-005`)**: Browser cross-origin requests are allowlisted strictly to `http://localhost:8050` and `http://127.0.0.1:8050` by default. Additional trusted origins may be configured via `TRADINGAGENTS_CORS_ORIGINS`.
+- **Private Overlay for Remote Access (`SEC-009`, `DEPLOY-003`)**: If personal remote access is required, prefer a private overlay network (such as **Tailscale** or **WireGuard**) or a TLS-terminating reverse proxy (such as Caddy or Nginx with strong authentication) rather than exposing the raw dashboard port to the public Internet.
+- **Secret & Database Exclusions (`SEC-001`, `SEC-002`)**: Sourced API keys and MetaTrader 5 passwords reside in environment variables or a local `.env` file. The `.env` file and SQLite databases (`*.db`) are excluded by default via `.gitignore` and must never be tracked or committed to version control.
 
 ## Installation and CLI
 

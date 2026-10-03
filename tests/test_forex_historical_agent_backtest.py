@@ -169,8 +169,6 @@ def test_estimate_agent_analyses_deterministic_math():
         sampling_interval=5,
         max_analysis_points=10,
         analyst_count=3,
-        avg_tokens_per_analysis=5000,
-        cost_per_1k_tokens=0.002,
     )
 
     assert isinstance(est, AgentBacktestEstimate)
@@ -178,12 +176,12 @@ def test_estimate_agent_analyses_deterministic_math():
     assert est.sampling_interval == 5
     # 100 / 5 = 20 raw points, capped by max_analysis_points=10
     assert est.expected_analyses_count == 10
-    # 10 * (3 analysts + 3 workflow nodes) = 60 calls
-    assert est.estimated_llm_calls == 60
-    # 10 * 5000 = 50,000 tokens
-    assert est.estimated_tokens == 50000
-    # (50,000 / 1000) * 0.002 = $0.10
-    assert est.estimated_cost_usd == 0.10
+    # 3 analysts + bull/bear + manager + trader + portfolio manager.
+    assert est.estimated_llm_calls == 80
+    assert est.estimated_input_tokens == 86_000
+    assert est.estimated_output_tokens == 30_000
+    assert est.estimated_tokens == 116_000
+    assert est.estimated_cost_usd == 0.2104
 
 
 def test_estimate_agent_analyses_uncapped():
@@ -195,7 +193,7 @@ def test_estimate_agent_analyses_uncapped():
         analyst_count=2,
     )
     assert est.expected_analyses_count == 25
-    assert est.estimated_llm_calls == 25 * (2 + 3)
+    assert est.estimated_llm_calls == 25 * (2 + 5)
 
 
 # ---------------------------------------------------------------------------
@@ -470,8 +468,10 @@ def test_api_estimate_backtest_costs():
     assert data["total_bars"] == 200
     assert data["sampling_interval"] == 4
     assert data["expected_analyses_count"] == 25
-    assert data["estimated_llm_calls"] == 25 * 6
-    assert "estimated_cost_usd" in data
+    assert data["estimated_llm_calls"] == 25 * 8
+    assert data["pricing_status"] == "AVAILABLE"
+    assert data["estimate_kind"] == "ESTIMATE"
+    assert data["actual_usage"] is None
 
 
 def test_walk_forward_estimate_uses_actual_four_period_structure():
@@ -492,7 +492,50 @@ def test_walk_forward_estimate_uses_actual_four_period_structure():
     assert data["split_count"] == 1
     assert data["period_count"] == 4
     assert data["expected_analyses_count"] == 11
-    assert data["estimated_llm_calls"] == 66
+    assert data["estimated_llm_calls"] == 88
+
+
+def test_api_estimate_deep_ablation_applies_graph_rounds_and_multiplier():
+    client = TestClient(app)
+    client.get("/")
+    res = client.post(
+        "/api/forex/backtest/estimate",
+        json={
+            "workflow": "ABLATION",
+            "count": 100,
+            "sampling_interval": 10,
+            "variant_count": 4,
+            "analyst_count": 3,
+            "research_depth": "deep",
+        },
+    )
+
+    assert res.status_code == 200
+    data = res.json()
+    assert data["expected_analyses_count"] == 40
+    assert data["calls_per_analysis"]["total_llm_calls"] == 12
+    assert data["estimated_llm_calls"] == 480
+    assert data["multiplier"] == 4
+
+
+def test_api_estimate_unknown_pricing_is_unavailable_not_zero():
+    client = TestClient(app)
+    client.get("/")
+    res = client.post(
+        "/api/forex/backtest/estimate",
+        json={
+            "count": 20,
+            "provider": "unsupported",
+            "quick_model": "unknown-quick",
+            "deep_model": "unknown-deep",
+        },
+    )
+
+    assert res.status_code == 200
+    data = res.json()
+    assert data["pricing_status"] == "UNAVAILABLE"
+    assert data["estimated_cost_usd"] is None
+    assert data["actual_usage"] is None
 
 
 def test_api_run_backtest_historical_agent_mode():

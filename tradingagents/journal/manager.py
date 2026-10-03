@@ -20,6 +20,7 @@ from tradingagents.database.models import (
     ProposalStatus,
     TradeExitReason,
     TradeJournalRecord,
+    TradeStatus,
 )
 from tradingagents.journal.analytics import PostTradeAnalytics
 from tradingagents.journal.lifecycle import TradeLifecycleManager
@@ -280,6 +281,16 @@ class ForexJournalManager:
         return engine.generate_performance_report(
             trades=trades, proposals=proposals, events=events, initial_capital=initial_capital
         )
+
+    def export_trades(
+        self,
+        fmt: str = "json",
+        pair: str | None = None,
+        status: TradeStatus | str | None = None,
+        limit: int = 1000,
+    ) -> str:
+        """Export stored trades in JSON or CSV format (JOURNAL-008)."""
+        return self.journal.export_trades(fmt=fmt, pair=pair, status=status, limit=limit)
 
     def close(self) -> None:
         """Clean up underlying database resources."""

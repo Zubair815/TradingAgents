@@ -710,6 +710,68 @@ class TestConvenienceAndRendering:
         assert decision.decision == ForexRiskDecisionAction.APPROVE
 
 
+class TestForexRiskEngineBrokerDigits:
+    def test_jpy_pair_defaults_to_3_digits_in_rr_modification(self):
+        engine = ForexRiskEngine()
+        proposal = ForexTraderProposal(
+            pair="USDJPY",
+            action=ForexAction.LONG,
+            entry_price=150.000,
+            stop_loss=149.500,     # 50 pips
+            take_profit_1=150.600,  # 60 pips (R:R = 1.2:1, between 1.0 and 1.5)
+            reasoning="JPY test",
+        )
+        decision = engine.validate_proposal(
+            proposal=proposal,
+            curr_date="2025-06-11",
+            curr_time_utc="14:00",
+        )
+        assert decision.decision == ForexRiskDecisionAction.MODIFY
+        assert decision.take_profit == 150.750
+        assert any("Take-Profit target adjusted to 150.750" in mod for mod in decision.modifications_required)
+
+    def test_explicit_broker_digits_overrides_pair_default(self):
+        engine = ForexRiskEngine()
+        proposal = ForexTraderProposal(
+            pair="EURUSD",
+            action=ForexAction.LONG,
+            entry_price=1.0850,
+            stop_loss=1.0820,
+            take_profit_1=1.0886,  # 36 pips (R:R = 1.2:1)
+            reasoning="4 digit test",
+        )
+        decision = engine.validate_proposal(
+            proposal=proposal,
+            curr_date="2025-06-11",
+            curr_time_utc="14:00",
+            broker_digits=4,
+        )
+        assert decision.decision == ForexRiskDecisionAction.MODIFY
+        assert decision.take_profit == 1.0895
+        assert any("Take-Profit target adjusted to 1.0895" in mod for mod in decision.modifications_required)
+
+    def test_clamp_proposal_to_limits_honors_digits(self):
+        engine = ForexRiskEngine()
+        proposal = ForexTraderProposal(
+            pair="USDJPY",
+            action=ForexAction.LONG,
+            entry_price=150.000,
+            stop_loss=148.000,  # 200 pips (exceeds default max_sl_pips=100.0)
+            take_profit_1=150.500,  # Below 1.5 R:R
+            reasoning="clamp test",
+        )
+        clamped = engine.clamp_proposal_to_limits(proposal)
+        # Clamped to 100 pips (1.000 price distance): 150.000 - 1.000 = 149.000
+        assert clamped.stop_loss == 149.000
+        # TP adjusted to 1.5R: 150.000 + (1.000 * 1.5) = 151.500
+        assert clamped.take_profit_1 == 151.500
+
+        # With explicit broker_digits=1
+        clamped_1d = engine.clamp_proposal_to_limits(proposal, broker_digits=1)
+        assert clamped_1d.stop_loss == 149.0
+        assert clamped_1d.take_profit_1 == 151.5
+
+
 @pytest.fixture(autouse=True)
 def explicit_calendar_fixture(monkeypatch):
     from tests.forex_calendar_fixture import fixture_query

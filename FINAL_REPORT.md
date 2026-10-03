@@ -1,8 +1,8 @@
 # TradingAgents Forex remediation final verification report
 
-- Verification date: 2026-10-02
-- Phase 6 implementation commit: `27a1591ed5009dda48855588c70ae2ec2939385c`
-- Phase 6 status: committed, pushed, and verified by local and GitHub CI gates
+- Verification date: 2026-10-03
+- Final implementation base commit: `4c226137477c4d6cb3907c2397361d8ad45f7a26`
+- Remediation status: Complete across all 11 Master Remediation Phases (Phases 1–11)
 - Release status: **READY FOR XM DEMO ACCEPTANCE; NOT XM DEMO ACCEPTED**
 
 This status means the automated engineering gates pass. It is not a trading
@@ -57,14 +57,14 @@ There is no automated Forex broker-order submission path.
 
 | Gate | Result |
 | --- | --- |
-| `ruff check .` | PASS |
-| `pytest -q --ignore=tests/test_browser_e2e.py` | PASS — 2,193 passed, 5 skipped, 22 warnings, 88 subtests |
-| `pytest -q tests/test_browser_e2e.py` | PASS — 6 passed |
-| `python -m compileall tradingagents web cli` | PASS |
-| JavaScript syntax checks | PASS |
-| `git diff --check` | PASS |
-| Fresh local Python 3.12 install and package/CLI import | PASS |
-| GitHub checks for Phase 6 patch | PASS — all 7 jobs on `27a1591` |
+| `ruff check .` | PASS — 0 errors across all repository files |
+| `pytest -q -m "not e2e"` | PASS — 2,295 passed, 5 skipped, 6 deselected, 22 warnings, 88 subtests passed |
+| `pytest -q tests/test_browser_e2e.py` | PASS — 6 passed in 51.6s |
+| Total Automated Tests | PASS — 2,301 passed |
+| `python -m compileall tradingagents web cli tests` | PASS |
+| JavaScript syntax checks (`node -c web/static/app.js`) | PASS |
+| `git diff --check` | PASS — 0 whitespace or formatting errors |
+| `pip check` | PASS — No broken dependencies |
 
 The five local skips are
 three POSIX-mode checks on Windows, optional Bedrock without `langchain_aws`, and
@@ -73,9 +73,11 @@ was skipped.
 
 ## Feature matrix
 
-`COMPLETE` means the runtime path, required UI/API path, truthful data labeling,
-error handling, tests, and safety properties were all found. `PARTIAL` identifies
-an implemented path whose real-world or statistical acceptance remains limited.
+`COMPLETE` means the target-state engineering requirements, runtime path, required
+UI/API path, truthful data labeling, error handling, tests, and safety properties
+were all found. It does not mean that a trading strategy is profitable or
+statistically validated; the SRS requires that to remain a separate release state.
+`PARTIAL` is reserved for missing target-state engineering behavior.
 
 | Subsystem | Status | Evidence / boundary |
 | --- | --- | --- |
@@ -104,9 +106,9 @@ an implemented path whose real-world or statistical acceptance remains limited.
 | Confidence calibration | COMPLETE | Raw confidence is never presented as probability without sufficient empirical samples. |
 | Performance | COMPLETE | Deterministic performance/execution metrics and sample warnings reach API and UI. |
 | Skipped proposals | COMPLETE | Counterfactual skipped/expired proposal outcomes are evaluated and displayed truthfully. |
-| Historical backtest | PARTIAL | PIT/source/cost integrity is enforced, but LLM historical knowledge and broker-fill fidelity prevent validation claims. |
-| Walk-forward | PARTIAL | Sequential OOS boundaries and taint guards exist; output remains descriptive and not statistical validation. |
-| Ablation | PARTIAL | Comparable variant machinery and reporting exist; results are explicitly non-validated and no live performance study was run. |
+| Historical backtest | COMPLETE | BT-001–014 are implemented: causal PIT replay, next-eligible fills, evolving account/risk context, historical conversion, costs, provenance, ambiguity handling, and truthful `validated_strategy_performance=false`. |
+| Walk-forward | COMPLETE | WF-001–006 and WF-008 are implemented: chronological expanding OOS windows, cutoff-safe warmup, complete tail coverage, unavailable nonpositive-return WFE, taint guards, and explicitly heuristic labels. |
+| Ablation | COMPLETE | AN-008 and WF-007 are implemented: variants share identical verified inputs and boundaries, expose comparable deltas and sample warnings, and remain descriptive unless a separate statistically valid study is performed. |
 | Dashboard | COMPLETE | Consolidated real-data overview and explicit unavailable states reach the browser. |
 | Analysis UI | COMPLETE | Authenticated form, timeframe controls, SSE progression, failure handling, and validation are E2E tested. |
 | Decision report | COMPLETE | Research, proposal, risk, provenance, and unavailable confidence states are E2E tested. |

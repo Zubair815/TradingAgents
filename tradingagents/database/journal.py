@@ -527,8 +527,9 @@ class ForexTradeJournal:
                         INSERT INTO trades (
                             trade_id, proposal_id, pair, action, status,
                             open_time_utc, open_price, stop_loss, take_profit,
-                            lots, commission, swap, confidence, tags_json, notes, metadata_json
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                            lots, commission, swap, confidence, tags_json, notes, metadata_json,
+                            schema_version
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                         """,
                         (
                             rec.trade_id,
@@ -547,6 +548,7 @@ class ForexTradeJournal:
                             json.dumps(rec.tags),
                             rec.notes,
                             json.dumps(rec.metadata),
+                            rec.schema_version,
                         ),
                     )
                     # Automatically mark proposal as EXECUTED if linked
@@ -1123,7 +1125,9 @@ class ForexTradeJournal:
 
     @staticmethod
     def _row_to_trade_record(row: sqlite3.Row) -> TradeJournalRecord:
+        row_dict = dict(row)
         return TradeJournalRecord(
+            schema_version=row_dict.get("schema_version", 1) or 1,
             trade_id=row["trade_id"],
             proposal_id=row["proposal_id"],
             pair=row["pair"],
@@ -1448,6 +1452,54 @@ class ForexTradeJournal:
         trades = self.list_trades(pair=pair, limit=10000)
         engine = ConfidenceCalibrationEngine(min_samples=min_samples)
         return engine.compute_calibration(trades=trades, min_samples=min_samples)
+
+    def export_trades(
+        self,
+        fmt: str = "json",
+        pair: str | None = None,
+        status: TradeStatus | str | None = None,
+        limit: int = 1000,
+    ) -> str:
+        """Export stored trades in JSON or CSV format (JOURNAL-008)."""
+        import csv
+        import io
+
+        trades = self.list_trades(pair=pair, status=status, limit=limit)
+        clean_fmt = fmt.strip().lower()
+        if clean_fmt == "json":
+            return json.dumps([t.model_dump(mode="json") for t in trades], indent=2)
+        elif clean_fmt == "csv":
+            output = io.StringIO()
+            writer = csv.writer(output)
+            writer.writerow([
+                "trade_id", "proposal_id", "pair", "action", "status",
+                "open_price", "close_price", "stop_loss", "take_profit",
+                "lots", "pips_gained", "r_multiple", "net_profit",
+                "exit_reason", "open_time_utc", "close_time_utc", "schema_version",
+            ])
+            for t in trades:
+                writer.writerow([
+                    t.trade_id,
+                    t.proposal_id or "",
+                    t.pair,
+                    t.action.value if hasattr(t.action, "value") else str(t.action),
+                    t.status.value if hasattr(t.status, "value") else str(t.status),
+                    t.open_price,
+                    t.close_price or "",
+                    t.stop_loss or "",
+                    t.take_profit or "",
+                    t.lots,
+                    t.pips_gained or 0.0,
+                    t.r_multiple or 0.0,
+                    t.net_profit or 0.0,
+                    t.exit_reason.value if hasattr(t.exit_reason, "value") and t.exit_reason else (t.exit_reason or ""),
+                    t.open_time_utc,
+                    t.close_time_utc or "",
+                    t.schema_version,
+                ])
+            return output.getvalue()
+        else:
+            raise ValueError(f"Unsupported export format '{fmt}'. Must be 'json' or 'csv'.")
 
     # Aliases
     record_trade = record_trade_open

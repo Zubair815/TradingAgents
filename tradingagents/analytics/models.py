@@ -148,6 +148,12 @@ class StopTargetCalibration(BaseModel):
     recommended_atr_tp_multiple: float = 2.5
     expected_gain_improvement_pct: float = 0.0
     recommendations: list[str] = PydanticField(default_factory=list)
+    is_advisory_only: bool = True
+    applied_automatically: bool = False
+    evidence_note: str = (
+        "Descriptive empirical research based on historical trade excursions. "
+        "Does not automatically mutate runtime risk parameters or override deterministic risk limits."
+    )
 
 
 # ---------------------------------------------------------------------------

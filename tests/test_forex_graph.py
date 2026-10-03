@@ -54,6 +54,7 @@ from tradingagents.forex import (
     ForexTradingAgentsGraph,
 )
 from tradingagents.forex.calendar import TradingActionRecommendation
+from tradingagents.research.contracts import RunStatus
 from tradingagents.risk.engine import ForexRiskLimits
 from tradingagents.risk.sizing import (
     ForexAccountProfile,
@@ -830,3 +831,129 @@ class TestForexGraphConfiguration:
             assert quick_call.kwargs.get("thinking_level") == "low"
             assert quick_call.kwargs.get("temperature") == 0.1
 
+
+# ---------------------------------------------------------------------------
+# 6. Domain Contracts, Provenance & PIT Integrity Tests (Phase 5)
+# ---------------------------------------------------------------------------
+
+
+class TestForexGraphDomainProvenance:
+    """Tests for DOM-009, DOM-011, and AGENT-007 run envelopes and provenance."""
+
+    def test_create_run_state_generates_canonical_identities(self):
+        journal = ForexTradeJournal(db_path=":memory:")
+        mock_llm = MockChatModel()
+        graph = ForexTradingAgentsGraph(
+            selected_analysts=("forex_technical", "forex_macro"),
+            journal=journal,
+            quick_thinking_llm=mock_llm,
+            deep_thinking_llm=mock_llm,
+        )
+
+        state = graph.create_run_state("EURUSD", trade_date="2026-10-02")
+        assert state["forex_run_id"] is not None
+        assert state["forex_run_id"].startswith("run_")
+        assert state["forex_snapshot_id"] is not None
+        assert state["forex_snapshot_id"].startswith("snap_")
+        assert state["forex_version_id"] is not None
+        assert state["forex_version_id"].startswith("v_")
+        assert len(state["forex_prompt_hash"]) == 64
+
+        # Verify AnalysisRun persisted in journal research store
+        run = journal.research.get_run(state["forex_run_id"])
+        assert run is not None
+        assert run.run_id == state["forex_run_id"]
+        assert run.request.pair == "EURUSD"
+        assert run.status == RunStatus.RUNNING
+
+        # Verify MarketSnapshot persisted in journal research store
+        snapshot = journal.research.get_snapshot(state["forex_snapshot_id"])
+        assert snapshot is not None
+        assert snapshot.snapshot_id == state["forex_snapshot_id"]
+        assert snapshot.pair == "EURUSD"
+        assert snapshot.source == "forex_market_context"
+
+    def test_end_to_end_graph_envelopes_agent_reports_and_completes_run(self):
+        journal = ForexTradeJournal(db_path=":memory:")
+        valid_proposal = ForexTraderProposal(
+            pair="EURUSD",
+            action=ForexAction.LONG,
+            order_type=OrderType.MARKET,
+            setup_type=SetupType.TREND_CONTINUATION,
+            timeframe="H1",
+            entry_price=1.08500,
+            stop_loss=1.08100,
+            take_profit_1=1.09200,
+            suggested_risk_percent=1.0,
+            reasoning="H1 Bullish breakout confirmed",
+        )
+
+        mock_quick = MockChatModel(
+            response_msg=AIMessage(content="Institutional analyst intelligence report", tool_calls=[]),
+            structured_response=valid_proposal,
+        )
+        mock_deep = MockChatModel(
+            response_msg=AIMessage(content="Synthesis plan", tool_calls=[]),
+        )
+
+        risk_limits = ForexRiskLimits(
+            enforce_market_open=False,
+            enforce_news_blackout=False,
+            min_risk_reward_ratio=1.5,
+        )
+
+        account = ForexAccountProfile(equity=50000.0, currency="USD", leverage=100.0)
+
+        graph = ForexTradingAgentsGraph(
+            selected_analysts=("forex_technical", "forex_macro", "forex_news"),
+            risk_limits=risk_limits,
+            sizing_account=account,
+            journal=journal,
+            quick_thinking_llm=mock_quick,
+            deep_thinking_llm=mock_deep,
+        )
+
+        final_state, signal = graph.propagate("EURUSD", trade_date="2026-10-02")
+        assert signal in ("LONG", "SHORT", "NO_TRADE", "REJECT", "MODIFY")
+
+        # DOM-009: Verify run status completed
+        last_run = graph.get_last_run()
+        assert last_run is not None
+        assert last_run.status == RunStatus.COMPLETED
+
+        # DOM-009: Verify snapshot
+        last_snap = graph.get_last_snapshot()
+        assert last_snap is not None
+        assert last_snap.pair == "EURUSD"
+
+        # AGENT-007: Verify AgentReport records created and linked
+        reports = graph.get_last_agent_reports()
+        assert len(reports) > 0
+        agents = {r.agent for r in reports}
+        assert "forex_technical" in agents or "forex_macro" in agents or "forex_news" in agents
+        for r in reports:
+            assert r.run_id == last_run.run_id
+            assert r.snapshot_id == last_snap.snapshot_id
+            assert len(r.content) > 0
+
+        # Backward compatibility: raw state report keys remain strings
+        assert isinstance(final_state.get("forex_technical_report"), str)
+        assert isinstance(final_state.get("forex_macro_report"), str)
+        assert isinstance(final_state.get("forex_news_report"), str)
+
+        # DOM-011: Verify prompt_hash was attached to the proposal
+        last_proposal = graph.get_last_proposal()
+        assert last_proposal is not None
+        assert last_proposal.prompt_hash is not None
+        assert len(last_proposal.prompt_hash) == 64
+        assert last_proposal.prompt_version == "1.0.0"
+        assert last_proposal.strategy_version == "1.0.0"
+
+        # Verify proposal evidence in journal links run_id, snapshot_id, version_id
+        prop_id = final_state.get("forex_proposal_id")
+        assert prop_id is not None
+        stored_prop = journal.get_proposal(prop_id)
+        assert stored_prop is not None
+        assert stored_prop.run_id == last_run.run_id
+        assert stored_prop.snapshot_id == last_snap.snapshot_id
+        assert stored_prop.version_id is not None

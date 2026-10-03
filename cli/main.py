@@ -27,6 +27,7 @@ from cli.errors import describe_run_error
 __all__ = ["app", "extract_content_string"]
 
 from cli.models import AssetType
+from cli.operations import app as operations_app
 from cli.prefs import load_last_run, sanitize, save_last_run
 from cli.stats_handler import StatsCallbackHandler
 from cli.utils import (
@@ -87,6 +88,7 @@ app = typer.Typer(
 )
 journal_app = typer.Typer(help="Back up or restore the local Forex SQLite journal.")
 app.add_typer(journal_app, name="journal")
+app.add_typer(operations_app, name="operations")
 
 
 # MessageBuffer, create_layout, and update_display are provided by cli.display

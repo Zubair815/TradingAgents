@@ -128,7 +128,8 @@ def test_ablation_variant_calls_estimation() -> None:
         enable_debate=True,
         enable_memory=True,
     )
-    # 3 analysts + 2 debate + 1 memory + 2 (manager+trader) = 8
+    # 3 analysts + 2 debate + manager + trader + portfolio manager = 8.
+    # Memory retrieval is deterministic and does not add an LLM call.
     assert full.estimate_calls_per_point() == 8
 
     minimal = AblationConfigVariant(
@@ -139,8 +140,8 @@ def test_ablation_variant_calls_estimation() -> None:
         enable_debate=False,
         enable_memory=False,
     )
-    # 1 analyst + 0 debate + 0 memory + 2 = 3
-    assert minimal.estimate_calls_per_point() == 3
+    # 1 analyst + manager + trader + portfolio manager = 4.
+    assert minimal.estimate_calls_per_point() == 4
 
 
 def test_ablation_empty_candles_raises() -> None:

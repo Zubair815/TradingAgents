@@ -54,3 +54,11 @@ evidence. The tested Phase 6 implementation is now committed and passed all
 seven GitHub CI jobs; items 6-25 still require the manual acceptance workflow.
 
 Acceptance result remains: **NOT XM DEMO ACCEPTED**.
+
+## Revision-locked evidence workflow
+
+Phase 5 adds `tradingagents operations xm-acceptance` commands for starting,
+recording and inspecting one ordered acceptance record. The workflow rejects
+out-of-order evidence, wrong human/system evidence classes, revision mismatches,
+dirty-release acceptance, non-permitted skips and obvious sensitive text. See
+`docs/PHASE5_XM_LIFECYCLE_ACCEPTANCE.md` for commands and current prerequisites.

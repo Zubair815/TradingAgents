@@ -35,6 +35,8 @@ MESSAGES = {
     "HISTORICAL_DATA_UNAVAILABLE": "Historical data is unavailable for the requested period.",
     "MT5_DISCONNECTED": "MetaTrader 5 is not connected.",
     "MT5_CONNECTION_FAILED": "MetaTrader 5 connection failed.",
+    "MT5_DATA_UNAVAILABLE": "MetaTrader 5 data is temporarily unavailable.",
+    "MT5_SYMBOL_UNAVAILABLE": "The requested MetaTrader 5 symbol is unavailable.",
     "PROPOSAL_NOT_FOUND": "Proposal not found",
     "TRADE_NOT_FOUND": "Trade not found",
     "RUN_NOT_FOUND": "Run not found",

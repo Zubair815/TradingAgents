@@ -192,3 +192,64 @@ global.window = {location: {origin: 'http://localhost:8050'},
 })().catch(error => {console.error(error); process.exitCode = 1;});
 '''
     subprocess.run(["node", "-e", script], check=True, capture_output=True)
+
+
+def test_env_and_databases_excluded_from_git_tracking():
+    """SEC-002: .env and user databases must be excluded from Git by default."""
+    root = Path(__file__).resolve().parents[1]
+    gitignore_path = root / ".gitignore"
+    assert gitignore_path.exists(), ".gitignore must exist"
+    gitignore_content = gitignore_path.read_text(encoding="utf-8")
+    assert re.search(r"^\.env\b", gitignore_content, re.MULTILINE), ".env must be ignored in .gitignore"
+    assert re.search(r"\*\.db\b", gitignore_content, re.MULTILINE), "*.db must be ignored in .gitignore"
+
+    # Verify with git if git is available
+    git_bin = shutil.which("git")
+    if git_bin:
+        # Verify .env is not currently tracked
+        res = subprocess.run(
+            [git_bin, "ls-files", "--error-unmatch", ".env"],
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+        )
+        assert res.returncode != 0, ".env must NEVER be tracked by git"
+
+        # Verify .env is recognized as ignored
+        check_ignore = subprocess.run(
+            [git_bin, "check-ignore", "-v", ".env"],
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+        )
+        assert check_ignore.returncode == 0, ".env must be matched by gitignore"
+
+
+def test_cors_default_origins_restrictive(monkeypatch):
+    """SEC-005: CORS origins must be allowlisted and default to localhost/local deployment."""
+    monkeypatch.delenv("TRADINGAGENTS_CORS_ORIGINS", raising=False)
+    origins = server.get_cors_origins()
+    assert origins == ["http://localhost:8050", "http://127.0.0.1:8050"]
+    assert "http://0.0.0.0:8050" not in origins
+    assert "*" not in origins
+
+    # Test custom configuration
+    monkeypatch.setenv("TRADINGAGENTS_CORS_ORIGINS", "http://internal.example:8050, https://dashboard.example.com")
+    custom_origins = server.get_cors_origins()
+    assert custom_origins == ["http://internal.example:8050", "https://dashboard.example.com"]
+
+
+def test_dashboard_bind_address_local_default(monkeypatch):
+    """DEPLOY-002: Dashboard must bind to 127.0.0.1 by default."""
+    monkeypatch.delenv("TRADINGAGENTS_DASHBOARD_HOST", raising=False)
+    monkeypatch.delenv("TRADINGAGENTS_DASHBOARD_PORT", raising=False)
+    host, port = server.get_dashboard_bind_address()
+    assert host == "127.0.0.1"
+    assert port == 8050
+
+    # Test custom configuration
+    monkeypatch.setenv("TRADINGAGENTS_DASHBOARD_HOST", "10.0.0.5")
+    monkeypatch.setenv("TRADINGAGENTS_DASHBOARD_PORT", "9090")
+    custom_host, custom_port = server.get_dashboard_bind_address()
+    assert custom_host == "10.0.0.5"
+    assert custom_port == 9090

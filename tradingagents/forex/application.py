@@ -115,6 +115,7 @@ def build_mt5_application_context(
         constraints = observer.to_broker_constraints(pair)
         atr_pips = observer.get_atr_pips(pair, execution_timeframe, as_of=tick.time)
         conversions = observer.get_conversion_observations(pair, account.currency)
+        pending_orders = observer.get_pending_orders()
         as_of_utc = datetime.now(timezone.utc)
         max_conversion_age = timedelta(
             seconds=float(
@@ -128,6 +129,16 @@ def build_mt5_application_context(
             conversions=conversions,
             as_of_utc=as_of_utc,
             max_conversion_age=max_conversion_age,
+        )
+        pending_exposures = (
+            observer.to_pending_exposures(
+                account_currency=account.currency,
+                conversions=conversions,
+                as_of_utc=as_of_utc,
+                max_conversion_age=max_conversion_age,
+            )
+            if hasattr(observer, "to_pending_exposures")
+            else []
         )
 
         daily_rule_enabled = (
@@ -165,6 +176,9 @@ def build_mt5_application_context(
             broker=constraints,
             portfolio=ForexPortfolioContext(
                 open_positions=tuple(positions),
+                pending_orders_status=AvailabilityStatus.AVAILABLE,
+                pending_order_count=len(pending_orders),
+                pending_exposures=tuple(pending_exposures),
                 daily_pnl_status=daily_pnl_status,
                 realized_pnl_today=daily_pnl,
                 day_start_balance=day_start_balance,

@@ -40,6 +40,7 @@ from tradingagents.agents.schemas_forex import (
 )
 from tradingagents.dataflows.forex_quality import DataInsufficientError
 from tradingagents.forex.calendar import evaluate_event_risk_regime
+from tradingagents.forex.domain import get_forex_pair
 from tradingagents.forex.pips import lot_size_from_risk, pip_size_for
 from tradingagents.forex.sessions import is_market_open, is_weekend
 
@@ -127,6 +128,16 @@ class ForexRiskLimits(BaseModel):
     )
 
 
+def _resolve_digits(pair: str, broker_digits: int | None = None) -> int:
+    """Resolve price decimal digits from broker constraints, pair definition, or convention."""
+    if broker_digits is not None and broker_digits >= 0:
+        return broker_digits
+    pair_obj = get_forex_pair(pair)
+    if pair_obj is not None and pair_obj.digits > 0:
+        return pair_obj.digits
+    return 3 if "JPY" in pair.upper() else 5
+
+
 # ---------------------------------------------------------------------------
 # Forex Risk Engine
 # ---------------------------------------------------------------------------
@@ -156,6 +167,7 @@ class ForexRiskEngine:
         daily_realized_pnl: float | None = None,
         day_start_balance: float | None = None,
         daily_pnl_available: bool = False,
+        broker_digits: int | None = None,
     ) -> ForexRiskDecision:
         """Validate a ForexTraderProposal against non-negotiable risk limits.
 
@@ -193,6 +205,7 @@ class ForexRiskEngine:
         checks_passed: list[str] = []
         violations: list[str] = []
         modifications: list[str] = []
+        digits = _resolve_digits(proposal.pair, broker_digits)
 
         if open_position_count >= eff_limits.max_open_positions:
             violations.append(
@@ -261,24 +274,24 @@ class ForexRiskEngine:
             if proposal.action == ForexAction.LONG:
                 if proposal.stop_loss >= proposal.entry_price:
                     violations.append(
-                        f"LONG stop-loss ({proposal.stop_loss:.5f}) must be strictly below "
-                        f"entry price ({proposal.entry_price:.5f})."
+                        f"LONG stop-loss ({proposal.stop_loss:.{digits}f}) must be strictly below "
+                        f"entry price ({proposal.entry_price:.{digits}f})."
                     )
                 if proposal.take_profit_1 is not None and proposal.take_profit_1 <= proposal.entry_price:
                     violations.append(
-                        f"LONG take-profit ({proposal.take_profit_1:.5f}) must be strictly above "
-                        f"entry price ({proposal.entry_price:.5f})."
+                        f"LONG take-profit ({proposal.take_profit_1:.{digits}f}) must be strictly above "
+                        f"entry price ({proposal.entry_price:.{digits}f})."
                     )
             elif proposal.action == ForexAction.SHORT:
                 if proposal.stop_loss <= proposal.entry_price:
                     violations.append(
-                        f"SHORT stop-loss ({proposal.stop_loss:.5f}) must be strictly above "
-                        f"entry price ({proposal.entry_price:.5f})."
+                        f"SHORT stop-loss ({proposal.stop_loss:.{digits}f}) must be strictly above "
+                        f"entry price ({proposal.entry_price:.{digits}f})."
                     )
                 if proposal.take_profit_1 is not None and proposal.take_profit_1 >= proposal.entry_price:
                     violations.append(
-                        f"SHORT take-profit ({proposal.take_profit_1:.5f}) must be strictly below "
-                        f"entry price ({proposal.entry_price:.5f})."
+                        f"SHORT take-profit ({proposal.take_profit_1:.{digits}f}) must be strictly below "
+                        f"entry price ({proposal.entry_price:.{digits}f})."
                     )
 
         if not any("entry price" in v or "stop-loss" in v or "take-profit" in v for v in violations):
@@ -339,13 +352,13 @@ class ForexRiskEngine:
                 sl_dist = abs(proposal.entry_price - proposal.stop_loss)
                 needed_tp_dist = sl_dist * eff_limits.min_risk_reward_ratio
                 if proposal.action == ForexAction.LONG:
-                    suggested_tp = round(proposal.entry_price + needed_tp_dist, 5)
+                    suggested_tp = round(proposal.entry_price + needed_tp_dist, digits)
                 else:
-                    suggested_tp = round(proposal.entry_price - needed_tp_dist, 5)
+                    suggested_tp = round(proposal.entry_price - needed_tp_dist, digits)
 
                 modifications.append(
                     f"Risk:Reward ratio ({rr:.2f}:1) is below target {eff_limits.min_risk_reward_ratio:.1f}:1. "
-                    f"Take-Profit target adjusted to {suggested_tp:.5f} to achieve institutional {eff_limits.min_risk_reward_ratio:.1f}R."
+                    f"Take-Profit target adjusted to {suggested_tp:.{digits}f} to achieve institutional {eff_limits.min_risk_reward_ratio:.1f}R."
                 )
                 target_tp = suggested_tp
                 rr = eff_limits.min_risk_reward_ratio
@@ -614,6 +627,7 @@ class ForexRiskEngine:
         self,
         proposal: ForexTraderProposal,
         limits: ForexRiskLimits | None = None,
+        broker_digits: int | None = None,
     ) -> ForexTraderProposal:
         """Return a copy of the proposal adjusted to strictly satisfy limits.
 
@@ -625,6 +639,7 @@ class ForexRiskEngine:
         if proposal.action == ForexAction.NO_TRADE or proposal.entry_price is None or proposal.stop_loss is None:
             return proposal
 
+        digits = _resolve_digits(proposal.pair, broker_digits)
         pip_size = pip_size_for(proposal.pair)
         entry = proposal.entry_price
         sl = proposal.stop_loss
@@ -636,17 +651,17 @@ class ForexRiskEngine:
 
         if clamped_sl_pips != current_sl_pips:
             sl_dist = clamped_sl_pips * pip_size
-            sl = round(entry - sl_dist if proposal.action == ForexAction.LONG else entry + sl_dist, 5)
+            sl = round(entry - sl_dist if proposal.action == ForexAction.LONG else entry + sl_dist, digits)
 
         # Adjust TP if R:R < min_risk_reward_ratio
         actual_sl_dist = abs(entry - sl)
         target_tp_dist = actual_sl_dist * eff_limits.min_risk_reward_ratio
         if tp is None:
-            tp = round(entry + target_tp_dist if proposal.action == ForexAction.LONG else entry - target_tp_dist, 5)
+            tp = round(entry + target_tp_dist if proposal.action == ForexAction.LONG else entry - target_tp_dist, digits)
         else:
             current_tp_dist = abs(tp - entry)
             if current_tp_dist < target_tp_dist:
-                tp = round(entry + target_tp_dist if proposal.action == ForexAction.LONG else entry - target_tp_dist, 5)
+                tp = round(entry + target_tp_dist if proposal.action == ForexAction.LONG else entry - target_tp_dist, digits)
 
         # Clamp risk percent
         risk_pct = min(
@@ -689,6 +704,7 @@ def validate_forex_proposal(
     account_balance: float | None = None,
     account_currency: str = "USD",
     limits: ForexRiskLimits | None = None,
+    broker_digits: int | None = None,
 ) -> ForexRiskDecision:
     """Validate a ForexTraderProposal using the default ForexRiskEngine."""
     engine = ForexRiskEngine(default_limits=limits)
@@ -701,4 +717,5 @@ def validate_forex_proposal(
         account_balance=account_balance,
         account_currency=account_currency,
         limits=limits,
+        broker_digits=broker_digits,
     )

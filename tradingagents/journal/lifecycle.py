@@ -598,6 +598,10 @@ class TradeLifecycleManager:
             raise LifecycleError(f"Proposal '{proposal_id}' not found.")
 
         curr_state = LifecycleState(record.status.value)
+        if curr_state == LifecycleState.EXPIRED:
+            logger.debug("Proposal '%s' is already expired; skipping redundant expiry.", proposal_id)
+            return
+
         self.validate_transition(curr_state, LifecycleState.EXPIRED)
 
         self.journal.update_proposal_status(
@@ -721,7 +725,8 @@ class TradeLifecycleManager:
                 if not valid_until_str:
                     continue
                 try:
-                    valid_dt = datetime.fromisoformat(valid_until_str)
+                    clean_str = valid_until_str.replace("Z", "+00:00")
+                    valid_dt = datetime.fromisoformat(clean_str)
                     if valid_dt.tzinfo is None:
                         valid_dt = valid_dt.replace(tzinfo=timezone.utc)
                     if now >= valid_dt:

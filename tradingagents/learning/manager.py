@@ -214,6 +214,9 @@ class ForexLearningManager:
         tags: list[str] | None = None,
         limit: int = 5,
         min_relevance: float = 0.35,
+        min_support: int | None = None,
+        half_life_days: float | None = None,
+        as_of: datetime | str | None = None,
     ) -> str:
         """Retrieve historical lessons and format into an LLM prompt guidance block."""
         retrieved = self.retriever.retrieve_lessons(
@@ -226,6 +229,9 @@ class ForexLearningManager:
             tags=tags,
             limit=limit,
             min_relevance=min_relevance,
+            min_support=min_support,
+            half_life_days=half_life_days,
+            as_of=as_of,
         )
         return self.retriever.format_lessons_for_prompt(retrieved)
 

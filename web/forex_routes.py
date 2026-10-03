@@ -87,10 +87,7 @@ from tradingagents.forex.application import (
     build_manual_application_context,
     build_mt5_application_context,
 )
-from tradingagents.forex.domain import (
-    MAJOR_PAIRS,
-    normalize_forex_pair,
-)
+from tradingagents.forex.domain import normalize_forex_pair
 from tradingagents.forex.pips import pip_size_for
 from tradingagents.journal.lifecycle import LifecycleError, LifecycleTransitionError
 from tradingagents.journal.manager import ForexJournalManager
@@ -405,6 +402,24 @@ def _serialize_runtime_settings() -> dict[str, Any]:
     return {key: cfg.get(key) for key in _SETTINGS_KEYS}
 
 
+def _is_restart_required(settings: dict[str, Any] | None = None) -> bool:
+    """Determine whether the running MT5 observation service requires a restart for pending config changes."""
+    if _forex_runtime is None:
+        return False
+    service = getattr(_forex_runtime, "service", None)
+    active_poll = getattr(service, "poll_interval", None)
+    if active_poll is None:
+        return False
+    current_settings = settings or _serialize_runtime_settings()
+    cfg_poll = current_settings.get("mt5_poll_interval_seconds")
+    if cfg_poll is None:
+        return False
+    try:
+        return abs(float(active_poll) - float(cfg_poll)) > 1e-6
+    except (ValueError, TypeError):
+        return False
+
+
 @router.get("/settings")
 def get_runtime_settings():
     """Return safe local runtime settings without exposing secret material."""
@@ -416,7 +431,7 @@ def get_runtime_settings():
             "llm_provider_secrets": "Configured" if _provider_secret_is_configured(settings.get("llm_provider")) else "Missing",
         },
         "execution_policy": "manual_only",
-        "restart_required": False,
+        "restart_required": _is_restart_required(settings),
     }
 
 
@@ -445,9 +460,10 @@ def patch_runtime_settings(payload: dict[str, Any]):
         saved = save_runtime_settings(payload)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
-    restart_required = _forex_runtime is not None and any(
+    changed_restart_keys = any(
         key in _RESTART_REQUIRED_KEYS and saved.get(key) != before.get(key) for key in payload
     )
+    restart_required = (_forex_runtime is not None and changed_restart_keys) or _is_restart_required(saved)
     return {
         "settings": {key: saved.get(key) for key in _SETTINGS_KEYS},
         "saved": True,
@@ -461,9 +477,10 @@ def reset_runtime_settings_route():
     """Restore the project's default config and drop local runtime overrides."""
     before = _serialize_runtime_settings()
     saved = reset_runtime_settings()
-    restart_required = _forex_runtime is not None and any(
+    changed_restart_keys = any(
         saved.get(key) != before.get(key) for key in _RESTART_REQUIRED_KEYS
     )
+    restart_required = (_forex_runtime is not None and changed_restart_keys) or _is_restart_required(saved)
     return {
         "settings": {key: saved.get(key) for key in _SETTINGS_KEYS},
         "reset": True,
@@ -654,6 +671,13 @@ class ForexBacktestEstimateRequest(BaseModel):
     workflow: Literal["BACKTEST", "WALK_FORWARD", "ABLATION"] = "BACKTEST"
     n_splits: int = Field(default=1, ge=1, le=10)
     variant_count: int = Field(default=1, ge=1, le=20)
+    provider: str = Field(default="openai")
+    quick_model: str = Field(default="gpt-4.1-mini")
+    deep_model: str = Field(default="gpt-4.1")
+    research_depth: Literal["standard", "deep"] = "standard"
+    debate_enabled: bool = True
+    memory_enabled: bool = True
+    risk_debate_rounds: int = Field(default=0, ge=0, le=10)
 
 
 class ForexAblationRequest(ForexBacktestRequest):
@@ -1107,9 +1131,13 @@ async def list_proposals(
     timeframe: str | None = None,
     limit: int = Query(default=100, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
+    journal_mgr: ForexJournalManager = Depends(get_journal_manager),
     journal: ForexTradeJournal = Depends(get_journal),
 ):
     """Query proposals from SQLite store with multi-field filtering."""
+    with contextlib.suppress(Exception):
+        journal_mgr.check_and_expire_proposals()
+
     prop_status = None
     if status:
         try:
@@ -1155,9 +1183,13 @@ async def list_proposals(
 @router.get("/proposals/{proposal_id}")
 async def get_proposal(
     proposal_id: str,
+    journal_mgr: ForexJournalManager = Depends(get_journal_manager),
     journal: ForexTradeJournal = Depends(get_journal),
 ):
     """Retrieve specific proposal with immutable original evidence, risk review, matched execution, outcome, and lessons."""
+    with contextlib.suppress(Exception):
+        journal_mgr.check_and_expire_proposals()
+
     proposal = journal.get_proposal(proposal_id)
     if not proposal:
         raise HTTPException(status_code=404, detail=f"Proposal {proposal_id} not found")
@@ -1445,9 +1477,12 @@ async def reconcile_proposals(
     """Reconcile broker executions with active approved proposals."""
     try:
         positions = mt5.get_open_positions()
-    except Exception as exc:
+    except MT5Error as exc:
         logger.info("MT5 observer positions unavailable for reconciliation (%s)", type(exc).__name__)
-        positions = []
+        raise HTTPException(status_code=503, detail={"code": "MT5_DATA_UNAVAILABLE"}) from exc
+    except Exception as exc:
+        logger.error("MT5 position reconciliation failed (%s)", type(exc).__name__)
+        raise HTTPException(status_code=500, detail="MT5 position reconciliation failed") from exc
 
     matches = journal_mgr.reconcile_broker_positions(
         positions=positions, auto_reconcile=req.auto_reconcile
@@ -1543,7 +1578,7 @@ async def get_mt5_account(
         res.update(acc)
         return res
     except MT5Error as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        raise HTTPException(status_code=503, detail={"code": "MT5_DATA_UNAVAILABLE"}) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -1558,14 +1593,8 @@ async def get_mt5_symbols(
     try:
         symbols = mt5.get_symbols(group=group)
         return {"symbols": [_safe_model_dump(s) for s in symbols], "count": len(symbols)}
-    except MT5Error:
-        # Fallback to major pairs if offline
-        return {
-            "symbols": [{"name": p.broker_symbol, "canonical_symbol": p.symbol} for p in MAJOR_PAIRS.values()],
-            "count": len(MAJOR_PAIRS),
-            "offline": True,
-            "error": {"code": "MT5_DISCONNECTED", "message": "MetaTrader 5 is not connected.", "details": {}},
-        }
+    except MT5Error as exc:
+        raise HTTPException(status_code=503, detail={"code": "MT5_DATA_UNAVAILABLE"}) from exc
 
 
 @router.get("/mt5/symbol/{symbol}")
@@ -1584,7 +1613,7 @@ async def get_mt5_symbol_info(
             pass
         return res
     except MT5Error as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail={"code": "MT5_SYMBOL_UNAVAILABLE"}) from exc
 
 
 
@@ -1598,7 +1627,7 @@ async def get_mt5_tick(
         tick = mt5.get_current_tick(symbol)
         return {"tick": _safe_model_dump(tick)}
     except MT5Error as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        raise HTTPException(status_code=503, detail={"code": "MT5_DATA_UNAVAILABLE"}) from exc
 
 
 
@@ -1611,7 +1640,7 @@ async def get_mt5_positions(
         positions = mt5.get_open_positions()
         return {"positions": [_safe_model_dump(p) for p in positions], "count": len(positions)}
     except MT5Error as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        raise HTTPException(status_code=503, detail={"code": "MT5_DATA_UNAVAILABLE"}) from exc
 
 
 
@@ -1624,7 +1653,7 @@ async def get_mt5_orders(
         orders = mt5.get_pending_orders()
         return {"orders": [_safe_model_dump(o) for o in orders], "count": len(orders)}
     except MT5Error as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        raise HTTPException(status_code=503, detail={"code": "MT5_DATA_UNAVAILABLE"}) from exc
 
 
 
@@ -1643,7 +1672,7 @@ async def get_mt5_deals(
         deals = mt5.get_deals(date_from=d_from, date_to=d_to, position=position, count=count)
         return {"deals": [_safe_model_dump(d) for d in deals], "count": len(deals)}
     except MT5Error as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        raise HTTPException(status_code=503, detail={"code": "MT5_DATA_UNAVAILABLE"}) from exc
 
 
 
@@ -2289,18 +2318,17 @@ async def estimate_backtest_costs(
         sampling_interval=sampling_interval,
         max_analysis_points=max_points,
         analyst_count=req.analyst_count,
+        provider=req.provider,
+        quick_model=req.quick_model,
+        deep_model=req.deep_model,
+        debate_rounds=3 if req.research_depth == "deep" else 1,
+        debate_enabled=req.debate_enabled,
+        memory_enabled=req.memory_enabled,
+        risk_debate_rounds=req.risk_debate_rounds,
+        workflow=req.workflow,
+        workflow_multiplier=req.variant_count if req.workflow == "ABLATION" else 1,
     )
     result = estimate.to_dict()
-    multiplier = 1
-    if req.workflow == "ABLATION":
-        multiplier = req.variant_count
-    result["workflow"] = req.workflow
-    result["multiplier"] = multiplier
-    for key in ("expected_analyses_count", "estimated_llm_calls", "estimated_tokens"):
-        if key in result:
-            result[key] *= multiplier
-    if "estimated_cost_usd" in result:
-        result["estimated_cost_usd"] = round(result["estimated_cost_usd"] * multiplier, 4)
     if structure is not None:
         result.update(structure)
     return result
@@ -2368,9 +2396,13 @@ async def run_backtest(
                 sampling_interval=req.sampling_interval,
                 max_analysis_points=req.max_analysis_points,
                 analyst_count=len(agent_cfg.analyst_selection),
+                provider=agent_cfg.provider,
+                quick_model=agent_cfg.quick_model,
+                deep_model=agent_cfg.deep_model,
+                debate_rounds=3 if agent_cfg.research_depth == "deep" else 1,
+                workflow="BACKTEST",
             ).to_dict()
-            estimate["cost_kind"] = "ESTIMATE"
-            if estimate["estimated_cost_usd"] >= 1.0 and not req.confirm_expensive:
+            if (estimate["estimated_cost_usd"] or 0) >= 1.0 and not req.confirm_expensive:
                 raise HTTPException(
                     status_code=409,
                     detail={
@@ -2669,10 +2701,14 @@ async def run_walk_forward(
             total_bars=structure["expected_analyses_count"],
             sampling_interval=1,
             analyst_count=len(req.analyst_selection or ["technical", "macro", "news"]),
+            provider=req.provider or "openai",
+            quick_model=req.quick_model or "gpt-4.1-mini",
+            deep_model=req.deep_model or "gpt-4.1",
+            debate_rounds=3 if req.research_depth == "deep" else 1,
+            workflow="WALK_FORWARD",
         ).to_dict()
         estimate.update(structure)
-        estimate["cost_kind"] = "ESTIMATE"
-        if estimate["estimated_cost_usd"] >= 1.0 and not req.confirm_expensive:
+        if (estimate["estimated_cost_usd"] or 0) >= 1.0 and not req.confirm_expensive:
             raise HTTPException(
                 status_code=409,
                 detail={
@@ -2798,17 +2834,56 @@ async def run_historical_agent_ablation(req: ForexAblationRequest):
             len(candles) // req.sampling_interval,
             req.max_analysis_points or len(candles),
         )
-        estimated_calls = sum(v.estimate_calls_per_point() * analysis_points for v in variants)
-        estimated_tokens = estimated_calls * 1200
-        estimated_cost = round((estimated_tokens / 1000.0) * 0.003, 2)
+        variant_estimates = [
+            estimate_agent_analyses(
+                total_bars=analysis_points,
+                sampling_interval=1,
+                analyst_count=len(variant.analyst_selection),
+                provider=variant.provider,
+                quick_model=variant.quick_model,
+                deep_model=variant.deep_model,
+                debate_enabled=variant.enable_debate,
+                memory_enabled=variant.enable_memory,
+                workflow="ABLATION",
+            ).to_dict()
+            for variant in variants
+        ]
+        pricing_available = all(
+            item["pricing_status"] == "AVAILABLE" for item in variant_estimates
+        )
+        estimated_cost = (
+            round(sum(item["estimated_cost_usd"] for item in variant_estimates), 6)
+            if pricing_available
+            else None
+        )
         estimate = {
+            "estimate_kind": "ESTIMATE",
+            "cost_kind": "ESTIMATE",
+            "actual_usage": None,
+            "workflow": "ABLATION",
             "variant_count": len(variants),
             "analysis_points_per_variant": analysis_points,
-            "estimated_llm_calls": estimated_calls,
-            "estimated_tokens": estimated_tokens,
+            "expected_analyses_count": analysis_points * len(variants),
+            "estimated_llm_calls": sum(item["estimated_llm_calls"] for item in variant_estimates),
+            "estimated_input_tokens": sum(item["estimated_input_tokens"] for item in variant_estimates),
+            "estimated_output_tokens": sum(item["estimated_output_tokens"] for item in variant_estimates),
+            "estimated_tokens": sum(item["estimated_tokens"] for item in variant_estimates),
+            "pricing_status": "AVAILABLE" if pricing_available else "UNAVAILABLE",
             "estimated_cost_usd": estimated_cost,
+            "estimated_cost_low_usd": (
+                round(sum(item["estimated_cost_low_usd"] for item in variant_estimates), 6)
+                if pricing_available
+                else None
+            ),
+            "estimated_cost_high_usd": (
+                round(sum(item["estimated_cost_high_usd"] for item in variant_estimates), 6)
+                if pricing_available
+                else None
+            ),
+            "variant_estimates": variant_estimates,
+            "disclosures": variant_estimates[0]["disclosures"] if variant_estimates else [],
         }
-        if estimated_cost >= 1.0 and not req.confirm_expensive:
+        if (estimated_cost or 0) >= 1.0 and not req.confirm_expensive:
             raise HTTPException(
                 status_code=409,
                 detail={
@@ -3299,6 +3374,9 @@ async def retrieve_lessons(
     session: str | None = Query(default=None),
     market_regime: str | None = Query(default=None),
     limit: int = Query(default=5, ge=1, le=20),
+    min_support: int = Query(default=1, ge=1, description="Minimum evidence count required"),
+    half_life_days: float = Query(default=30.0, gt=0.0, description="Half-life in days for recency decay"),
+    as_of: str | None = Query(default=None, description="ISO timestamp cutoff for point-in-time retrieval"),
     learning_mgr: ForexLearningManager = Depends(get_learning_manager),
 ):
     """Retrieve ranked contextually relevant heuristics for prompt injection."""
@@ -3310,6 +3388,9 @@ async def retrieve_lessons(
         session=session,
         market_regime=market_regime,
         limit=limit,
+        min_support=min_support,
+        half_life_days=half_life_days,
+        as_of=as_of,
     )
     markdown_prompt = learning_mgr.retriever.format_lessons_for_prompt(retrieved)
     return {
