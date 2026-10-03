@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
+import typer
 from typer.testing import CliRunner
 
 from cli.main import app
@@ -121,8 +123,21 @@ def test_atomic_round_trip_and_next_step(tmp_path):
 
 
 def test_cli_exposes_xm_acceptance_workflow():
-    result = CliRunner().invoke(app, ["operations", "xm-acceptance", "--help"])
+    result = CliRunner().invoke(
+        app,
+        ["operations", "xm-acceptance", "--help"],
+        env={"NO_COLOR": "1", "COLUMNS": "200"},
+    )
     assert result.exit_code == 0
-    assert "start" in result.output
-    assert "record" in result.output
-    assert "status" in result.output
+    clean_output = re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", result.output)
+    assert "start" in clean_output
+    assert "record" in clean_output
+    assert "status" in clean_output
+
+    # Directly verify registered subcommands on the underlying Typer/Click command
+    click_command = typer.main.get_command(app)
+    operations_cmd = click_command.get_command(None, "operations")
+    assert operations_cmd is not None
+    xm_cmd = operations_cmd.get_command(None, "xm-acceptance")
+    assert xm_cmd is not None
+    assert set(xm_cmd.commands.keys()).issuperset({"start", "record", "status"})

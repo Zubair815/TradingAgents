@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import re
 
+import typer
 from typer.testing import CliRunner
 
 from cli.main import app
@@ -137,6 +139,21 @@ def test_report_is_written_atomically_as_json(tmp_path):
 
 
 def test_operations_soak_command_is_exposed():
-    result = CliRunner().invoke(app, ["operations", "soak-dashboard", "--help"])
+    result = CliRunner().invoke(
+        app,
+        ["operations", "soak-dashboard", "--help"],
+        env={"NO_COLOR": "1", "COLUMNS": "200"},
+    )
     assert result.exit_code == 0
-    assert "--duration-hours" in result.output
+    clean_output = re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", result.output)
+    normalized_output = re.sub(r"\s+", " ", clean_output)
+    assert "duration-hours" in normalized_output
+
+    # Directly verify option registration on the underlying Typer/Click command
+    click_command = typer.main.get_command(app)
+    operations_cmd = click_command.get_command(None, "operations")
+    assert operations_cmd is not None
+    soak_cmd = operations_cmd.get_command(None, "soak-dashboard")
+    assert soak_cmd is not None
+    opts = [opt for param in soak_cmd.params for opt in param.opts]
+    assert "--duration-hours" in opts
