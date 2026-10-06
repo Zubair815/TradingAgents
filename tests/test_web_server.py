@@ -14,7 +14,9 @@ from web.server import AnalysisRequest, app
 
 @pytest.fixture
 def client():
-    return TestClient(app)
+    test_client = TestClient(app)
+    test_client.get("/")
+    return test_client
 
 
 # ---------------------------------------------------------------------------
@@ -53,6 +55,22 @@ class TestTickerValidation:
         bad_payload = {"ticker": "<script>alert('xss')</script>"}
         res = client.post("/api/analyze", json=bad_payload)
         assert res.status_code == 422
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"ticker": "AAPL", "date": "not-a-date"},
+            {"ticker": "AAPL", "date": "2999-01-01"},
+            {"ticker": "AAPL", "analysts": []},
+            {"ticker": "AAPL", "analysts": ["bogus"]},
+            {"ticker": "AAPL", "provider": "made-up"},
+            {"ticker": "AAPL", "max_tokens": 0},
+            {"ticker": "AAPL", "temperature": 2.1},
+        ],
+    )
+    def test_invalid_analysis_contract_rejected(self, client, payload):
+        response = client.post("/api/analyze", json=payload)
+        assert response.status_code == 422
 
 
 # ---------------------------------------------------------------------------
@@ -129,6 +147,14 @@ class TestDashboardAuth:
         with patch("web.server._run_analysis"):
             post_res = fresh_client.post("/api/analyze", json={"ticker": "AAPL"})
             assert post_res.status_code == 401
+
+    def test_analysis_results_require_authentication(self):
+        fresh_client = TestClient(app)
+        assert fresh_client.get("/api/runs").status_code == 401
+        assert fresh_client.get("/api/history").status_code == 401
+        assert fresh_client.get("/api/runs/missing").status_code == 401
+        assert fresh_client.get("/api/runs/missing/report").status_code == 401
+        assert fresh_client.get("/api/runs/missing/events").status_code == 401
 
 
 @pytest.mark.unit

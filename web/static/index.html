@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="description" content="TradingAgents — Multi-Agent AI Forex & Equities Decision-Support Dashboard">
   <title>TradingAgents — AI Trading Terminal</title>
-  <link rel="stylesheet" href="/static/styles.css">
+  <link rel="stylesheet" href="/static/styles.css?v=2.12">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📊</text></svg>">
 </head>
 <body>
@@ -79,6 +79,14 @@
             MetaTrader 5 Observer Status
           </h2>
           <div style="display:flex; align-items:center; gap:8px;">
+            <label class="sr-only" for="dashPair">Dashboard Forex pair</label>
+            <select class="form-select" id="dashPair" aria-label="Dashboard Forex pair" style="width:auto; min-width:105px; padding:6px 28px 6px 10px;">
+              <option value="EURUSD">EURUSD</option><option value="GBPUSD">GBPUSD</option>
+              <option value="USDJPY">USDJPY</option><option value="AUDUSD">AUDUSD</option>
+              <option value="USDCHF">USDCHF</option><option value="USDCAD">USDCAD</option>
+              <option value="NZDUSD">NZDUSD</option><option value="EURGBP">EURGBP</option>
+              <option value="EURJPY">EURJPY</option>
+            </select>
             <span class="badge-readonly" id="dashServerBadge">Server: --</span>
             <span class="badge-readonly" id="dashLoginBadge">Login: --</span>
             <span class="badge-readonly">Strict Read-Only</span>
@@ -89,6 +97,7 @@
             <span class="stat-label">Balance</span>
             <span class="stat-value" id="dashBalance">Unavailable</span>
             <span class="stat-sub" id="dashCurrency">Standby / Unconnected</span>
+            <span class="stat-sub" id="dashLeverage">Leverage: Unavailable</span>
           </div>
           <div class="stat-card">
             <span class="stat-label">Equity</span>
@@ -103,7 +112,7 @@
           <div class="stat-card">
             <span class="stat-label">Margin / Free</span>
             <span class="stat-value" id="dashFreeMargin" style="font-size:1.15rem;">Unavailable</span>
-            <span class="stat-sub" id="dashMargin">Margin Used: $0.00</span>
+            <span class="stat-sub" id="dashMargin">Margin Used: Unavailable</span>
           </div>
         </div>
       </div>
@@ -142,7 +151,7 @@
           <div class="card-header">
             <h2 class="card-title">
               <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
-              Active Decision Proposals
+              Recent Decision Proposals
             </h2>
             <button class="btn-secondary btn-sm" id="btnDashRefreshProposals">🔄 Refresh</button>
           </div>
@@ -156,20 +165,20 @@
 
           <div style="margin-top: 1.25rem; border-top: 1px solid var(--border); padding-top: 1rem;" id="dashTodayResultSection">
             <h3 style="font-size: 0.85rem; font-weight: 600; color: var(--text-secondary); margin-bottom: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em;">
-              Today's Realized Result
+              Today's Realized Result (UTC)
             </h3>
             <div style="display: flex; gap: 1.5rem; align-items: center; background: var(--bg-primary); padding: 10px 14px; border-radius: var(--radius-sm); border: 1px solid var(--border);">
               <div>
                 <span style="font-size:0.75rem; color:var(--text-muted); display:block;">Closed Trades</span>
-                <span id="dashTodayTradesCount" style="font-family:var(--font-mono); font-weight:700; color:var(--text-bright);">0</span>
+                <span id="dashTodayTradesCount" style="font-family:var(--font-mono); font-weight:700; color:var(--text-bright);">Unavailable</span>
               </div>
               <div>
                 <span style="font-size:0.75rem; color:var(--text-muted); display:block;">Today's Net P&amp;L</span>
-                <span id="dashTodayPnl" style="font-family:var(--font-mono); font-weight:700; color:var(--text-bright);">$0.00</span>
+                <span id="dashTodayPnl" style="font-family:var(--font-mono); font-weight:700; color:var(--text-bright);">Unavailable</span>
               </div>
               <div>
                 <span style="font-size:0.75rem; color:var(--text-muted); display:block;">Today's Total R</span>
-                <span id="dashTodayR" style="font-family:var(--font-mono); font-weight:700; color:var(--cyan);">0.0R</span>
+                <span id="dashTodayR" style="font-family:var(--font-mono); font-weight:700; color:var(--cyan);">Unavailable</span>
               </div>
             </div>
           </div>
@@ -247,6 +256,7 @@
           </div>
         </div>
       </div>
+      <p class="stat-sub" id="dashLastUpdated" role="status" style="text-align:right; margin-top:0.75rem;">Dashboard not refreshed yet.</p>
     </div>
 
     <!-- ================================================================= -->
@@ -266,10 +276,10 @@
 
           <!-- Asset Class Toggle -->
           <div class="asset-mode-toggle">
-            <button type="button" class="mode-btn active" id="modeForex" data-mode="forex">
+            <button type="button" class="mode-btn active" id="modeForex" data-mode="forex" aria-pressed="true">
               💱 Forex (Multi-Agent)
             </button>
-            <button type="button" class="mode-btn" id="modeEquities" data-mode="equities">
+            <button type="button" class="mode-btn" id="modeEquities" data-mode="equities" aria-pressed="false">
               📈 Equities &amp; Crypto
             </button>
           </div>
@@ -311,7 +321,7 @@
                   <select class="form-select" id="forexResearchDepth">
                     <option value="quick">Quick (Screening)</option>
                     <option value="deep" selected>Deep (Standard)</option>
-                    <option value="comprehensive">Comprehensive</option>
+                    <option value="comprehensive">Comprehensive (Extended)</option>
                   </select>
                 </div>
               </div>
@@ -344,13 +354,32 @@
               </div>
 
               <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; margin-bottom: 1rem;">
-                <div class="form-group">
+                <div class="form-group" id="manualBalanceGroup" style="display:none;">
                   <label class="form-label" for="accountBalance">Balance ($)</label>
                   <input type="number" class="form-input" id="accountBalance" value="100000" min="100" step="100">
                 </div>
                 <div class="form-group">
                   <label class="form-label" for="riskPercent">Risk Limit (%)</label>
-                  <input type="number" class="form-input" id="riskPercent" value="1.0" min="0.1" max="5.0" step="0.1">
+                  <input type="number" class="form-input" id="riskPercent" value="1.0" min="0.1" max="5.0" step="0.1" required>
+                </div>
+              </div>
+
+              <div id="manualAccountFields" style="display:none; grid-template-columns:1fr 1fr; gap:0.75rem; margin-bottom:1rem;">
+                <div class="form-group">
+                  <label class="form-label" for="accountEquity">Equity ($)</label>
+                  <input type="number" class="form-input" id="accountEquity" min="0.01" step="0.01" placeholder="Required">
+                </div>
+                <div class="form-group">
+                  <label class="form-label" for="accountFreeMargin">Free Margin ($)</label>
+                  <input type="number" class="form-input" id="accountFreeMargin" min="0" step="0.01" placeholder="Required">
+                </div>
+                <div class="form-group">
+                  <label class="form-label" for="accountLeverage">Leverage</label>
+                  <input type="number" class="form-input" id="accountLeverage" min="1" step="1" placeholder="Required">
+                </div>
+                <div class="form-group">
+                  <label class="form-label" for="accountCurrency">Account Currency</label>
+                  <input type="text" class="form-input" id="accountCurrency" maxlength="3" pattern="[A-Za-z]{3}" placeholder="e.g. USD">
                 </div>
               </div>
 
@@ -358,11 +387,11 @@
               <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; margin-bottom: 1rem;">
                 <div class="form-group">
                   <label class="form-label" for="forexMinRR">Min R:R Ratio</label>
-                  <input type="number" class="form-input" id="forexMinRR" value="1.5" min="1.0" max="10.0" step="0.5">
+                  <input type="number" class="form-input" id="forexMinRR" value="1.5" min="1.0" max="10.0" step="0.5" required>
                 </div>
                 <div class="form-group">
                   <label class="form-label" for="forexMaxSpread">Max Spread (pips)</label>
-                  <input type="number" class="form-input" id="forexMaxSpread" value="2.5" min="0.5" max="10.0" step="0.5">
+                  <input type="number" class="form-input" id="forexMaxSpread" value="2.5" min="0.5" max="10.0" step="0.5" required>
                 </div>
               </div>
 
@@ -376,19 +405,19 @@
               <div class="form-group" style="margin-bottom: 1rem;">
                 <label class="form-label">Forex Analyst Pipeline</label>
                 <div class="analyst-toggles" id="forexAnalystToggles">
-                  <button type="button" class="analyst-toggle active" data-fxanalyst="technical" title="Forex Technical Analyst">
+                  <button type="button" class="analyst-toggle active" data-fxanalyst="technical" aria-pressed="true" title="Forex Technical Analyst">
                     <span class="dot"></span> Technical
                   </button>
-                  <button type="button" class="analyst-toggle active" data-fxanalyst="macro" title="Forex Macro Analyst">
+                  <button type="button" class="analyst-toggle active" data-fxanalyst="macro" aria-pressed="true" title="Forex Macro Analyst">
                     <span class="dot"></span> Macro
                   </button>
-                  <button type="button" class="analyst-toggle active" data-fxanalyst="news" title="Forex News Analyst">
+                  <button type="button" class="analyst-toggle active" data-fxanalyst="news" aria-pressed="true" title="Forex News Analyst">
                     <span class="dot"></span> News
                   </button>
-                  <button type="button" class="analyst-toggle active mandatory-stage" data-fxanalyst="debate" disabled title="Mandatory Bull/Bear Consensus Stage">
+                  <button type="button" class="analyst-toggle active mandatory-stage" data-fxanalyst="debate" aria-pressed="true" disabled title="Mandatory Bull/Bear Consensus Stage">
                     <span class="dot"></span> Debate (Mandatory)
                   </button>
-                  <button type="button" class="analyst-toggle active mandatory-stage" data-fxanalyst="risk" disabled title="Mandatory Deterministic Risk Engine">
+                  <button type="button" class="analyst-toggle active mandatory-stage" data-fxanalyst="risk" aria-pressed="true" disabled title="Mandatory Deterministic Risk Engine">
                     <span class="dot"></span> Risk Engine (Mandatory)
                   </button>
                 </div>
@@ -399,22 +428,22 @@
             <div id="equitiesControls" style="display: none;">
               <div class="form-group" style="margin-bottom: 1rem;">
                 <label class="form-label" for="ticker">Ticker Symbol</label>
-                <input type="text" class="form-input" id="ticker" value="NVDA" placeholder="e.g. NVDA, AAPL, TSLA" spellcheck="false">
+                <input type="text" class="form-input" id="ticker" value="NVDA" maxlength="34" pattern="[A-Za-z0-9._^=+\-]+" placeholder="e.g. NVDA, AAPL, TSLA" spellcheck="false" required>
               </div>
 
               <div class="form-group" style="margin-bottom: 1rem;">
                 <label class="form-label">Active Stock Analysts</label>
                 <div class="analyst-toggles" id="analystToggles">
-                  <button type="button" class="analyst-toggle active" data-analyst="market">
+                  <button type="button" class="analyst-toggle active" data-analyst="market" aria-pressed="true">
                     <span class="dot"></span> Market
                   </button>
-                  <button type="button" class="analyst-toggle active" data-analyst="social">
+                  <button type="button" class="analyst-toggle active" data-analyst="social" aria-pressed="true">
                     <span class="dot"></span> Sentiment
                   </button>
-                  <button type="button" class="analyst-toggle active" data-analyst="news">
+                  <button type="button" class="analyst-toggle active" data-analyst="news" aria-pressed="true">
                     <span class="dot"></span> News
                   </button>
-                  <button type="button" class="analyst-toggle active" data-analyst="fundamentals">
+                  <button type="button" class="analyst-toggle active" data-analyst="fundamentals" aria-pressed="true">
                     <span class="dot"></span> Fundamentals
                   </button>
                 </div>
@@ -423,7 +452,7 @@
 
             <div class="form-group" style="margin-bottom: 1rem;">
               <label class="form-label" for="tradeDate">Analysis Date</label>
-              <input type="date" class="form-input" id="tradeDate">
+              <input type="date" class="form-input" id="tradeDate" required>
             </div>
 
             <div class="form-group" id="apiKeyGroup" style="margin-bottom: 1rem; display: none;">
@@ -501,6 +530,17 @@
           </div>
         </div>
       </div>
+
+      <div class="card" style="margin-top: 1.5rem;" id="analysisHistoryCard">
+        <div class="card-header">
+          <h2 class="card-title">Analysis History</h2>
+        </div>
+        <div class="data-table-container" id="historyContent" role="region" aria-label="Saved analysis history" tabindex="0">
+          <div class="empty-state">
+            <div class="empty-state-title">Loading Analysis History…</div>
+          </div>
+        </div>
+      </div>
     </div>
 
     <!-- ================================================================= -->
@@ -516,22 +556,10 @@
           <div class="toolbar-group">
             <select class="form-select" id="proposalsPairFilter" style="width: 120px; padding: 6px 10px; font-size: 0.8rem;">
               <option value="">All Pairs</option>
-              <option value="EURUSD">EURUSD</option>
-              <option value="GBPUSD">GBPUSD</option>
-              <option value="USDJPY">USDJPY</option>
-              <option value="AUDUSD">AUDUSD</option>
-              <option value="USDCHF">USDCHF</option>
             </select>
             <input type="date" class="form-input" id="proposalsDateFilter" style="width: 135px; padding: 5px 8px; font-size: 0.8rem;" title="Filter by Created Date">
             <select class="form-select" id="proposalsStatusFilter" style="width: 130px; padding: 6px 10px; font-size: 0.8rem;">
               <option value="">All Statuses</option>
-              <option value="PENDING">PENDING</option>
-              <option value="APPROVED">APPROVED</option>
-              <option value="REJECTED">REJECTED</option>
-              <option value="EXECUTED">EXECUTED</option>
-              <option value="SKIPPED">SKIPPED</option>
-              <option value="EXPIRED">EXPIRED</option>
-              <option value="CANCELLED">CANCELLED</option>
             </select>
             <select class="form-select" id="proposalsActionFilter" style="width: 110px; padding: 6px 10px; font-size: 0.8rem;">
               <option value="">All Actions</option>
@@ -541,29 +569,27 @@
             </select>
             <select class="form-select" id="proposalsSetupFilter" style="width: 140px; padding: 6px 10px; font-size: 0.8rem;">
               <option value="">All Setups</option>
-              <option value="BREAKOUT">BREAKOUT</option>
-              <option value="TREND_PULLBACK">TREND_PULLBACK</option>
-              <option value="RANGE_BOUND">RANGE_BOUND</option>
-              <option value="LIQUIDITY_SWEEP">LIQUIDITY_SWEEP</option>
-              <option value="NEWS_MOMENTUM">NEWS_MOMENTUM</option>
             </select>
             <select class="form-select" id="proposalsTimeframeFilter" style="width: 110px; padding: 6px 10px; font-size: 0.8rem;">
               <option value="">All TFs</option>
-              <option value="M5">M5</option>
-              <option value="M15">M15</option>
-              <option value="H1">H1</option>
-              <option value="H4">H4</option>
-              <option value="D1">D1</option>
             </select>
+            <button class="btn-secondary btn-sm" id="btnClearProposalFilters" type="button">Clear</button>
             <button class="btn-secondary btn-sm" id="btnRefreshProposals">🔄 Refresh</button>
           </div>
         </div>
-        <div class="data-table-container" id="proposalsTableContainer">
+        <div id="proposalsResultSummary" class="stat-sub" role="status" aria-live="polite"></div>
+        <div class="data-table-container proposals-table-scroll" id="proposalsTableContainer"
+             tabindex="0" role="region" aria-label="Trade proposals table">
           <div class="empty-state" style="padding: 2.5rem;">
             <div class="empty-state-icon">📋</div>
             <div class="empty-state-title">No Proposals Recorded</div>
             <div class="empty-state-desc">Proposals generated by the Forex Trader and evaluated by the Risk Engine appear here.</div>
           </div>
+        </div>
+        <div class="journal-pagination" aria-label="Proposal pages">
+          <button class="btn-secondary btn-sm" id="btnProposalPrevious" type="button">Previous</button>
+          <span id="proposalPageStatus" class="stat-sub">Page 1</span>
+          <button class="btn-secondary btn-sm" id="btnProposalNext" type="button">Next</button>
         </div>
       </div>
     </div>
@@ -577,8 +603,7 @@
         <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color: var(--cyan); flex-shrink: 0;"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
         <div style="flex: 1; font-size: 0.82rem; line-height: 1.5;">
           <strong style="color: var(--cyan); text-transform: uppercase; letter-spacing: 0.04em;">Read-Only Observer Active:</strong>
-          MetaTrader 5 is integrated exclusively as a telemetry and market surveillance observer. Automated live execution is strictly disabled.
-          Live ticks, open positions, pending orders, and history are observed passively without live trade dispatch capabilities. Passwords are never saved or exposed.
+          MetaTrader 5  is only observer
         </div>
         <span class="badge-readonly" style="font-size: 0.72rem; padding: 4px 10px;">READ-ONLY OBSERVER</span>
       </div>
@@ -676,7 +701,7 @@
           </div>
           <div class="stat-card">
             <span class="stat-label">Currency</span>
-            <span class="stat-value" id="mt5CurrencyVal">USD</span>
+            <span class="stat-value" id="mt5CurrencyVal">Unavailable</span>
             <span class="stat-sub">Base deposit currency</span>
           </div>
         </div>
@@ -734,8 +759,8 @@
         </div>
       </div>
 
-      <!-- 5. Pending Orders & Recent Deals Grid -->
-      <div class="dashboard-grid">
+      <!-- 5. Pending Orders & Recent Deals -->
+      <div class="dashboard-grid mt5-history-grid">
         <div class="card">
           <div class="card-header">
             <h2 class="card-title">
@@ -743,7 +768,7 @@
               Pending Orders
             </h2>
           </div>
-          <div id="mt5OrdersContainer">
+          <div class="mt5-table-scroll mt5-orders-table" id="mt5OrdersContainer">
             <div class="empty-state" style="padding: 2rem;">
               <div class="empty-state-icon">⏳</div>
               <div class="empty-state-title">No Pending Orders</div>
@@ -759,7 +784,7 @@
               Recent Executed Deals
             </h2>
           </div>
-          <div id="mt5DealsContainer">
+          <div class="mt5-table-scroll mt5-deals-table" id="mt5DealsContainer" role="region" aria-label="Recent executed deals" tabindex="0">
             <div class="empty-state" style="padding: 2rem;">
               <div class="empty-state-icon">📜</div>
               <div class="empty-state-title">No Recent Deals</div>
@@ -786,12 +811,30 @@
             </button>
           </div>
         </div>
+        <div class="journal-filter-bar" aria-label="Journal filters">
+          <label class="form-label" for="journalPairFilter">Pair</label>
+          <input class="form-input" id="journalPairFilter" maxlength="16" placeholder="All pairs" style="width:130px;">
+          <label class="form-label" for="journalStatusFilter">Status</label>
+          <select class="form-select" id="journalStatusFilter" style="width:130px;"><option value="">All</option><option value="OPEN">Open</option><option value="CLOSED">Closed</option><option value="CANCELLED">Cancelled</option></select>
+          <label class="form-label" for="journalStartDate">From</label>
+          <input class="form-input" id="journalStartDate" type="date" style="width:150px;">
+          <label class="form-label" for="journalEndDate">To</label>
+          <input class="form-input" id="journalEndDate" type="date" style="width:150px;">
+          <button type="button" class="btn-secondary btn-sm" id="btnApplyJournalFilters">Apply</button>
+          <button type="button" class="btn-secondary btn-sm" id="btnClearJournalFilters">Clear</button>
+        </div>
+        <p class="stat-sub" id="journalResultSummary" aria-live="polite"></p>
         <div class="data-table-container journal-scroll" id="journalTableContainer" tabindex="0" role="region" aria-label="Forex trade journal">
           <div class="empty-state" style="padding: 2rem;">
             <div class="empty-state-icon">📖</div>
             <div class="empty-state-title">Journal Empty</div>
             <div class="empty-state-desc">Proposals and executed trades will be recorded here with audit timeline trails.</div>
           </div>
+        </div>
+        <div class="journal-pagination" style="display:flex;justify-content:flex-end;gap:8px;align-items:center;margin-top:12px;">
+          <button type="button" class="btn-secondary btn-sm" id="btnJournalPrevious">Previous</button>
+          <span class="stat-sub" id="journalPageStatus">Page 1</span>
+          <button type="button" class="btn-secondary btn-sm" id="btnJournalNext">Next</button>
         </div>
       </div>
     </div>
@@ -807,11 +850,14 @@
             <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
             Quantitative Performance Metrics
           </h2>
-          <div style="display:flex; gap:8px; align-items:center;">
+          <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; justify-content:flex-end;">
+            <label class="form-label" for="performanceInitialCapital" style="margin:0;">Analytical capital ($)</label>
+            <input class="form-input" id="performanceInitialCapital" type="number" min="1" step="1000" value="100000" required style="width:140px;" aria-describedby="performanceStatus">
             <button class="btn-secondary btn-sm" id="btnRefreshAnalytics">🔄 Refresh Analytics</button>
-            <button class="btn-secondary btn-sm" id="btnRunCalibration">🧭 Run Calibration</button>
+            <button class="btn-secondary btn-sm" id="btnRunCalibration">🧭 Refresh Calibration</button>
           </div>
         </div>
+        <p class="stat-sub" id="performanceStatus" aria-live="polite">Equity and drawdown use the analytical capital above; no account balance is changed.</p>
 
         <div class="warning-banner" id="sampleSizeWarning">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
@@ -870,10 +916,10 @@
           </div>
 
           <div class="backtest-mode-toggle">
-            <button type="button" class="mode-btn active" id="btnModeBacktestReal" data-btmode="real">
+            <button type="button" class="mode-btn active" id="btnModeBacktestReal" data-btmode="real" aria-pressed="true">
               🔬 Historical Agent Backtest
             </button>
-            <button type="button" class="mode-btn" id="btnModeBacktestDemo" data-btmode="demo">
+            <button type="button" class="mode-btn" id="btnModeBacktestDemo" data-btmode="demo" aria-pressed="false">
               🧪 Demo / Synthetic
             </button>
           </div>
@@ -896,11 +942,11 @@
             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; margin-bottom: 1rem;">
               <div class="form-group">
                 <label class="form-label" for="btStartDate">Start Date</label>
-                <input type="date" class="form-input" id="btStartDate">
+                <input type="date" class="form-input" id="btStartDate" required>
               </div>
               <div class="form-group">
                 <label class="form-label" for="btEndDate">End Date</label>
-                <input type="date" class="form-input" id="btEndDate">
+                <input type="date" class="form-input" id="btEndDate" required>
               </div>
             </div>
 
@@ -922,18 +968,18 @@
               </div>
               <div class="form-group">
                 <label class="form-label" for="btCapital">Initial Capital ($)</label>
-                <input type="number" class="form-input" id="btCapital" value="100000" min="1000" step="5000">
+                <input type="number" class="form-input" id="btCapital" value="100000" min="1000" step="1000" required>
               </div>
             </div>
 
             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; margin-bottom: 1rem;">
               <div class="form-group">
                 <label class="form-label" for="btMaxPoints">Max Analysis Points</label>
-                <input type="number" class="form-input" id="btMaxPoints" value="10" min="1" max="100" step="1">
+                <input type="number" class="form-input" id="btMaxPoints" value="10" min="1" max="100" step="1" required>
               </div>
               <div class="form-group">
                 <label class="form-label" for="btSpread">Spread (Pips)</label>
-                <input type="number" class="form-input" id="btSpread" value="1.5" min="0" step="0.1">
+                <input type="number" class="form-input" id="btSpread" value="1.5" min="0" step="0.1" required>
               </div>
             </div>
 
@@ -945,13 +991,13 @@
         </div>
 
         <!-- Backtest Results / Runs List -->
-        <div class="card">
-          <div class="card-header">
+        <div class="card backtest-results-card">
+          <div class="card-header backtest-results-header">
             <h2 class="card-title">
               <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
               Backtest Runs &amp; Validations
             </h2>
-            <div style="display:flex; gap:8px; align-items:center;">
+            <div class="backtest-actions">
               <button class="btn-secondary btn-sm" id="btnRefreshBacktests">🔄 Refresh</button>
               <button class="btn-secondary btn-sm" id="btnRunWalkForward">🧭 Run Walk-Forward</button>
               <button class="btn-secondary btn-sm" id="btnRunAblation">🧩 Historical Agent Ablation</button>
@@ -964,6 +1010,7 @@
               <div class="empty-state-desc">Historical agent backtests and walk-forward evaluations appear here.</div>
             </div>
           </div>
+          <p class="stat-sub backtest-retention-note">Temporary history: up to 100 runs are retained for seven days and cleared when the dashboard server restarts. Open a run to export its JSON evidence.</p>
         </div>
       </div>
     </div>
@@ -973,27 +1020,90 @@
     <!-- ================================================================= -->
     <div class="view" id="view-learning">
       <div class="card">
-        <div class="card-header">
-          <h2 class="card-title">
+        <div class="card-header" style="flex-wrap: wrap; gap: 12px;">
+          <h2 class="card-title" style="margin: 0;">
             <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
             Institutional Heuristics &amp; Reflection Lessons Store
           </h2>
-          <div class="toolbar-group">
-            <select class="form-select" id="lessonsPairFilter" style="width: 140px; padding: 6px 10px; font-size: 0.8rem;">
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <button class="btn-secondary btn-sm" id="btnRefreshLessons">🔄 Refresh Lessons</button>
+          </div>
+        </div>
+
+        <!-- Dedicated Filter Bar -->
+        <div class="toolbar-group" style="display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; padding: 12px 16px; background: rgba(255,255,255,0.02); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 1.25rem;">
+          <div style="display: flex; flex-direction: column; gap: 4px;">
+            <label for="lessonsPairFilter" style="font-size: 0.68rem; text-transform: uppercase; color: var(--text-muted); letter-spacing: 0.05em; font-weight: 600;">Pair</label>
+            <select class="form-select" id="lessonsPairFilter" style="min-width: 120px; padding: 6px 10px; font-size: 0.8rem;">
               <option value="">All Pairs</option>
               <option value="EURUSD">EURUSD</option>
               <option value="GBPUSD">GBPUSD</option>
               <option value="USDJPY">USDJPY</option>
+              <option value="USDCHF">USDCHF</option>
               <option value="AUDUSD">AUDUSD</option>
+              <option value="USDCAD">USDCAD</option>
+              <option value="NZDUSD">NZDUSD</option>
+              <option value="EURGBP">EURGBP</option>
+              <option value="EURJPY">EURJPY</option>
+              <option value="GBPJPY">GBPJPY</option>
+              <option value="XAUUSD">XAUUSD</option>
             </select>
-            <input class="form-input" id="lessonsSetupFilter" placeholder="Setup" style="width:120px; padding:6px 10px;">
-            <select class="form-select" id="lessonsDirectionFilter" style="width:115px; padding:6px 10px;"><option value="">All directions</option><option>LONG</option><option>SHORT</option></select>
-            <input class="form-input" id="lessonsTimeframeFilter" placeholder="Timeframe" style="width:105px; padding:6px 10px;">
-            <select class="form-select" id="lessonsEvidenceFilter" style="width:145px; padding:6px 10px;"><option value="">Any evidence</option><option value="2">2+ observations</option><option value="3">3+ observations</option><option value="6">6+ observations</option></select>
-            <select class="form-select" id="lessonsStatusFilter" style="width:115px; padding:6px 10px;"><option value="true">Active</option><option value="">All status</option><option value="false">Retired</option></select>
-            <button class="btn-secondary btn-sm" id="btnRefreshLessons">🔄 Refresh</button>
           </div>
+          <div style="display: flex; flex-direction: column; gap: 4px;">
+            <label for="lessonsSetupFilter" style="font-size: 0.68rem; text-transform: uppercase; color: var(--text-muted); letter-spacing: 0.05em; font-weight: 600;">Setup Type</label>
+            <select class="form-select" id="lessonsSetupFilter" style="min-width: 180px; padding: 6px 10px; font-size: 0.8rem;">
+              <option value="">All Setups</option>
+              <option value="TREND_CONTINUATION">Trend Continuation</option>
+              <option value="PULLBACK">Pullback / Retest</option>
+              <option value="BREAKOUT">Breakout</option>
+              <option value="REVERSAL">Reversal</option>
+              <option value="RANGE_BOUND">Range Bound</option>
+              <option value="NEWS_MOMENTUM">News Momentum</option>
+              <option value="NEWS_FADE">News Fade</option>
+            </select>
+          </div>
+          <div style="display: flex; flex-direction: column; gap: 4px;">
+            <label for="lessonsDirectionFilter" style="font-size: 0.68rem; text-transform: uppercase; color: var(--text-muted); letter-spacing: 0.05em; font-weight: 600;">Direction</label>
+            <select class="form-select" id="lessonsDirectionFilter" style="min-width: 125px; padding: 6px 10px; font-size: 0.8rem;">
+              <option value="">All directions</option>
+              <option value="LONG">LONG</option>
+              <option value="SHORT">SHORT</option>
+            </select>
+          </div>
+          <div style="display: flex; flex-direction: column; gap: 4px;">
+            <label for="lessonsTimeframeFilter" style="font-size: 0.68rem; text-transform: uppercase; color: var(--text-muted); letter-spacing: 0.05em; font-weight: 600;">Timeframe</label>
+            <select class="form-select" id="lessonsTimeframeFilter" style="min-width: 140px; padding: 6px 10px; font-size: 0.8rem;">
+              <option value="">All Timeframes</option>
+              <option value="M1">M1 (1 Min)</option>
+              <option value="M5">M5 (5 Min)</option>
+              <option value="M15">M15 (15 Min)</option>
+              <option value="M30">M30 (30 Min)</option>
+              <option value="H1">H1 (1 Hour)</option>
+              <option value="H4">H4 (4 Hours)</option>
+              <option value="D1">D1 (Daily)</option>
+              <option value="W1">W1 (Weekly)</option>
+            </select>
+          </div>
+          <div style="display: flex; flex-direction: column; gap: 4px;">
+            <label for="lessonsEvidenceFilter" style="font-size: 0.68rem; text-transform: uppercase; color: var(--text-muted); letter-spacing: 0.05em; font-weight: 600;">Evidence Strength</label>
+            <select class="form-select" id="lessonsEvidenceFilter" style="min-width: 155px; padding: 6px 10px; font-size: 0.8rem;">
+              <option value="">Any evidence</option>
+              <option value="2">2+ observations (Early)</option>
+              <option value="3">3+ observations (Moderate)</option>
+              <option value="6">6+ observations (Strong)</option>
+            </select>
+          </div>
+          <div style="display: flex; flex-direction: column; gap: 4px;">
+            <label for="lessonsStatusFilter" style="font-size: 0.68rem; text-transform: uppercase; color: var(--text-muted); letter-spacing: 0.05em; font-weight: 600;">Status</label>
+            <select class="form-select" id="lessonsStatusFilter" style="min-width: 140px; padding: 6px 10px; font-size: 0.8rem;">
+              <option value="true">Active Only</option>
+              <option value="">All Statuses</option>
+              <option value="false">Retired Only</option>
+            </select>
+          </div>
+          <button class="btn-secondary btn-sm" id="btnClearLessonFilters" type="button">Clear Filters</button>
         </div>
+        <div id="lessonsResultSummary" class="stat-sub" role="status" aria-live="polite"></div>
         <div id="lessonsContainer" style="padding: 1rem 0;">
           <div class="empty-state">
             <div class="empty-state-icon">🧠</div>
@@ -1009,7 +1119,7 @@
     <!-- ================================================================= -->
     <div class="view" id="view-settings">
       <div class="settings-grid">
-        <!-- LLM Runtime Settings -->
+        <!-- 1. LLM Runtime Settings -->
         <div class="settings-card">
           <h2 class="card-title">
             <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
@@ -1022,10 +1132,20 @@
           <div class="settings-field">
             <label for="settingQuickModelInput">Quick Think Model</label>
             <select id="settingQuickModelInput"></select>
+            <input id="settingQuickCustomModel" type="text" placeholder="Enter custom model ID (e.g. openrouter/free)" style="display:none; margin-top:6px;" />
           </div>
           <div class="settings-field">
             <label for="settingDeepModelInput">Deep Think Model</label>
             <select id="settingDeepModelInput"></select>
+            <input id="settingDeepCustomModel" type="text" placeholder="Enter custom model ID (e.g. qwen/qwen3.8-27b:free)" style="display:none; margin-top:6px;" />
+          </div>
+          <div class="settings-field">
+            <label for="settingMaxTokens">Max Output Tokens</label>
+            <input id="settingMaxTokens" type="number" min="512" max="100000" step="1" placeholder="Leave empty for provider default" />
+          </div>
+          <div class="settings-field">
+            <label for="settingTemperature">Temperature</label>
+            <input id="settingTemperature" type="number" min="0" max="2" step="0.1" placeholder="Leave empty for provider default" />
           </div>
           <div class="settings-field">
             <label>API Key Status</label>
@@ -1036,12 +1156,13 @@
             <input id="settingBackendUrl" type="url" placeholder="https://localhost:8000/v1" />
           </div>
           <div class="settings-actions">
-            <button class="btn-primary" id="btnSaveSettings" type="button">Save Changes</button>
-            <button class="btn-secondary" id="btnResetSettings" type="button">Reset Defaults</button>
+            <button class="btn-primary" id="btnSaveLlmSettings" type="button">Save LLM Config</button>
+            <button class="btn-secondary" id="btnResetLlmSettings" type="button">Reset LLM</button>
           </div>
-          <div id="settingsStatus" class="settings-status" aria-live="polite"></div>
+          <div id="settingsLlmStatus" class="settings-status" aria-live="polite"></div>
         </div>
 
+        <!-- 2. Forex Execution Defaults -->
         <div class="settings-card">
           <h2 class="card-title">
             <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
@@ -1049,45 +1170,126 @@
           </h2>
           <div class="settings-field">
             <label for="settingPair">Default Currency Pair</label>
-            <input id="settingPair" type="text" value="EURUSD" />
+            <select id="settingPair">
+              <optgroup label="Major pairs">
+                <option value="EURUSD" selected>EURUSD — Euro / US Dollar</option>
+                <option value="GBPUSD">GBPUSD — British Pound / US Dollar</option>
+                <option value="USDJPY">USDJPY — US Dollar / Japanese Yen</option>
+                <option value="USDCHF">USDCHF — US Dollar / Swiss Franc</option>
+                <option value="AUDUSD">AUDUSD — Australian Dollar / US Dollar</option>
+                <option value="USDCAD">USDCAD — US Dollar / Canadian Dollar</option>
+                <option value="NZDUSD">NZDUSD — New Zealand Dollar / US Dollar</option>
+              </optgroup>
+              <optgroup label="Minor pairs">
+                <option value="EURGBP">EURGBP — Euro / British Pound</option>
+                <option value="EURJPY">EURJPY — Euro / Japanese Yen</option>
+                <option value="EURCHF">EURCHF — Euro / Swiss Franc</option>
+                <option value="EURAUD">EURAUD — Euro / Australian Dollar</option>
+                <option value="EURCAD">EURCAD — Euro / Canadian Dollar</option>
+                <option value="EURNZD">EURNZD — Euro / New Zealand Dollar</option>
+                <option value="GBPJPY">GBPJPY — British Pound / Japanese Yen</option>
+                <option value="GBPCHF">GBPCHF — British Pound / Swiss Franc</option>
+                <option value="GBPAUD">GBPAUD — British Pound / Australian Dollar</option>
+                <option value="GBPCAD">GBPCAD — British Pound / Canadian Dollar</option>
+                <option value="GBPNZD">GBPNZD — British Pound / New Zealand Dollar</option>
+                <option value="AUDJPY">AUDJPY — Australian Dollar / Japanese Yen</option>
+                <option value="AUDCHF">AUDCHF — Australian Dollar / Swiss Franc</option>
+                <option value="AUDCAD">AUDCAD — Australian Dollar / Canadian Dollar</option>
+                <option value="AUDNZD">AUDNZD — Australian Dollar / New Zealand Dollar</option>
+                <option value="CADJPY">CADJPY — Canadian Dollar / Japanese Yen</option>
+                <option value="CADCHF">CADCHF — Canadian Dollar / Swiss Franc</option>
+                <option value="CHFJPY">CHFJPY — Swiss Franc / Japanese Yen</option>
+                <option value="NZDJPY">NZDJPY — New Zealand Dollar / Japanese Yen</option>
+                <option value="NZDCHF">NZDCHF — New Zealand Dollar / Swiss Franc</option>
+                <option value="NZDCAD">NZDCAD — New Zealand Dollar / Canadian Dollar</option>
+              </optgroup>
+              <optgroup label="Exotic pairs">
+                <option value="USDZAR">USDZAR — US Dollar / South African Rand</option>
+                <option value="USDMXN">USDMXN — US Dollar / Mexican Peso</option>
+                <option value="USDTRY">USDTRY — US Dollar / Turkish Lira</option>
+                <option value="USDSEK">USDSEK — US Dollar / Swedish Krona</option>
+                <option value="USDNOK">USDNOK — US Dollar / Norwegian Krone</option>
+                <option value="USDDKK">USDDKK — US Dollar / Danish Krone</option>
+                <option value="USDPLN">USDPLN — US Dollar / Polish Zloty</option>
+                <option value="USDSGD">USDSGD — US Dollar / Singapore Dollar</option>
+                <option value="USDHKD">USDHKD — US Dollar / Hong Kong Dollar</option>
+                <option value="USDCNH">USDCNH — US Dollar / Chinese Yuan</option>
+                <option value="EURTRY">EURTRY — Euro / Turkish Lira</option>
+                <option value="GBPTRY">GBPTRY — British Pound / Turkish Lira</option>
+                <option value="EURHUF">EURHUF — Euro / Hungarian Forint</option>
+                <option value="EURSEK">EURSEK — Euro / Swedish Krona</option>
+                <option value="EURNOK">EURNOK — Euro / Norwegian Krone</option>
+              </optgroup>
+            </select>
           </div>
           <div class="settings-field">
             <label for="settingTimeframe">Execution Timeframe</label>
-            <select id="settingTimeframe"><option>H1</option><option>M15</option><option>H4</option><option>D1</option></select>
+            <select id="settingTimeframe">
+              <option value="M1">M1 (1-Minute Scalp)</option>
+              <option value="M5">M5 (5-Minute Intraday)</option>
+              <option value="M15">M15 (15-Minute Session)</option>
+              <option value="M30">M30 (30-Minute Breakout)</option>
+              <option value="H1" selected>H1 (1-Hour Swing Retest)</option>
+              <option value="H4">H4 (4-Hour Structural Trend)</option>
+              <option value="D1">D1 (Daily Macro Regime)</option>
+              <option value="W1">W1 (Weekly Institutional Bias)</option>
+            </select>
           </div>
           <div class="settings-field">
-            <label for="settingContextTimeframes">Context Timeframes</label>
-            <input id="settingContextTimeframes" type="text" value="M15, H4, D1" />
+            <label>Context Timeframes (Multi-Timeframe Trend Bias)</label>
+            <div class="analyst-toggles" id="settingContextToggles" style="margin-top: 2px;">
+              <button type="button" class="analyst-toggle" data-setting-ctx-tf="M15" aria-pressed="false" title="15-Minute Tactical Pullback"><span class="dot"></span> M15</button>
+              <button type="button" class="analyst-toggle" data-setting-ctx-tf="M30" aria-pressed="false" title="30-Minute Momentum"><span class="dot"></span> M30</button>
+              <button type="button" class="analyst-toggle active" data-setting-ctx-tf="H4" aria-pressed="true" title="4-Hour Structural Trend"><span class="dot"></span> H4</button>
+              <button type="button" class="analyst-toggle active" data-setting-ctx-tf="D1" aria-pressed="true" title="Daily Macro Bias"><span class="dot"></span> D1</button>
+              <button type="button" class="analyst-toggle" data-setting-ctx-tf="W1" aria-pressed="false" title="Weekly Institutional Regime"><span class="dot"></span> W1</button>
+            </div>
+            <input id="settingContextTimeframes" type="text" value="H4, D1" style="display:none;" />
           </div>
           <div class="settings-field">
             <label for="settingMarketSource">Market Data Provider</label>
-            <select id="settingMarketSource"><option value="mt5">MT5</option><option value="yahoo">Yahoo (explicit non-execution source)</option></select>
+            <select id="settingMarketSource">
+              <option value="mt5">MT5 (Live Terminal Candles)</option>
+              <option value="yahoo">Yahoo Finance (Offline / Fallback Data)</option>
+            </select>
           </div>
+          <div class="settings-actions">
+            <button class="btn-primary" id="btnSaveForexSettings" type="button">Save Forex Defaults</button>
+            <button class="btn-secondary" id="btnResetForexSettings" type="button">Reset Forex</button>
+          </div>
+          <div id="settingsForexStatus" class="settings-status" aria-live="polite"></div>
         </div>
 
+        <!-- 3. Deterministic Risk Controls -->
         <div class="settings-card">
           <h2 class="card-title">
             <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
             Deterministic Risk Controls
           </h2>
           <div class="settings-field">
-            <label for="settingRiskPercent">Default Risk Per Trade</label>
-            <input id="settingRiskPercent" type="number" min="0.1" max="10" step="0.1" value="1.0" />
+            <label for="settingRiskPercent">Default Risk Per Trade (%)</label>
+            <input id="settingRiskPercent" type="number" min="0.1" max="5.0" step="0.1" value="1.0" />
           </div>
           <div class="settings-field">
             <label for="settingMinRR">Minimum Reward-to-Risk (RR)</label>
             <input id="settingMinRR" type="number" min="0.5" max="10" step="0.1" value="1.5" />
           </div>
           <div class="settings-field">
-            <label for="settingMaxSpread">Maximum Spread Threshold</label>
-            <input id="settingMaxSpread" type="number" min="0" max="50" step="0.1" value="3.0" />
+            <label for="settingMaxSpread">Maximum Spread Threshold (Pips)</label>
+            <input id="settingMaxSpread" type="number" min="0" max="50" step="0.1" value="5.0" />
           </div>
           <div class="settings-field">
-            <label for="settingNewsBlackout">High-Impact News Blackout</label>
-            <input id="settingNewsBlackout" type="number" min="0" max="180" step="5" value="30" />
+            <label for="settingNewsBlackout">High-Impact News Blackout (Mins)</label>
+            <input id="settingNewsBlackout" type="number" min="0" max="180" step="5" value="120" />
           </div>
+          <div class="settings-actions">
+            <button class="btn-primary" id="btnSaveRiskSettings" type="button">Save Risk Controls</button>
+            <button class="btn-secondary" id="btnResetRiskSettings" type="button">Reset Risk</button>
+          </div>
+          <div id="settingsRiskStatus" class="settings-status" aria-live="polite"></div>
         </div>
 
+        <!-- 4. MetaTrader 5 Observer Settings -->
         <div class="settings-card">
           <h2 class="card-title">
             <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
@@ -1102,16 +1304,34 @@
             <span class="settings-val" id="settingAutoOrder" style="color:var(--green);">DISABLED — IMMUTABLE</span>
           </div>
           <div class="settings-field">
-            <label for="settingPollInterval">Polling Interval</label>
-            <input id="settingPollInterval" type="number" min="0.5" max="30" step="0.5" value="2.0" />
+            <label for="settingPollInterval">Polling Interval (Seconds)</label>
+            <input id="settingPollInterval" type="number" min="0.5" max="30" step="0.5" value="5.0" />
           </div>
           <div class="settings-field">
             <label>Post-Close Reflection</label>
             <span class="settings-val" id="settingReflection">Enabled by closed-trade workflow</span>
           </div>
+          <div class="settings-actions">
+            <button class="btn-primary" id="btnSaveMt5Settings" type="button">Save MT5 Settings</button>
+            <button class="btn-secondary" id="btnResetMt5Settings" type="button">Reset MT5</button>
+          </div>
+          <div id="settingsMt5Status" class="settings-status" aria-live="polite"></div>
+        </div>
+      </div> <!-- End .settings-grid -->
+
+      <!-- Global Settings Batch Action Bar -->
+      <div class="settings-global-bar">
+        <div class="settings-global-bar-info">
+          <div class="settings-global-bar-title">Global Batch Actions</div>
+          <div class="settings-global-bar-desc">Apply changes or restore defaults across all configuration categories at once.</div>
+        </div>
+        <div class="settings-global-bar-actions">
+          <button class="btn-primary" id="btnSaveSettings" type="button">Save All Changes</button>
+          <button class="btn-secondary" id="btnResetSettings" type="button">Reset All Defaults</button>
+          <div id="settingsStatus" class="settings-status" style="margin: 0; min-height: unset;" aria-live="polite"></div>
         </div>
       </div>
-    </div>
+    </div> <!-- End #view-settings -->
 
   </div> <!-- End App Container -->
 
@@ -1137,7 +1357,7 @@
   <!-- ===== Toast ===== -->
   <div class="toast" id="toast"></div>
 
-  <script src="/static/journal.js"></script>
-  <script src="/static/app.js"></script>
+  <script src="/static/journal.js?v=2.8"></script>
+  <script src="/static/app.js?v=3.4"></script>
 </body>
 </html>

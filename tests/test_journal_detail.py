@@ -125,6 +125,10 @@ assert.ok(ui.timeline([]).includes('No lifecycle events recorded'));
 const html = ui.detail({trade, events, proposal:{entry_price:999}, metrics:{is_available:false, mfe_pips:0, unavailable_reason:'No M1 bars'},
   lessons:[{lesson_id:'lesson-1', actionable_rule:'<img onerror="bad()">', confidence_score:.8, observation:'Observed'}]});
 for (const heading of ['Identity','Original proposal','Risk decision','Actual execution','Exit','Excursion metrics','Execution comparison','Reflection','Lessons','Chronological lifecycle timeline']) assert.ok(html.includes('<h3>'+heading+'</h3>'));
+for (const tab of ['Overview','Proposal & Risk','Execution','Analysis','Reflection & Lessons','Timeline']) assert.ok(html.includes('>'+tab+'</button>'));
+assert.ok(html.includes('role="tablist"'));
+assert.equal((html.match(/aria-selected="true"/g) || []).length, 1);
+assert.ok(html.includes('data-detail-panel="timeline" hidden'));
 assert.ok(html.includes('id="tradeTimeline"'));
 assert.ok(html.includes('No M1 bars'));
 assert.ok(!html.includes('999')); // No mutable-record fallback for an absent original snapshot.
@@ -183,9 +187,18 @@ def test_static_journal_wiring():
     assert "JournalUI.createController({ request: apiFetch, document })" in app
     assert "tradeDetail.loadTradeDetail(button.dataset.tradeId, button)" in app
     assert "journalTab.click()" in app
-    assert "Source trade unavailable: no stored ID." in app
+    assert "Source trade unavailable." in app
     assert "data-proposal-id" in app
     assert "openAppliedLesson" in app
+    assert "journalOffset" in app
+    assert "data.has_more" in app
+    assert "Forex journal could not be refreshed" in app
+    assert 'aria-pressed="false"' in (root / "journal.js").read_text(encoding="utf-8")
+    assert 'role="tablist"' in (root / "journal.js").read_text(encoding="utf-8")
+    assert "ArrowRight" in (root / "journal.js").read_text(encoding="utf-8")
+    assert "Print preview was blocked" in (root / "journal.js").read_text(encoding="utf-8")
     assert "No applied lesson IDs were stored" in app
     assert '.journal-scroll { overflow-x: auto;' in css
+    assert '.journal-filter-bar {' in css
+    assert '.trade-detail-tabs {' in css
     assert '@media (max-width: 850px)' in css

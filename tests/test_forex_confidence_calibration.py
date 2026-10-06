@@ -55,6 +55,8 @@ class MockTradeItem:
         self.confidence = confidence
         self.r_multiple = r_multiple
         self.net_profit = net_profit
+        self.status = "CLOSED"
+        self.close_time_utc = "2026-03-10T12:00:00+00:00"
 
 
 # ---------------------------------------------------------------------------
@@ -216,8 +218,8 @@ def test_bucket_metrics_trade_count_win_rate_average_r_expectancy():
     # Average Loss R: -1.0
     assert bucket_70.average_loss_r == -1.0
 
-    # Expectancy: (0.5 * 1.75) + (0.5 * -1.0) = 0.875 - 0.5 = 0.375 -> round 0.38
-    assert bucket_70.expectancy == 0.38
+    # Expectancy uses the explicit 25% loss rate; breakevens are not losses.
+    assert bucket_70.expectancy == 0.62
 
     # Min samples was 3, and trade_count is 4 -> bucket IS calibrated
     assert bucket_70.is_calibrated is True
@@ -308,15 +310,17 @@ def test_metrics_manager_confidence_calibration():
     journal = ForexTradeJournal(db_path=":memory:", auto_migrate=True)
 
     # Insert sample trades across buckets
-    journal.record_trade_open(
+    first = journal.record_trade_open(
         pair="EURUSD", action=ForexAction.LONG, open_price=1.08, stop_loss=1.07,
         lots=1.0, confidence=65.0,
     )
-    journal.record_trade_open(
+    second = journal.record_trade_open(
         pair="EURUSD", action=ForexAction.SHORT, open_price=1.09, stop_loss=1.10,
         lots=1.0, confidence=75.0,
     )
 
+    journal.record_trade_close(first.trade_id, close_price=1.09)
+    journal.record_trade_close(second.trade_id, close_price=1.08)
     manager = ForexMetricsManager(journal=journal)
     calib_report = manager.get_confidence_calibration(min_samples=1)
 
@@ -357,10 +361,11 @@ def test_api_confidence_calibration_routes():
 
     # Populate 3 trades in 60-70 bucket
     for _ in range(3):
-        journal.record_trade_open(
+        opened = journal.record_trade_open(
             pair="GBPUSD", action=ForexAction.LONG, open_price=1.25, stop_loss=1.24,
             lots=1.0, confidence=64.0,
         )
+        journal.record_trade_close(opened.trade_id, close_price=1.26)
 
     set_forex_dependencies(journal=journal, metrics_manager=manager)
     from fastapi import FastAPI
@@ -392,6 +397,20 @@ def test_api_confidence_calibration_routes():
     assert result["raw_model_confidence"] == 64.0
     assert result["bucket_label"] == "60-70"
     assert "display_string" in result
+
+
+def test_confidence_calibration_excludes_open_trades():
+    engine = ConfidenceCalibrationEngine(min_samples=1)
+    closed = MockTradeItem(confidence=75.0, r_multiple=1.0)
+    open_trade = MockTradeItem(confidence=75.0, r_multiple=0.0, net_profit=0.0)
+    open_trade.status = "OPEN"
+    open_trade.close_time_utc = None
+
+    report = engine.compute_calibration([closed, open_trade])
+
+    assert report.total_trades_analyzed == 1
+    assert report.buckets["70-80"].trade_count == 1
+    assert report.buckets["70-80"].breakeven_count == 0
 
 def test_confidence_calibration_ui_uses_empirical_labels_and_small_sample_state():
     source = Path("web/static/app.js").read_text(encoding="utf-8")

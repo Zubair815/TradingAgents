@@ -38,7 +38,7 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 # Forex Domain, Journal, Risk, Backtest, Analytics, MT5, Learning imports
 from tradingagents.agents.schemas_forex import (
@@ -51,6 +51,7 @@ from tradingagents.agents.schemas_forex import (
 )
 from tradingagents.analytics.manager import ForexAnalyticsManager
 from tradingagents.analytics.metrics import calculate_deep_metrics
+from tradingagents.analytics.performance import get_excursion_value, is_settled_trade
 from tradingagents.backtest.ablation import (
     ForexAblationRunner,
     create_standard_ablation_matrix,
@@ -87,11 +88,10 @@ from tradingagents.forex.application import (
     build_manual_application_context,
     build_mt5_application_context,
 )
-from tradingagents.forex.domain import normalize_forex_pair
+from tradingagents.forex.domain import Timeframe, get_forex_pair, normalize_forex_pair
 from tradingagents.forex.pips import pip_size_for
 from tradingagents.journal.lifecycle import LifecycleError, LifecycleTransitionError
 from tradingagents.journal.manager import ForexJournalManager
-from tradingagents.journal.models import LifecycleState
 from tradingagents.learning.manager import ForexLearningManager
 from tradingagents.llm_clients.usage import UsageTracker, track_usage
 from tradingagents.metrics.manager import ForexMetricsManager
@@ -383,6 +383,8 @@ _SETTINGS_KEYS = (
     "quick_think_llm",
     "deep_think_llm",
     "backend_url",
+    "max_tokens",
+    "temperature",
     "forex_default_pair",
     "forex_default_execution_timeframe",
     "forex_default_context_timeframes",
@@ -473,10 +475,25 @@ def patch_runtime_settings(payload: dict[str, Any]):
 
 
 @router.post("/settings/reset")
-def reset_runtime_settings_route():
+def reset_runtime_settings_route(payload: dict[str, Any] | None = None):
     """Restore the project's default config and drop local runtime overrides."""
     before = _serialize_runtime_settings()
-    saved = reset_runtime_settings()
+    keys = None
+    if payload is not None:
+        keys = payload.get("keys")
+        if not isinstance(keys, list) or not keys or any(not isinstance(key, str) for key in keys):
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "Selective reset requires a non-empty list of setting keys"},
+            )
+        unknown = sorted(set(keys) - set(_SETTINGS_KEYS))
+        if unknown:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": f"Unsupported runtime setting(s): {unknown}"},
+            )
+        keys = list(dict.fromkeys(keys))
+    saved = reset_runtime_settings(keys=keys)
     changed_restart_keys = any(
         saved.get(key) != before.get(key) for key in _RESTART_REQUIRED_KEYS
     )
@@ -506,18 +523,32 @@ class ManualTradeOpenRequest(BaseModel):
     take_profit: float | None = Field(default=None, description="Take profit target level")
     proposal_id: str | None = Field(default=None, description="Associated proposal ID if any")
     ticket: int | str | None = Field(default=None, description="Broker ticket number if any")
-    open_time: str | None = Field(default=None, description="UTC ISO open timestamp")
+    open_time: datetime | None = Field(default=None, description="Timezone-aware UTC open timestamp")
     actor: str = Field(default="WebAPI", description="Entity initiating trade")
+
+    @field_validator("open_time")
+    @classmethod
+    def validate_open_time(cls, value: datetime | None) -> datetime | None:
+        if value is not None and value.tzinfo is None:
+            raise ValueError("open_time must include a timezone")
+        return value.astimezone(timezone.utc) if value is not None else None
 
 
 class TradeCloseRequest(BaseModel):
     close_price: float = Field(..., gt=0, description="Exit price")
     exit_reason: str = Field(default="TAKE_PROFIT", description="Exit reason enum string")
-    close_time: str | None = Field(default=None, description="UTC ISO close timestamp")
+    close_time: datetime | None = Field(default=None, description="Timezone-aware UTC close timestamp")
     gross_profit: float | None = Field(default=None, description="Optional realized gross profit")
     commission: float = Field(default=0.0, ge=0, description="Broker commission fees")
     swap: float = Field(default=0.0, description="Overnight financing charges")
     actor: str = Field(default="WebAPI", description="Entity closing trade")
+
+    @field_validator("close_time")
+    @classmethod
+    def validate_close_time(cls, value: datetime | None) -> datetime | None:
+        if value is not None and value.tzinfo is None:
+            raise ValueError("close_time must include a timezone")
+        return value.astimezone(timezone.utc) if value is not None else None
 
 
 class ModifyStopLossRequest(BaseModel):
@@ -551,14 +582,59 @@ class ProposalCreateRequest(BaseModel):
     order_type: str = Field(default="MARKET", description="Order type")
     setup_type: str = Field(default="BREAKOUT", description="Strategy setup type")
     timeframe: str = Field(default="H1", description="Trading timeframe")
-    entry_price: float = Field(..., gt=0, description="Target entry price")
-    stop_loss: float = Field(..., gt=0, description="Stop loss price")
-    take_profit: float = Field(..., gt=0, description="Take profit 1 price")
-    take_profit_2: float | None = Field(default=None, description="Take profit 2 price")
+    entry_price: float | None = Field(default=None, gt=0, description="Target entry price")
+    stop_loss: float | None = Field(default=None, gt=0, description="Stop loss price")
+    take_profit: float | None = Field(default=None, gt=0, description="Take profit 1 price")
+    take_profit_2: float | None = Field(default=None, gt=0, description="Take profit 2 price")
     suggested_risk_percent: float = Field(default=1.0, gt=0, le=5.0)
     confluence_factors: list[str] = Field(default_factory=list)
     reasoning: str = Field(default="")
     invalidation_condition: str = Field(default="")
+
+    @field_validator("action")
+    @classmethod
+    def validate_action(cls, value: str) -> str:
+        normalized = value.strip().upper().replace(" ", "_").replace("-", "_")
+        aliases = {"BUY": "LONG", "SELL": "SHORT", "HOLD": "NO_TRADE", "NEUTRAL": "NO_TRADE"}
+        normalized = aliases.get(normalized, normalized)
+        if normalized not in {member.value for member in ForexAction}:
+            raise ValueError("action must be LONG, SHORT, or NO_TRADE")
+        return normalized
+
+    @field_validator("order_type")
+    @classmethod
+    def validate_order_type(cls, value: str) -> str:
+        normalized = value.strip().upper().replace(" ", "_").replace("-", "_")
+        if normalized == "LIMIT":
+            return normalized
+        if normalized not in {member.value for member in OrderType}:
+            raise ValueError(f"unsupported order_type: {value}")
+        return normalized
+
+    @field_validator("setup_type")
+    @classmethod
+    def validate_setup_type(cls, value: str) -> str:
+        normalized = value.strip().upper().replace(" ", "_").replace("-", "_")
+        aliases = {"TREND_PULLBACK": "PULLBACK"}
+        normalized = aliases.get(normalized, normalized)
+        if normalized not in {member.value for member in SetupType}:
+            raise ValueError(f"unsupported setup_type: {value}")
+        return normalized
+
+    @field_validator("timeframe")
+    @classmethod
+    def validate_timeframe(cls, value: str) -> str:
+        return Timeframe.from_string(value).value
+
+    @model_validator(mode="after")
+    def require_directional_geometry(self):
+        if self.order_type == "LIMIT":
+            self.order_type = "BUY_LIMIT" if self.action == ForexAction.LONG.value else "SELL_LIMIT"
+        if self.action != ForexAction.NO_TRADE.value:
+            missing = [name for name in ("entry_price", "stop_loss", "take_profit") if getattr(self, name) is None]
+            if missing:
+                raise ValueError(f"directional proposals require: {', '.join(missing)}")
+        return self
 
 
 class EvaluateRiskRequest(BaseModel):
@@ -618,10 +694,30 @@ class ReconcilePositionsRequest(BaseModel):
 
 
 class MT5ConnectRequest(BaseModel):
-    path: str | None = Field(default=None, description="Terminal executable path")
-    login: int | None = Field(default=None, description="Account login")
-    password: str | None = Field(default=None, repr=False, description="Broker account password")
-    server: str | None = Field(default=None, description="Broker server name")
+    path: str | None = Field(default=None, max_length=1024, description="Terminal executable path")
+    login: int | None = Field(default=None, gt=0, description="Account login")
+    password: str | None = Field(default=None, repr=False, max_length=512, description="Broker account password")
+    server: str | None = Field(default=None, max_length=255, description="Broker server name")
+
+    @field_validator("path", "server", mode="before")
+    @classmethod
+    def normalize_optional_text(cls, value):
+        if value is None:
+            return None
+        normalized = str(value).strip()
+        return normalized or None
+
+
+def _optional_backtest_boundary(value: str | None) -> datetime | None:
+    if value is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("Backtest dates must use ISO-8601 format") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 class ForexBacktestRequest(BaseModel):
@@ -660,6 +756,22 @@ class ForexBacktestRequest(BaseModel):
     count: int = Field(default=300, ge=20, le=5000, description="Generated candle count for the synthetic demo")
     confirm_expensive: bool = Field(default=False)
 
+    @model_validator(mode="after")
+    def validate_backtest_identity_and_period(self):
+        self.pair = normalize_forex_pair(self.pair)
+        if len(self.pair) != 6 or not self.pair.isalpha():
+            raise ValueError("Backtest pair must be a six-letter Forex symbol")
+        self.timeframe = Timeframe.from_string(self.timeframe).value
+        self.date_from = self.date_from.strip() if self.date_from and self.date_from.strip() else None
+        self.date_to = self.date_to.strip() if self.date_to and self.date_to.strip() else None
+        if self.mode:
+            self.mode = self.mode.strip().upper()
+        parsed_start = _optional_backtest_boundary(self.date_from)
+        parsed_end = _optional_backtest_boundary(self.date_to)
+        if parsed_start is not None and parsed_end is not None and parsed_start >= parsed_end:
+            raise ValueError("Backtest start date must be earlier than end date")
+        return self
+
 
 class ForexBacktestEstimateRequest(BaseModel):
     pair: str = Field(default="EURUSD")
@@ -668,7 +780,7 @@ class ForexBacktestEstimateRequest(BaseModel):
     sampling_interval: int = Field(default=1, ge=1)
     max_analysis_points: int | None = Field(default=None, ge=1)
     analyst_count: int = Field(default=3, ge=1)
-    workflow: Literal["BACKTEST", "WALK_FORWARD", "ABLATION"] = "BACKTEST"
+    workflow: Literal["BACKTEST", "DEMO", "WALK_FORWARD", "ABLATION"] = "BACKTEST"
     n_splits: int = Field(default=1, ge=1, le=10)
     variant_count: int = Field(default=1, ge=1, le=20)
     provider: str = Field(default="openai")
@@ -848,6 +960,8 @@ async def list_trades(
     status: str | None = None,
     limit: int = Query(default=100, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
+    start_date: str | None = None,
+    end_date: str | None = None,
     journal: ForexTradeJournal = Depends(get_journal),
 ):
     """Query stored trades with optional pair and status filters."""
@@ -858,10 +972,35 @@ async def list_trades(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=f"Invalid trade status: {status}") from exc
 
+    parsed_dates: dict[str, datetime] = {}
+    for name, value in (("start_date", start_date), ("end_date", end_date)):
+        if not value:
+            continue
+        try:
+            parsed_dates[name] = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400, detail=f"Invalid {name}: use an ISO-8601 date or timestamp"
+            ) from exc
+    if (
+        "start_date" in parsed_dates
+        and "end_date" in parsed_dates
+        and parsed_dates["start_date"] > parsed_dates["end_date"]
+    ):
+        raise HTTPException(status_code=400, detail="start_date must not be after end_date")
 
-    trades = journal.list_trades(pair=pair, status=trade_status, limit=limit + offset)
-    sliced_trades = trades[offset : offset + limit]
-    return {"trades": [_safe_model_dump(t) for t in sliced_trades], "count": len(sliced_trades)}
+    trades = journal.list_trades(
+        pair=pair, status=trade_status, start_date=start_date, end_date=end_date,
+        limit=limit, offset=offset,
+    )
+    total = journal.count_trades(
+        pair=pair, status=trade_status, start_date=start_date, end_date=end_date,
+    )
+    return {
+        "trades": [_safe_model_dump(t) for t in trades],
+        "count": len(trades), "total": total, "limit": limit, "offset": offset,
+        "has_more": offset + len(trades) < total,
+    }
 
 
 @router.get("/journal/trades/{trade_id}")
@@ -937,21 +1076,21 @@ async def manual_open_trade(
             take_profit=req.take_profit,
             ticket=req.ticket,
             actor=req.actor,
+            open_time=req.open_time,
         )
     else:
-        # Record direct trade in journal
-        meta = {"broker_ticket": str(req.ticket)} if req.ticket else {}
-        trade_rec = journal_mgr.journal.record_trade_open(
+        trade_id = journal_mgr.open_unplanned_trade(
             pair=norm_pair,
             action=action_enum,
             open_price=req.entry_price,
             stop_loss=req.stop_loss or 0.0,
             lots=req.lots,
             take_profit=req.take_profit,
-            metadata=meta,
+            ticket=req.ticket,
             notes=f"Manual open via {req.actor}",
+            open_time_utc=req.open_time.isoformat() if req.open_time else None,
+            actor=req.actor,
         )
-        trade_id = trade_rec.trade_id
 
     return {"trade_id": trade_id, "status": "OPEN", "message": "Trade opened successfully"}
 
@@ -1061,11 +1200,18 @@ async def update_trade_reflection(
 ):
     """Update qualitative reflection notes on a settled trade."""
     try:
+        existing = journal.get_trade(trade_id)
+        if existing is None:
+            raise HTTPException(status_code=404, detail=f"Trade {trade_id} not found")
+        if existing.status != TradeStatus.CLOSED:
+            raise HTTPException(status_code=400, detail="Reflections require a closed trade")
         success = journal.update_trade_reflection(
             trade_id=trade_id,
             reflection=req.reflection_text,
             tags=[req.category_tag] if req.category_tag else None,
             notes=req.execution_quality,
+            actor="WebAPI",
+            rating=req.execution_quality,
         )
         if not success:
             raise HTTPException(status_code=404, detail=f"Trade {trade_id} not found")
@@ -1121,6 +1267,19 @@ async def get_journal_performance(
 # 2. Proposal Endpoints
 # ---------------------------------------------------------------------------
 
+def _allowed_proposal_actions(proposal) -> list[str]:
+    status = proposal.status.value if hasattr(proposal.status, "value") else str(proposal.status)
+    if status == ProposalStatus.PROPOSED.value:
+        return ["REJECTED", "CANCELLED", "EXPIRED"]
+    if status in {
+        ProposalStatus.APPROVED.value,
+        ProposalStatus.MODIFIED.value,
+    }:
+        return ["WAIT", "SKIPPED", "CANCELLED", "EXPIRED"]
+    if status == ProposalStatus.WAITING_USER.value:
+        return ["SKIPPED", "CANCELLED", "EXPIRED"]
+    return []
+
 @router.get("/proposals")
 async def list_proposals(
     pair: str | None = None,
@@ -1145,39 +1304,42 @@ async def list_proposals(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=f"Invalid proposal status: {status}") from exc
 
-    start_date = f"{date}T00:00:00" if date else None
-    end_date = f"{date}T23:59:59" if date else None
+    if date:
+        try:
+            datetime.strptime(date, "%Y-%m-%d")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Invalid proposal date; expected YYYY-MM-DD") from exc
+    start_date = f"{date}T00:00:00+00:00" if date else None
+    end_date = f"{date}T23:59:59.999999+00:00" if date else None
 
-    fetch_limit = 1000 if (action or setup or timeframe) else (limit + offset)
     proposals = journal.list_proposals(
         pair=pair,
         status=prop_status,
         start_date=start_date,
         end_date=end_date,
-        limit=fetch_limit,
+        action=action,
+        setup_type=setup,
+        timeframe=timeframe,
+        limit=limit,
+        offset=offset,
     )
-
-    if action:
-        act_val = action.strip().upper()
-        proposals = [
-            p for p in proposals
-            if (p.action.value if hasattr(p.action, "value") else str(p.action)).upper() == act_val
-        ]
-    if setup:
-        set_val = setup.strip().upper()
-        proposals = [
-            p for p in proposals
-            if (p.setup_type.value if hasattr(p.setup_type, "value") else str(p.setup_type)).upper() == set_val
-        ]
-    if timeframe:
-        tf_val = timeframe.strip().upper()
-        proposals = [
-            p for p in proposals
-            if (p.timeframe or "").strip().upper() == tf_val
-        ]
-
-    sliced_proposals = proposals[offset : offset + limit]
-    return {"proposals": [_safe_model_dump(p) for p in sliced_proposals], "count": len(sliced_proposals)}
+    total = journal.count_proposals(
+        pair=pair, status=prop_status, start_date=start_date, end_date=end_date,
+        action=action, setup_type=setup, timeframe=timeframe,
+    )
+    return {
+        "proposals": [_safe_model_dump(p) for p in proposals],
+        "count": len(proposals),
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "filter_options": {
+            "pairs": journal.list_proposal_pairs(),
+            "statuses": [item.value for item in ProposalStatus],
+            "setups": [item.value for item in SetupType],
+            "timeframes": [item.value for item in Timeframe],
+        },
+    }
 
 
 @router.get("/proposals/{proposal_id}")
@@ -1197,15 +1359,27 @@ async def get_proposal(
     prop_dict = _safe_model_dump(proposal)
     matched_trade = journal.get_trade_by_proposal_id(proposal_id)
     matched_dict = _safe_model_dump(matched_trade) if matched_trade else None
+    proposal_events = journal.get_events(proposal_id=proposal_id, limit=-1)
+    decision_events = [
+        event for event in proposal_events
+        if event.get("event_type") in {
+            "PROPOSAL_APPROVED", "PROPOSAL_REJECTED", "PROPOSAL_MODIFIED",
+            "PROPOSAL_EXPIRED", "PROPOSAL_SKIPPED", "PROPOSAL_WAITING_USER",
+            "PROPOSAL_INVALIDATED", "PROPOSAL_SUPERSEDED",
+        }
+    ]
+    latest_decision = decision_events[-1] if decision_events else None
 
-    # Retrieve lessons linked to matched trade or pair setup
+    # Retrieve only explicitly linked/applied lessons; related lessons are not evidence.
     lessons = []
     try:
         if matched_trade:
             lessons = journal.list_lessons(trade_id=matched_trade.trade_id)
         if not lessons:
-            setup_val = proposal.setup_type.value if hasattr(proposal.setup_type, "value") else str(proposal.setup_type)
-            lessons = journal.list_lessons(pair=proposal.pair, setup_type=setup_val)
+            lessons = journal.list_lessons(proposal_id=proposal_id)
+        if not lessons:
+            applied_ids = (proposal.proposal_payload or {}).get("applied_lesson_ids") or []
+            lessons = [lesson for lesson_id in applied_ids if (lesson := journal.get_lesson(lesson_id))]
     except Exception:
         lessons = []
 
@@ -1232,21 +1406,25 @@ async def get_proposal(
     elif status_str in ("EXPIRED", "SKIPPED", "SKIPPED_BY_USER", "CANCELLED", "REJECTED"):
         final_outcome = {
             "status": status_str,
-            "reason": (proposal.metadata or {}).get("status_reason") or f"Proposal marked as {status_str}",
+            "reason": ((latest_decision or {}).get("payload") or {}).get("reason") or f"Proposal marked as {status_str}",
         }
 
     return {
         "proposal": prop_dict,
-        "original_proposal": proposal.proposal_payload or prop_dict,
+        "original_proposal": proposal.proposal_payload,
+        "immutable_evidence_available": proposal.proposal_payload is not None,
         "risk_review": proposal.risk_decision or {},
         "user_decision": {
             "status": status_str,
-            "action": (proposal.metadata or {}).get("user_action") or status_str,
-            "updated_at": (proposal.metadata or {}).get("user_action_at") or proposal.created_at_utc,
+            "action": (((latest_decision or {}).get("payload") or {}).get("action") or status_str),
+            "updated_at": (latest_decision or {}).get("timestamp_utc") or proposal.created_at_utc,
+            "actor": (latest_decision or {}).get("actor"),
+            "reason": ((latest_decision or {}).get("payload") or {}).get("reason"),
         },
         "matched_execution": matched_dict,
         "final_outcome": final_outcome,
         "lessons": lessons,
+        "allowed_actions": _allowed_proposal_actions(proposal),
     }
 
 
@@ -1254,7 +1432,7 @@ async def get_proposal(
 @router.post("/proposals")
 async def create_proposal(
     req: ProposalCreateRequest,
-    journal: ForexTradeJournal = Depends(get_journal),
+    journal_mgr: ForexJournalManager = Depends(get_journal_manager),
 ):
     """Submit and persist a new ForexTraderProposal."""
     try:
@@ -1278,8 +1456,8 @@ async def create_proposal(
             reasoning=req.reasoning,
             invalidation_condition=req.invalidation_condition,
         )
-        prop_id = journal.save_proposal(proposal)
-        saved = journal.get_proposal(prop_id)
+        prop_id = journal_mgr.submit_proposal(proposal, actor="WebAPI")
+        saved = journal_mgr.journal.get_proposal(prop_id)
         return {"proposal": _safe_model_dump(saved), "proposal_id": prop_id}
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1433,7 +1611,13 @@ async def update_proposal_status(
     journal = journal_mgr.journal
     clean_status = req.status.strip().upper()
 
-    if clean_status in ("EXECUTED", "EXECUTE", "SKIPPED", "SKIP", "SKIPPED_BY_USER", "WAIT", "WAITING", "WAITING_USER"):
+    if clean_status in ("EXECUTED", "EXECUTE"):
+        raise HTTPException(
+            status_code=400,
+            detail="EXECUTED requires a linked journal or MT5 execution; record the actual trade instead.",
+        )
+
+    if clean_status in ("SKIPPED", "SKIP", "SKIPPED_BY_USER", "WAIT", "WAITING", "WAITING_USER"):
         try:
             next_status = journal_mgr.record_user_action(
                 proposal_id=proposal_id,
@@ -1448,16 +1632,25 @@ async def update_proposal_status(
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     try:
-        new_status = ProposalStatus.from_str(clean_status)
         existing = journal.get_proposal(proposal_id)
         if not existing:
             raise HTTPException(status_code=404, detail=f"Proposal {proposal_id} not found")
-        curr_state = LifecycleState(existing.status.value)
-        next_state = LifecycleState(new_status.value)
-        journal_mgr.lifecycle.validate_transition(curr_state, next_state)
-        journal.update_proposal_status(proposal_id=proposal_id, status=new_status)
+        if clean_status == "APPROVED":
+            risk = existing.risk_decision or {}
+            if str(risk.get("decision", "")).upper() not in {"APPROVE", "MODIFY"}:
+                raise HTTPException(status_code=400, detail="Risk-engine approval evidence is required")
+            decision = ForexRiskDecision.model_validate(risk)
+            journal_mgr.evaluate_risk(proposal_id, decision, actor="WebAPI")
+        elif clean_status == "REJECTED":
+            journal_mgr.lifecycle.reject_proposal(proposal_id, reason=req.reason or "Rejected by user")
+        elif clean_status == "EXPIRED":
+            journal_mgr.expire_proposal(proposal_id, reason=req.reason or "Expired by user", actor="User")
+        elif clean_status == "CANCELLED":
+            journal_mgr.lifecycle.cancel_proposal(proposal_id, reason=req.reason or "Cancelled by user", actor="User")
+        else:
+            raise HTTPException(status_code=400, detail=f"Unsupported manual proposal action: {clean_status}")
         saved = journal.get_proposal(proposal_id)
-        return {"proposal": _safe_model_dump(saved), "status": new_status.value}
+        return {"proposal": _safe_model_dump(saved), "status": saved.status.value}
     except (LifecycleTransitionError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=f"Invalid transition/status: {exc}") from exc
     except HTTPException:
@@ -1573,11 +1766,16 @@ async def get_mt5_account(
     """Fetch live MT5 account balance, equity, leverage, and margins."""
     try:
         info = mt5.get_account_info()
-        acc = _safe_model_dump(info)
+        raw = _safe_model_dump(info)
+        acc = {
+            key: value for key, value in raw.items()
+            if key not in {"login", "name"}
+        }
+        acc["masked_login"] = mask_account_login(raw.get("login"))
         res = {"account": acc}
         res.update(acc)
         return res
-    except MT5Error as exc:
+    except (MT5Error, DataInsufficientError) as exc:
         raise HTTPException(status_code=503, detail={"code": "MT5_DATA_UNAVAILABLE"}) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -1593,7 +1791,7 @@ async def get_mt5_symbols(
     try:
         symbols = mt5.get_symbols(group=group)
         return {"symbols": [_safe_model_dump(s) for s in symbols], "count": len(symbols)}
-    except MT5Error as exc:
+    except (MT5Error, DataInsufficientError) as exc:
         raise HTTPException(status_code=503, detail={"code": "MT5_DATA_UNAVAILABLE"}) from exc
 
 
@@ -1609,9 +1807,12 @@ async def get_mt5_symbol_info(
         try:
             tick = mt5.get_current_tick(symbol)
             res["tick"] = _safe_model_dump(tick)
-        except Exception:
-            pass
+        except DataInsufficientError:
+            res["tick_status"] = "UNAVAILABLE"
+            res["tick_reason"] = "MARKET_CLOSED_OR_STALE"
         return res
+    except DataInsufficientError as exc:
+        raise HTTPException(status_code=503, detail={"code": "MT5_DATA_UNAVAILABLE"}) from exc
     except MT5Error as exc:
         raise HTTPException(status_code=404, detail={"code": "MT5_SYMBOL_UNAVAILABLE"}) from exc
 
@@ -1626,6 +1827,8 @@ async def get_mt5_tick(
     try:
         tick = mt5.get_current_tick(symbol)
         return {"tick": _safe_model_dump(tick)}
+    except DataInsufficientError as exc:
+        raise HTTPException(status_code=503, detail={"code": "MT5_QUOTE_UNAVAILABLE"}) from exc
     except MT5Error as exc:
         raise HTTPException(status_code=503, detail={"code": "MT5_DATA_UNAVAILABLE"}) from exc
 
@@ -1639,7 +1842,7 @@ async def get_mt5_positions(
     try:
         positions = mt5.get_open_positions()
         return {"positions": [_safe_model_dump(p) for p in positions], "count": len(positions)}
-    except MT5Error as exc:
+    except (MT5Error, DataInsufficientError) as exc:
         raise HTTPException(status_code=503, detail={"code": "MT5_DATA_UNAVAILABLE"}) from exc
 
 
@@ -1652,26 +1855,31 @@ async def get_mt5_orders(
     try:
         orders = mt5.get_pending_orders()
         return {"orders": [_safe_model_dump(o) for o in orders], "count": len(orders)}
-    except MT5Error as exc:
+    except (MT5Error, DataInsufficientError) as exc:
         raise HTTPException(status_code=503, detail={"code": "MT5_DATA_UNAVAILABLE"}) from exc
 
 
 
 @router.get("/mt5/deals")
 async def get_mt5_deals(
-    date_from: str | None = None,
-    date_to: str | None = None,
-    position: int | None = None,
-    count: int | None = None,
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+    position: int | None = Query(default=None, gt=0),
+    count: int | None = Query(default=None, ge=1, le=1000),
     mt5: MT5Observer = Depends(get_mt5_observer),
 ):
     """Query execution deals history from MT5."""
     try:
-        d_from = datetime.fromisoformat(date_from) if date_from else None
-        d_to = datetime.fromisoformat(date_to) if date_to else None
+        for name, value in (("date_from", date_from), ("date_to", date_to)):
+            if value is not None and value.tzinfo is None:
+                raise HTTPException(status_code=422, detail=f"{name} requires an explicit UTC offset")
+        if date_from is not None and date_to is not None and date_from > date_to:
+            raise HTTPException(status_code=422, detail="date_from must not be after date_to")
+        d_from = date_from.astimezone(timezone.utc) if date_from else None
+        d_to = date_to.astimezone(timezone.utc) if date_to else None
         deals = mt5.get_deals(date_from=d_from, date_to=d_to, position=position, count=count)
         return {"deals": [_safe_model_dump(d) for d in deals], "count": len(deals)}
-    except MT5Error as exc:
+    except (MT5Error, DataInsufficientError) as exc:
         raise HTTPException(status_code=503, detail={"code": "MT5_DATA_UNAVAILABLE"}) from exc
 
 
@@ -1713,6 +1921,9 @@ def _run_forex_analysis(run_id: str, req: ForexAnalysisRequest) -> None:
             config["deep_think_llm"] = req.deep_model
         if getattr(req, "research_depth", None):
             config["research_depth"] = req.research_depth
+            debate_rounds = {"quick": 1, "deep": 3, "comprehensive": 5}[req.research_depth]
+            config["max_debate_rounds"] = debate_rounds
+            config["max_risk_discuss_rounds"] = debate_rounds
 
         exec_tf = req.execution_timeframe or req.timeframe or "H1"
         ctx_tfs = req.context_timeframes or req.higher_timeframes or ("H4", "D1")
@@ -1783,7 +1994,17 @@ def _run_forex_analysis(run_id: str, req: ForexAnalysisRequest) -> None:
             return
 
         seen_stages: set[str] = set()
-        analysis_cutoff = risk_context.as_of_utc.isoformat() if risk_context is not None else req.date
+        analysis_cutoff = req.date or (
+            risk_context.as_of_utc.isoformat() if risk_context is not None else None
+        )
+        if analysis_cutoff is None:
+            analysis_cutoff = datetime.now(timezone.utc).isoformat()
+        with _lock:
+            if run_id in _forex_runs:
+                _forex_runs[run_id].update(
+                    date=analysis_cutoff,
+                    analysis_cutoff=analysis_cutoff,
+                )
 
         for chunk in graph.stream(
             req.pair,
@@ -1903,7 +2124,11 @@ def _run_forex_analysis(run_id: str, req: ForexAnalysisRequest) -> None:
 
         report_path = None
         try:
-            report_path = graph.save_reports(final_state, req.pair, trade_date=req.date)
+            report_path = graph.save_reports(
+                final_state,
+                req.pair,
+                trade_date=analysis_cutoff[:10],
+            )
         except Exception as rep_exc:
             logger.warning("Could not write markdown report tree for %s (%s)", run_id, type(rep_exc).__name__)
 
@@ -1925,7 +2150,11 @@ def _run_forex_analysis(run_id: str, req: ForexAnalysisRequest) -> None:
             "execution_timeframe": exec_tf,
             "context_timeframes": list(ctx_tfs),
             "analysts": list(req.analysts),
-            "date": req.date,
+            "research_depth": req.research_depth,
+            "min_rr": req.min_rr,
+            "max_spread_pips": req.max_spread_pips,
+            "date": analysis_cutoff,
+            "analysis_cutoff": analysis_cutoff,
             "signal": signal,
             "proposal_id": proposal_id,
             "proposal": proposal.model_dump() if proposal else None,
@@ -1972,7 +2201,7 @@ def _run_forex_analysis(run_id: str, req: ForexAnalysisRequest) -> None:
             "provenance": {
                 "sources": ["Forex Market Feed (OHLCV)", "Economic Calendar", "Central Bank Intelligence"],
                 "generated_at": datetime.now(timezone.utc).isoformat(),
-                "analysis_cutoff": req.date or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+                "analysis_cutoff": analysis_cutoff,
             },
         }
 
@@ -2089,7 +2318,8 @@ async def start_forex_analysis(
         "timeframe": exec_tf,
         "execution_timeframe": exec_tf,
         "context_timeframes": ctx_tfs_list,
-        "date": req.date,
+        "date": req.date or now_iso,
+        "analysis_cutoff": req.date or now_iso,
         "analysts": list(req.analysts),
         "status": "queued",
         "provider": req.provider or "",
@@ -2281,12 +2511,96 @@ async def get_forex_status_alias(run_id: str):
 # 5. Demonstration Backtesting Endpoints
 # ---------------------------------------------------------------------------
 
+def _demo_candle_from_payload(payload: dict[str, Any], index: int) -> ForexBar:
+    timestamp_value = payload.get("time") or payload.get("timestamp")
+    if not timestamp_value:
+        raise ValueError(f"Candle {index + 1} requires a source timestamp")
+    timestamp_value = (
+        _optional_backtest_boundary(timestamp_value)
+        if isinstance(timestamp_value, str)
+        else timestamp_value
+    )
+    if not isinstance(timestamp_value, datetime):
+        raise ValueError(f"Candle {index + 1} has an invalid timestamp")
+    if timestamp_value.tzinfo is None:
+        timestamp_value = timestamp_value.replace(tzinfo=timezone.utc)
+    values = {
+        name: float(payload[name])
+        for name in ("open", "high", "low", "close")
+    }
+    if any(not math.isfinite(value) or value <= 0 for value in values.values()):
+        raise ValueError(f"Candle {index + 1} prices must be finite and positive")
+    if values["high"] < max(values["open"], values["close"]) or values["low"] > min(values["open"], values["close"]):
+        raise ValueError(f"Candle {index + 1} has invalid OHLC geometry")
+    volume = float(payload.get("volume", 100.0))
+    if not math.isfinite(volume) or volume < 0:
+        raise ValueError(f"Candle {index + 1} volume must be finite and nonnegative")
+    return ForexBar(timestamp=timestamp_value.astimezone(timezone.utc), volume=volume, **values)
+
+
+def _build_synthetic_demo_candles(req: ForexBacktestRequest, pip_size: float, base_price: float) -> list[ForexBar]:
+    interval_seconds = Timeframe.from_string(req.timeframe).seconds
+    start = _optional_backtest_boundary(req.date_from)
+    end = _optional_backtest_boundary(req.date_to)
+    if start is not None and end is not None:
+        candle_count = int((end - start).total_seconds() // interval_seconds)
+        if candle_count < 5:
+            raise ValueError("Demo date range must contain at least five complete candles")
+        if candle_count > 5000:
+            raise ValueError("Demo date range exceeds the 5000-candle safety limit")
+    else:
+        candle_count = req.count
+        if end is not None:
+            start = end - timedelta(seconds=candle_count * interval_seconds)
+        elif start is None:
+            end = datetime.now(timezone.utc)
+            start = end - timedelta(seconds=candle_count * interval_seconds)
+    assert start is not None
+    candles: list[ForexBar] = []
+    current = base_price
+    for index in range(candle_count):
+        timestamp_value = start + timedelta(seconds=index * interval_seconds)
+        delta = math.sin(index / 10.0) * (3.0 * pip_size) + (0.2 * pip_size)
+        open_price = current
+        close_price = current + delta
+        high_price = max(open_price, close_price) + (1.5 * pip_size)
+        low_price = min(open_price, close_price) - (1.5 * pip_size)
+        current = close_price
+        candles.append(ForexBar(
+            timestamp=timestamp_value,
+            open=open_price,
+            high=high_price,
+            low=low_price,
+            close=close_price,
+            volume=100.0,
+        ))
+    return candles
+
 @router.post("/backtest/estimate")
 async def estimate_backtest_costs(
     req: ForexBacktestEstimateRequest,
     request: Request,
 ):
     """Estimate expected AI invocations and token usage before launching an agent backtest."""
+    if req.workflow == "DEMO":
+        return {
+            "estimate_kind": "NOT_APPLICABLE",
+            "cost_kind": "NOT_APPLICABLE",
+            "actual_usage": None,
+            "workflow": "DEMO",
+            "expected_analyses_count": 0,
+            "estimated_llm_calls": 0,
+            "estimated_quick_model_calls": 0,
+            "estimated_deep_model_calls": 0,
+            "estimated_input_tokens": 0,
+            "estimated_output_tokens": 0,
+            "estimated_tokens": 0,
+            "pricing_status": "NOT_APPLICABLE",
+            "estimated_cost_usd": 0.0,
+            "estimated_cost_low_usd": 0.0,
+            "estimated_cost_high_usd": 0.0,
+            "disclosures": ["Synthetic demo mode does not invoke the multi-agent LLM pipeline."],
+        }
     structure: dict[str, int] | None = None
     total_bars = req.count
     sampling_interval = req.sampling_interval
@@ -2441,7 +2755,8 @@ async def run_backtest(
                 memory_source=get_learning_manager(),
             )
             agent_backtester = HistoricalForexAgentBacktester(config=agent_cfg)
-            report = agent_backtester.run(
+            report = await asyncio.to_thread(
+                agent_backtester.run,
                 candles=candle_objs,
                 agent_pipeline_callable=pipeline_callable,
                 market_data_provenance=provenance,
@@ -2492,32 +2807,12 @@ async def run_backtest(
         # Construct candles
         candle_objs: list[ForexBar] = []
         if req.candles:
-            for c in req.candles:
-                t_val = c.get("time") or c.get("timestamp") or datetime.now(timezone.utc)
-                if isinstance(t_val, str):
-                    t_val = datetime.fromisoformat(t_val.replace("Z", "+00:00"))
-                candle_objs.append(ForexBar(
-                    timestamp=t_val,
-                    open=float(c["open"]),
-                    high=float(c["high"]),
-                    low=float(c["low"]),
-                    close=float(c["close"]),
-                    volume=float(c.get("volume", 100.0)),
-                ))
+            candle_objs = [
+                _demo_candle_from_payload(candle, index)
+                for index, candle in enumerate(req.candles)
+            ]
         else:
-            # Generate deterministic synthetic trending/oscillating series
-            n = req.count
-            start_ts = int(time.time()) - (n * 900)
-            curr = base_price
-            for i in range(n):
-                ts = datetime.fromtimestamp(start_ts + (i * 900), tz=timezone.utc)
-                delta = math.sin(i / 10.0) * (3.0 * pip_sz) + (0.2 * pip_sz)
-                o = curr
-                c = curr + delta
-                h = max(o, c) + (1.5 * pip_sz)
-                low_val = min(o, c) - (1.5 * pip_sz)
-                curr = c
-                candle_objs.append(ForexBar(timestamp=ts, open=o, high=h, low=low_val, close=c, volume=100.0))
+            candle_objs = _build_synthetic_demo_candles(req, pip_sz, base_price)
 
 
 
@@ -2560,7 +2855,8 @@ async def run_backtest(
                 ]
             return []
 
-        result = engine.run_candles(
+        result = await asyncio.to_thread(
+            engine.run_candles,
             pair=norm_pair,
             candles=candle_objs,
             strategy_callback=strategy_cb,
@@ -2569,6 +2865,18 @@ async def run_backtest(
 
         result_dict = _safe_model_dump(result)
         markdown_rep = f"> {demo_notice}\n\n{result.render_markdown_report()}"
+        interval_seconds = Timeframe.from_string(req.timeframe).seconds
+        demo_provenance = {
+            "source": data_source,
+            "synthetic": data_source == "synthetic",
+            "verified": False,
+            "timeframe": req.timeframe,
+            "candle_count": len(candle_objs),
+            "actual_start": candle_objs[0].timestamp.isoformat() if candle_objs else None,
+            "actual_end": (
+                candle_objs[-1].timestamp + timedelta(seconds=interval_seconds)
+            ).isoformat() if candle_objs else None,
+        }
 
         backtest_entry = {
             **demo_metadata,
@@ -2578,6 +2886,21 @@ async def run_backtest(
             "pair": norm_pair,
             "timeframe": req.timeframe,
             "result": result_dict,
+            "market_data_provenance": demo_provenance,
+            "execution_assumptions": {
+                "initial_balance": req.initial_balance,
+                "account_currency": req.account_currency,
+                "leverage": req.leverage,
+                "spread_pips": req.spread_pips,
+                "slippage_pips": req.slippage_pips,
+                "commission_per_lot_usd": req.commission_per_lot_usd,
+                "swap_per_day_usd": req.swap_per_day_usd,
+            },
+            "provider": None,
+            "quick_model": None,
+            "deep_model": None,
+            "analysts": [],
+            "analyses_performed": 0,
             "markdown_report": markdown_rep,
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
@@ -2586,9 +2909,45 @@ async def run_backtest(
             _prune_expired_forex_runs()
         return backtest_entry
     except DataInsufficientError as exc:
+        reason = str(exc)
+        source = str(get_runtime_config().get("forex_market_source", "mt5")).lower()
+        code = "HISTORICAL_DATA_UNAVAILABLE"
+        if "Trading Economics calendar snapshot" in reason:
+            code = "HISTORICAL_CONTEXT_UNAVAILABLE"
+            message = (
+                "Historical candles are available, but the required point-in-time economic calendar archive "
+                "is missing for this period. Import or refresh observed Trading Economics calendar coverage, "
+                "then retry."
+            )
+        elif "provider did not return valid historical coverage" in reason:
+            if source == "mt5":
+                message = (
+                    "MT5 did not provide complete historical candles for this period. "
+                    "Connect the MT5 terminal or select Yahoo in Settings > Market Data Provider, then retry."
+                )
+            else:
+                message = (
+                    "Yahoo did not provide complete historical candles for this period. "
+                    "Choose an earlier completed market period or retry later."
+                )
+        elif "requested historical range is not covered" in reason:
+            message = (
+                "The selected market-data provider returned only part of the requested period. "
+                "Choose a shorter completed period and retry."
+            )
+        else:
+            message = reason
         raise HTTPException(status_code=422, detail={
-            "code": "HISTORICAL_DATA_UNAVAILABLE", "message": str(exc),
+            "code": code,
+            "message": message,
+            "market_data_source": source.upper(),
+            "pair": req.pair,
+            "timeframe": req.timeframe,
+            "date_from": req.date_from,
+            "date_to": req.date_to,
         }) from exc
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.error("Forex backtest failed (%s)", type(exc).__name__)
         if effective_mode == "HISTORICAL_AGENT_BACKTEST":
@@ -2649,19 +3008,10 @@ async def run_walk_forward(
                 "set demo_mode=true for an explicitly unvalidated walk-forward demonstration."
             )
         if req.candles:
-            candle_objs = []
-            for c in req.candles:
-                t_val = c.get("time") or c.get("timestamp") or datetime.now(timezone.utc)
-                if isinstance(t_val, str):
-                    t_val = datetime.fromisoformat(t_val.replace("Z", "+00:00"))
-                candle_objs.append(ForexBar(
-                    timestamp=t_val,
-                    open=float(c["open"]),
-                    high=float(c["high"]),
-                    low=float(c["low"]),
-                    close=float(c["close"]),
-                    volume=float(c.get("volume", 100.0)),
-                ))
+            candle_objs = [
+                _demo_candle_from_payload(candle, index)
+                for index, candle in enumerate(req.candles)
+            ]
             provenance = {"source": "user_supplied_unverified", "execution_market": False}
         else:
             from tradingagents.backtest.historical_data import load_historical_candles
@@ -2737,7 +3087,8 @@ async def run_walk_forward(
                 provenance,
                 memory_source=get_learning_manager(),
             )
-        report = validator.validate(
+        report = await asyncio.to_thread(
+            validator.validate,
             candles=candle_objs,
             pair=norm_pair,
             timeframe=req.timeframe,
@@ -2793,6 +3144,8 @@ async def run_walk_forward(
         raise HTTPException(status_code=422, detail={
             "code": "HISTORICAL_DATA_UNAVAILABLE", "message": str(exc),
         }) from exc
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.error("Walk-forward validation failed (%s)", type(exc).__name__)
         raise HTTPException(status_code=400, detail={
@@ -2924,12 +3277,14 @@ async def run_historical_agent_ablation(req: ForexAblationRequest):
                 memory_source=get_learning_manager(),
             )
 
-        report = ForexAblationRunner(
+        ablation_runner = ForexAblationRunner(
             pair=norm_pair,
             timeframe=req.timeframe,
             backtest_config=bt_config,
             min_sample_size=req.min_sample_size,
-        ).run_ablation(
+        )
+        report = await asyncio.to_thread(
+            ablation_runner.run_ablation,
             candles=candles,
             variants=variants,
             pipeline_factory=pipeline_factory,
@@ -3001,7 +3356,13 @@ async def get_dashboard_overview(
     - Research pipeline state: recent analyses and institutional lessons
     - Performance summary: expectancy, profit factor, average R, max drawdown, with small sample warning.
     """
-    norm_pair = normalize_forex_pair(pair)
+    pair_info = get_forex_pair(pair)
+    if pair_info is None:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "INVALID_REQUEST"},
+        )
+    norm_pair = pair_info.symbol
     conn = mt5.connection
     is_conn = conn.is_connected() if hasattr(conn, "is_connected") else False
     status_str = conn.get_status().value if hasattr(conn, "get_status") else ("CONNECTED" if is_conn else "DISCONNECTED")
@@ -3011,35 +3372,49 @@ async def get_dashboard_overview(
     masked_login = mask_account_login(login_raw)
 
     account_info = None
+    account_available = False
     if is_conn:
         try:
             acc = conn.get_account_info() if hasattr(conn, "get_account_info") else None
             if acc:
+                def optional_number(value):
+                    if value is None:
+                        return None
+                    number = float(value)
+                    return number if math.isfinite(number) else None
+
+                leverage = getattr(acc, "leverage", None)
+                currency = str(getattr(acc, "currency", "") or "").strip().upper() or None
                 account_info = {
-                    "balance": float(acc.balance or 0.0),
-                    "equity": float(acc.equity or 0.0),
-                    "margin": float(acc.margin or 0.0),
-                    "margin_free": float(acc.margin_free or 0.0),
-                    "profit": float(acc.profit or 0.0),
-                    "currency": str(acc.currency or "USD"),
-                    "leverage": int(acc.leverage or 100),
+                    "balance": optional_number(getattr(acc, "balance", None)),
+                    "equity": optional_number(getattr(acc, "equity", None)),
+                    "margin": optional_number(getattr(acc, "margin", None)),
+                    "margin_free": optional_number(getattr(acc, "margin_free", None)),
+                    "profit": optional_number(getattr(acc, "profit", None)),
+                    "currency": currency,
+                    "leverage": int(leverage) if leverage is not None and int(leverage) > 0 else None,
                 }
+                account_available = True
         except Exception:
             account_info = None
 
     open_positions: list[dict[str, Any]] = []
+    positions_available = False
     if is_conn:
         try:
             positions = conn.get_positions() if hasattr(conn, "get_positions") else []
             open_positions = [_safe_model_dump(p) for p in positions]
+            positions_available = True
         except Exception:
             open_positions = []
 
     pending_orders: list[dict[str, Any]] = []
+    orders_available = False
     if is_conn:
         try:
             orders = conn.get_orders() if hasattr(conn, "get_orders") else []
             pending_orders = [_safe_model_dump(o) for o in orders]
+            orders_available = True
         except Exception:
             pending_orders = []
 
@@ -3055,7 +3430,12 @@ async def get_dashboard_overview(
         t for t in all_trades
         if (getattr(t, "close_time_utc", "") or "").startswith(today_str)
     ]
-    today_pnl = sum(float(getattr(t, "net_profit", 0.0) or getattr(t, "gross_profit", 0.0) or 0.0) for t in today_trades)
+    def settled_profit(trade) -> float:
+        net_profit = getattr(trade, "net_profit", None)
+        value = net_profit if net_profit is not None else getattr(trade, "gross_profit", None)
+        return float(value) if value is not None else 0.0
+
+    today_pnl = sum(settled_profit(t) for t in today_trades)
     today_r = sum(float(getattr(t, "r_multiple", 0.0) or 0.0) for t in today_trades)
     today_result = {
         "trade_count": len(today_trades),
@@ -3068,6 +3448,7 @@ async def get_dashboard_overview(
         recent_analyses = [dict(run) for run in list(_forex_runs.values())[-5:]]
 
     upcoming_events: list[dict[str, Any]] = []
+    calendar_available = False
     try:
         from tradingagents.forex.calendar import EventImpact, get_calendar_events_for_pair
         today_events = get_calendar_events_for_pair(
@@ -3088,6 +3469,7 @@ async def get_dashboard_overview(
             }
             for ev in today_events[:5]
         ]
+        calendar_available = True
     except Exception:
         upcoming_events = []
 
@@ -3126,8 +3508,11 @@ async def get_dashboard_overview(
             "server": server_str,
             "masked_login": masked_login,
             "account": account_info,
+            "account_available": account_available,
             "open_positions": open_positions,
+            "positions_available": positions_available,
             "pending_orders": pending_orders,
+            "orders_available": orders_available,
         },
         "trading": {
             "open_positions_count": len(open_positions),
@@ -3140,6 +3525,8 @@ async def get_dashboard_overview(
         "research": {
             "recent_analyses": recent_analyses,
             "upcoming_events": upcoming_events,
+            "calendar_available": calendar_available,
+            "calendar_date_utc": today_str,
             "recent_lessons": recent_lessons,
         },
         "performance": performance_summary,
@@ -3173,12 +3560,18 @@ async def get_performance_report(
     trades = journal.list_trades(limit=10000)
     proposals = journal.list_proposals(limit=5000)
     events = journal.get_events(limit=10000)
-    report = metrics_mgr.get_comprehensive_performance(
-        trades=trades, proposals=proposals, events=events, initial_capital=initial_capital
-    )
+    try:
+        report = metrics_mgr.get_comprehensive_performance(
+            trades=trades, proposals=proposals, events=events, initial_capital=initial_capital
+        )
+    except Exception as exc:
+        logger.warning("Performance calculation failed (%s)", type(exc).__name__)
+        raise HTTPException(
+            status_code=500, detail={"code": "PERFORMANCE_CALCULATION_FAILED"}
+        ) from exc
 
     closed = sorted(
-        (trade for trade in trades if getattr(trade, "close_time_utc", None)),
+        (trade for trade in trades if is_settled_trade(trade)),
         key=lambda trade: str(getattr(trade, "close_time_utc", "")),
     )
     cumulative_r: list[dict[str, Any]] = []
@@ -3193,11 +3586,10 @@ async def get_performance_report(
     for trade in closed:
         trade_id = str(getattr(trade, "trade_id", ""))
         timestamp = str(getattr(trade, "close_time_utc", ""))
-        metadata = getattr(trade, "metadata", None) or {}
         r_value = getattr(trade, "r_multiple", None)
         net_profit = getattr(trade, "net_profit", None)
-        mfe_r = metadata.get("mfe_r")
-        mae_r = metadata.get("mae_r")
+        mfe_r = get_excursion_value(trade, "mfe_r")
+        mae_r = get_excursion_value(trade, "mae_r")
         if r_value is not None:
             realized_r = float(r_value)
             running_r += realized_r
@@ -3213,8 +3605,26 @@ async def get_performance_report(
             equity.append({"trade_id": trade_id, "timestamp": timestamp, "value": running_equity})
             drawdown.append({"trade_id": trade_id, "timestamp": timestamp, "value": peak_equity - running_equity})
 
-    summary = metrics_mgr.compute_summary(trades=trades)
+    try:
+        summary = metrics_mgr.compute_summary(trades=trades)
+    except Exception as exc:
+        logger.warning("Performance execution summary failed (%s)", type(exc).__name__)
+        raise HTTPException(
+            status_code=500, detail={"code": "PERFORMANCE_CALCULATION_FAILED"}
+        ) from exc
+    generated_at = datetime.now(timezone.utc).isoformat()
     return {
+        "generated_at_utc": generated_at,
+        "capital_basis": {
+            "initial_capital": initial_capital,
+            "source": "analytical_input",
+            "currency": "USD",
+        },
+        "sample": {
+            "stored_trades": len(trades),
+            "closed_trades": len(closed),
+            "open_trades_excluded": len(trades) - len(closed),
+        },
         "performance": _safe_model_dump(report),
         "series": {
             "cumulative_r": cumulative_r,
@@ -3226,6 +3636,7 @@ async def get_performance_report(
         },
         "execution_friction": {
             "total_executions_analyzed": summary.total_executions_analyzed,
+            "total_executions_excluded": summary.total_executions_excluded,
             "total_execution_friction_usd": summary.total_execution_friction_usd,
             "average_execution_quality_score": summary.avg_execution_quality_score,
         },
@@ -3311,6 +3722,7 @@ async def list_lessons(
     tag: str | None = None,
     limit: int = Query(default=200, ge=1, le=1000),
     learning_mgr: ForexLearningManager = Depends(get_learning_manager),
+    journal: ForexTradeJournal = Depends(get_journal),
 ):
     """Query stored heuristic lessons from past trade reflections."""
     filters: dict[str, Any] = {"pair": pair, "setup_type": setup_type, "tag": tag}
@@ -3322,10 +3734,19 @@ async def list_lessons(
         filters["min_evidence_count"] = min_evidence_count
     if active is not None:
         filters["active"] = active
-    if limit != 200:
-        filters["limit"] = limit
+    filters["limit"] = limit
     lessons = learning_mgr.store.list_lessons(**filters)
-    return {"lessons": [_safe_model_dump(les) for les in lessons], "count": len(lessons)}
+    serialized = []
+    for lesson in lessons:
+        item = _safe_model_dump(lesson)
+        trade_id = getattr(lesson, "source_trade_id", None)
+        proposal_id = getattr(lesson, "proposal_id", None)
+        item["source_availability"] = {
+            "trade": bool(trade_id and journal.get_trade(trade_id)),
+            "proposal": bool(proposal_id and journal.get_proposal(proposal_id)),
+        }
+        serialized.append(item)
+    return {"lessons": serialized, "count": len(serialized), "limit": limit}
 
 
 @router.get("/learning/lessons/{lesson_id}")

@@ -38,10 +38,8 @@ from tradingagents.database.models import (
     TradeJournalRecord,
     TradeStatus,
 )
-from tradingagents.forex.pips import (
-    pip_size_for,
-    pip_value_in_account_currency,
-)
+from tradingagents.forex.domain import get_forex_pair
+from tradingagents.forex.pips import pip_value_in_account_currency
 from tradingagents.research.contracts import canonical_json
 
 logger = logging.getLogger(__name__)
@@ -411,6 +409,10 @@ class ForexTradeJournal:
         start_date: str | None = None,
         end_date: str | None = None,
         limit: int = 100,
+        offset: int = 0,
+        action: str | None = None,
+        setup_type: str | None = None,
+        timeframe: str | None = None,
     ) -> list[ProposalRecord]:
         """Query proposals with optional filtering."""
         query = ("SELECT proposals.*, proposal_evidence.payload_json, proposal_evidence.run_id, "
@@ -431,9 +433,18 @@ class ForexTradeJournal:
         if end_date:
             query += " AND created_at_utc <= ?"
             params.append(end_date)
+        if action:
+            query += " AND action = ?"
+            params.append(action.strip().upper())
+        if setup_type:
+            query += " AND setup_type = ?"
+            params.append(setup_type.strip().upper())
+        if timeframe:
+            query += " AND timeframe = ?"
+            params.append(timeframe.strip().upper())
 
-        query += " ORDER BY created_at_utc DESC LIMIT ?;"
-        params.append(limit)
+        query += " ORDER BY created_at_utc DESC LIMIT ? OFFSET ?;"
+        params.extend((limit, offset))
 
         with self._lock:
             conn = self._get_connection()
@@ -442,6 +453,57 @@ class ForexTradeJournal:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.execute(query, params)
                 return [self._row_to_proposal_record(row) for row in cursor.fetchall()]
+            finally:
+                if should_close:
+                    conn.close()
+
+    def count_proposals(
+        self,
+        *,
+        pair: str | None = None,
+        status: ProposalStatus | str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        action: str | None = None,
+        setup_type: str | None = None,
+        timeframe: str | None = None,
+    ) -> int:
+        """Count proposals using the same filters as :meth:`list_proposals`."""
+        query = "SELECT COUNT(*) FROM proposals WHERE 1=1"
+        params: list[Any] = []
+        filters = (
+            ("pair", pair.strip().upper() if pair else None),
+            ("status", status.value if hasattr(status, "value") else str(status) if status else None),
+            ("created_at_utc >=", start_date),
+            ("created_at_utc <=", end_date),
+            ("action", action.strip().upper() if action else None),
+            ("setup_type", setup_type.strip().upper() if setup_type else None),
+            ("timeframe", timeframe.strip().upper() if timeframe else None),
+        )
+        for column, value in filters:
+            if value is not None:
+                operator = "" if column.endswith((">=", "<=")) else " ="
+                query += f" AND {column}{operator} ?"
+                params.append(value)
+        with self._lock:
+            conn = self._get_connection()
+            should_close = conn != self._mem_conn
+            try:
+                return int(conn.execute(query, params).fetchone()[0])
+            finally:
+                if should_close:
+                    conn.close()
+
+    def list_proposal_pairs(self) -> list[str]:
+        """Return distinct persisted proposal symbols for filter controls."""
+        with self._lock:
+            conn = self._get_connection()
+            should_close = conn != self._mem_conn
+            try:
+                rows = conn.execute(
+                    "SELECT DISTINCT pair FROM proposals WHERE pair IS NOT NULL AND pair != '' ORDER BY pair"
+                ).fetchall()
+                return [str(row[0]) for row in rows]
             finally:
                 if should_close:
                     conn.close()
@@ -494,6 +556,8 @@ class ForexTradeJournal:
                 pass
 
         trade_meta = dict(metadata or {})
+        trade_meta.setdefault("initial_lots", lots)
+        trade_meta.setdefault("initial_stop_loss", stop_loss)
         for k, v in ver_meta.items():
             trade_meta.setdefault(k, v)
         if ver_meta:
@@ -572,6 +636,8 @@ class ForexTradeJournal:
         notes: str = "",
         reflection: str = "",
         metadata: dict[str, Any] | None = None,
+        gross_profit: float | None = None,
+        commission: float | None = None,
     ) -> TradeJournalRecord:
         """Close an active position, calculating pips, R-multiple, and PnL."""
         trade = self.get_trade(trade_id)
@@ -585,26 +651,36 @@ class ForexTradeJournal:
             else TradeExitReason.from_str(exit_reason)
         )
 
-        # Pip calculations
-        ps = pip_size_for(trade.pair)
-        if trade.action == ForexAction.LONG:
-            pips = round((close_price - trade.open_price) / ps, 1)
-            risk_pips = abs(trade.open_price - trade.stop_loss) / ps
+        pair = get_forex_pair(trade.pair)
+        partial = dict(trade.metadata.get("partial_close_totals", {}))
+        partial_gross = float(partial.get("gross_profit", 0.0))
+        initial_lots = float(trade.metadata.get("initial_lots", trade.lots))
+        if pair is None:
+            if gross_profit is None:
+                raise ValueError(
+                    f"Authoritative gross_profit is required for unsupported instrument {trade.pair}."
+                )
+            pips = None
+            r_multiple = None
         else:
-            pips = round((trade.open_price - close_price) / ps, 1)
-            risk_pips = abs(trade.stop_loss - trade.open_price) / ps
+            ps = pair.pip_size
+            direction = 1.0 if trade.action == ForexAction.LONG else -1.0
+            final_pips = direction * (close_price - trade.open_price) / ps
+            pip_lots = float(partial.get("pip_lots", 0.0)) + final_pips * trade.lots
+            pips = round(pip_lots / initial_lots, 1) if initial_lots > 0 else None
+            initial_stop = float(trade.metadata.get("initial_stop_loss", trade.stop_loss))
+            risk_pips = abs(trade.open_price - initial_stop) / ps
+            r_multiple = round(pips / risk_pips, 2) if pips is not None and risk_pips > 0 else None
+            if gross_profit is None:
+                pip_value = pip_value_in_account_currency(
+                    pair=pair, lot_size=trade.lots, account_currency=self.account_currency,
+                    current_quote_price=close_price,
+                )
+                gross_profit = round(partial_gross + final_pips * pip_value, 2)
 
-        # Realized R-Multiple
-        r_multiple = round(pips / risk_pips, 2) if risk_pips > 0 else 0.0
-
-        # Profit arithmetic in account currency
-        pip_val_per_lot = pip_value_in_account_currency(
-            pair=trade.pair,
-            lot_size=1.0,
-            account_currency=self.account_currency,
-        )
-        gross_profit = round(pips * pip_val_per_lot * trade.lots, 2)
-        net_profit = round(gross_profit - trade.commission + swap, 2)
+        effective_commission = trade.commission if commission is None else commission
+        gross_profit = round(float(gross_profit), 2)
+        net_profit = round(gross_profit - effective_commission + swap, 2)
 
         merged_notes = f"{trade.notes}\n{notes}".strip() if notes else trade.notes
         merged_meta = {**trade.metadata, **(metadata or {})}
@@ -618,7 +694,7 @@ class ForexTradeJournal:
                         """
                         UPDATE trades
                         SET status = 'CLOSED', close_time_utc = ?, close_price = ?,
-                            swap = ?, gross_profit = ?, net_profit = ?,
+                            swap = ?, commission = ?, gross_profit = ?, net_profit = ?,
                             pips_gained = ?, r_multiple = ?, exit_reason = ?,
                             notes = ?, reflection = ?, metadata_json = ?
                         WHERE trade_id = ?;
@@ -627,6 +703,7 @@ class ForexTradeJournal:
                             now_str,
                             close_price,
                             swap,
+                            effective_commission,
                             gross_profit,
                             net_profit,
                             pips,
@@ -687,6 +764,7 @@ class ForexTradeJournal:
         start_date: str | None = None,
         end_date: str | None = None,
         limit: int = 100,
+        offset: int = 0,
     ) -> list[TradeJournalRecord]:
         """List trades matching filters."""
         query = "SELECT * FROM trades WHERE 1=1"
@@ -706,8 +784,8 @@ class ForexTradeJournal:
             query += " AND open_time_utc <= ?"
             params.append(end_date)
 
-        query += " ORDER BY open_time_utc DESC LIMIT ?;"
-        params.append(limit)
+        query += " ORDER BY open_time_utc DESC LIMIT ? OFFSET ?;"
+        params.extend((limit, offset))
 
         with self._lock:
             conn = self._get_connection()
@@ -720,12 +798,45 @@ class ForexTradeJournal:
                 if should_close:
                     conn.close()
 
+    def count_trades(
+        self,
+        pair: str | None = None,
+        status: TradeStatus | str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ) -> int:
+        """Count trades matching the same filters as :meth:`list_trades`."""
+        query = "SELECT COUNT(*) FROM trades WHERE 1=1"
+        params: list[Any] = []
+        if pair:
+            query += " AND pair = ?"
+            params.append(pair.strip().upper())
+        if status:
+            query += " AND status = ?"
+            params.append(status.value if hasattr(status, "value") else str(status))
+        if start_date:
+            query += " AND open_time_utc >= ?"
+            params.append(start_date)
+        if end_date:
+            query += " AND open_time_utc <= ?"
+            params.append(end_date)
+        with self._lock:
+            conn = self._get_connection()
+            should_close = conn != self._mem_conn
+            try:
+                return int(conn.execute(query, params).fetchone()[0])
+            finally:
+                if should_close:
+                    conn.close()
+
     def update_trade_reflection(
         self,
         trade_id: str,
         reflection: str,
         tags: list[str] | None = None,
         notes: str | None = None,
+        actor: str = "System",
+        rating: str | None = None,
     ) -> bool:
         """Attach post-trade learning, reflection, and categorization tags."""
         with self._lock:
@@ -733,25 +844,29 @@ class ForexTradeJournal:
             should_close = conn != self._mem_conn
             try:
                 with conn:
-                    if tags is not None and notes is not None:
-                        cursor = conn.execute(
-                            """
-                            UPDATE trades
-                            SET reflection = ?, tags_json = ?, notes = ?
-                            WHERE trade_id = ?;
-                            """,
-                            (reflection, json.dumps(tags), notes, trade_id),
-                        )
-                    elif tags is not None:
-                        cursor = conn.execute(
-                            "UPDATE trades SET reflection = ?, tags_json = ? WHERE trade_id = ?;",
-                            (reflection, json.dumps(tags), trade_id),
-                        )
-                    else:
-                        cursor = conn.execute(
-                            "UPDATE trades SET reflection = ? WHERE trade_id = ?;",
-                            (reflection, trade_id),
-                        )
+                    row = conn.execute(
+                        "SELECT proposal_id, tags_json, notes FROM trades WHERE trade_id = ?", (trade_id,)
+                    ).fetchone()
+                    if row is None:
+                        return False
+                    existing_tags = json.loads(row[1]) if row[1] else []
+                    merged_tags = list(dict.fromkeys([*existing_tags, *(tags or [])]))
+                    merged_notes = row[2] or ""
+                    if notes and notes not in merged_notes:
+                        merged_notes = f"{merged_notes}\n{notes}".strip()
+                    cursor = conn.execute(
+                        "UPDATE trades SET reflection = ?, tags_json = ?, notes = ? WHERE trade_id = ?",
+                        (reflection, json.dumps(merged_tags), merged_notes, trade_id),
+                    )
+                    now = datetime.now(timezone.utc).isoformat()
+                    conn.execute(
+                        """INSERT INTO trade_events
+                        (event_id, trade_id, proposal_id, event_type, timestamp_utc, source, actor, description, payload_json)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (f"evt_{uuid.uuid4().hex[:12]}", trade_id, row[0], "NOTE_ADDED", now,
+                         actor, actor, "Post-trade reflection recorded",
+                         json.dumps({"rating": rating, "tags": merged_tags})),
+                    )
                 return cursor.rowcount > 0
             finally:
                 if should_close:
@@ -1126,6 +1241,7 @@ class ForexTradeJournal:
     @staticmethod
     def _row_to_trade_record(row: sqlite3.Row) -> TradeJournalRecord:
         row_dict = dict(row)
+        supports_forex_metrics = get_forex_pair(row["pair"]) is not None
         return TradeJournalRecord(
             schema_version=row_dict.get("schema_version", 1) or 1,
             trade_id=row["trade_id"],
@@ -1144,8 +1260,10 @@ class ForexTradeJournal:
             swap=row["swap"],
             gross_profit=row["gross_profit"],
             net_profit=row["net_profit"],
-            pips_gained=row["pips_gained"],
-            r_multiple=row["r_multiple"],
+            # Legacy rows may contain Forex-derived values for non-FX symbols.
+            # Do not expose those fabricated metrics to UI or downstream users.
+            pips_gained=row["pips_gained"] if supports_forex_metrics else None,
+            r_multiple=row["r_multiple"] if supports_forex_metrics else None,
             confidence=dict(row).get("confidence"),
             exit_reason=TradeExitReason.from_str(row["exit_reason"]) if row["exit_reason"] else None,
             notes=row["notes"],
@@ -1389,6 +1507,7 @@ class ForexTradeJournal:
         setup_type: str | None = None,
         outcome_category: str | None = None,
         trade_id: str | None = None,
+        proposal_id: str | None = None,
         limit: int = 100,
     ) -> list[dict[str, Any]]:
         """List lessons matching optional filters."""
@@ -1410,6 +1529,9 @@ class ForexTradeJournal:
                 if trade_id:
                     query += " AND trade_id = ?"
                     params.append(trade_id)
+                if proposal_id:
+                    query += " AND proposal_id = ?"
+                    params.append(proposal_id)
                 query += " ORDER BY created_at_utc DESC LIMIT ?"
                 params.append(limit)
 

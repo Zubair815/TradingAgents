@@ -46,6 +46,8 @@ from tradingagents.journal import (
     ReconciliationStatus,
     TradeLifecycleManager,
 )
+from tradingagents.journal.broker_deals import record_broker_deal
+from tradingagents.mt5.models import MT5Deal
 
 # ---------------------------------------------------------------------------
 # Fixtures & Helpers
@@ -248,8 +250,26 @@ class TestTradeLifecycleOperations:
             exit_reason=TradeExitReason.TAKE_PROFIT,
         )
         assert closed_trade.status == TradeStatus.CLOSED
-        assert closed_trade.pips_gained == pytest.approx(80.0, 0.1)
-        assert closed_trade.r_multiple == pytest.approx(2.0, 0.1)  # 80 pips gain / 40 pips risk = 2.0R
+        assert closed_trade.pips_gained == pytest.approx(60.0, 0.1)
+        assert closed_trade.r_multiple == pytest.approx(1.5, 0.1)
+        assert closed_trade.gross_profit == pytest.approx(600.0, 0.1)
+        assert closed_trade.net_profit == pytest.approx(600.0, 0.1)
+
+    def test_unsupported_broker_instrument_preserves_cash_without_fake_pips(self, memory_journal):
+        trade = memory_journal.record_trade_open(
+            pair="BTCUSD", action=ForexAction.LONG, open_price=85000.0,
+            stop_loss=0.0, lots=0.1,
+        )
+        event = record_broker_deal(memory_journal, trade.trade_id, MT5Deal(
+            ticket=1, order=1, position_id=1, time=datetime.now(timezone.utc),
+            type="SELL", entry="OUT", symbol="BTCUSD", volume=0.1,
+            price=84960.0, profit=-4.0,
+        ))
+        closed = memory_journal.get_trade(trade.trade_id)
+        assert event == "POSITION_CLOSED"
+        assert closed.net_profit == -4.0
+        assert closed.pips_gained is None
+        assert closed.r_multiple is None
 
 
 # ---------------------------------------------------------------------------
@@ -959,10 +979,10 @@ class TestProposalLifecycleComplete:
         assert status == ProposalStatus.WAITING_USER
         assert memory_journal.get_proposal(prop_id).status == ProposalStatus.WAITING_USER
 
-        # 3. Action: EXECUTED -> records workflow intent/state
-        status_exec = mgr.record_user_action(prop_id, action="EXECUTED", reason="Manual fill confirmed by trader")
-        assert status_exec == ProposalStatus.EXECUTED
-        assert memory_journal.get_proposal(prop_id).status == ProposalStatus.EXECUTED
+        # 3. Status-only execution is forbidden without linked execution evidence.
+        from tradingagents.journal.lifecycle import LifecycleError
+        with pytest.raises(LifecycleError, match="linked journal or MT5 execution"):
+            mgr.record_user_action(prop_id, action="EXECUTED", reason="Manual fill claimed")
 
         # Test SKIPPED action on another proposal
         prop2 = make_proposal("GBPUSD", entry=1.2650, sl=1.2610, tp1=1.2730)
@@ -1031,6 +1051,18 @@ class TestProposalLifecycleComplete:
         assert p2_id not in expired_ids
         assert memory_journal.get_proposal(p1_id).status == ProposalStatus.EXPIRED
         assert memory_journal.get_proposal(p2_id).status == ProposalStatus.PROPOSED
+
+    def test_expiry_processes_more_than_default_page(self, memory_journal: ForexTradeJournal):
+        mgr = TradeLifecycleManager(journal=memory_journal)
+        cutoff = "2026-10-03T10:00:00+00:00"
+        ids = [
+            mgr.submit_proposal(make_proposal("EURUSD", entry=1.085, valid_until=cutoff))
+            for _ in range(105)
+        ]
+        expired = mgr.check_and_expire_proposals(
+            current_time=datetime(2026, 10, 3, 11, 0, tzinfo=timezone.utc)
+        )
+        assert set(expired) == set(ids)
 
     def test_proposal_supersession_for_same_pair(self, memory_journal: ForexTradeJournal):
         mgr = TradeLifecycleManager(journal=memory_journal)

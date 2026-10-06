@@ -243,7 +243,8 @@ class ForexMetricsManager:
 
         return MetricsSummary(
             total_trades_analyzed=total_trades,
-            total_executions_analyzed=len(exec_list),
+            total_executions_analyzed=int(exec_benchmark.get("total_executions", 0)),
+            total_executions_excluded=int(exec_benchmark.get("excluded_executions", 0)),
             avg_mfe_pips=avg_mfe_pips,
             avg_mae_pips=avg_mae_pips,
             avg_mfe_r=avg_mfe_r,

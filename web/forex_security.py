@@ -33,20 +33,25 @@ MESSAGES = {
     "DATA_UNAVAILABLE": "Requested data is unavailable.",
     "STALE_DATA": "Requested market data is stale.",
     "HISTORICAL_DATA_UNAVAILABLE": "Historical data is unavailable for the requested period.",
+    "HISTORICAL_CONTEXT_UNAVAILABLE": "Required point-in-time historical context is unavailable for the requested period.",
     "MT5_DISCONNECTED": "MetaTrader 5 is not connected.",
     "MT5_CONNECTION_FAILED": "MetaTrader 5 connection failed.",
     "MT5_DATA_UNAVAILABLE": "MetaTrader 5 data is temporarily unavailable.",
+    "MT5_QUOTE_UNAVAILABLE": "The live MT5 quote is unavailable because the market is closed or the quote is stale.",
     "MT5_SYMBOL_UNAVAILABLE": "The requested MetaTrader 5 symbol is unavailable.",
     "PROPOSAL_NOT_FOUND": "Proposal not found",
     "TRADE_NOT_FOUND": "Trade not found",
+    "LESSON_NOT_FOUND": "Lesson not found",
     "RUN_NOT_FOUND": "Run not found",
     "RISK_REJECTED": "The proposal was rejected by risk checks.",
     "BACKTEST_FAILED": "The backtest could not be completed.",
     "PROVIDER_ERROR": "The provider request could not be completed.",
+    "PERFORMANCE_CALCULATION_FAILED": "Performance analytics could not be calculated from the stored trade evidence.",
     "FOREX_BACKTEST_DEMO_ONLY": "Demo mode must be explicitly enabled.",
     "INVALID_BACKTEST_MODE": "The backtest mode is invalid.",
     "HISTORICAL_ANALYSIS_FAILED": "Historical analysis could not be completed.",
     "WALK_FORWARD_FAILED": "Walk-forward validation could not be completed.",
+    "COST_CONFIRMATION_REQUIRED": "Explicit confirmation is required for this estimated provider cost.",
 }
 
 
@@ -58,6 +63,8 @@ def error_response(request, status, detail=None):
     elif status == 404:
         code = ("TRADE_NOT_FOUND" if "/trades/" in path else
                 "PROPOSAL_NOT_FOUND" if "/proposals/" in path else "RUN_NOT_FOUND")
+        if "/learning/lessons/" in path:
+            code = "LESSON_NOT_FOUND"
     elif "/mt5/" in path and status >= 500:
         code = "MT5_CONNECTION_FAILED" if path.endswith("/connect") else "MT5_DISCONNECTED"
     elif "/backtest/" in path and status >= 500:
@@ -65,8 +72,23 @@ def error_response(request, status, detail=None):
     if isinstance(detail, dict) and detail.get("code") in MESSAGES:
         code = detail["code"]
     error = {"code": code, "message": MESSAGES[code], "details": {}}
+    if code in {"HISTORICAL_DATA_UNAVAILABLE", "HISTORICAL_CONTEXT_UNAVAILABLE"} and isinstance(detail, dict):
+        safe_message = detail.get("message")
+        if isinstance(safe_message, str) and safe_message:
+            error["message"] = safe_message
+        for key in ("market_data_source", "pair", "timeframe", "date_from", "date_to"):
+            value = detail.get(key)
+            if isinstance(value, str) or value is None:
+                error["details"][key] = value
     # Retain the existing detail field for API consumers during migration.
-    legacy = {"code": code, "message": error["message"]} if isinstance(detail, dict) else error["message"]
+    if isinstance(detail, dict):
+        legacy = {"code": code, "message": error["message"]}
+        if code == "COST_CONFIRMATION_REQUIRED" and isinstance(detail.get("estimate"), dict):
+            legacy["estimate"] = detail["estimate"]
+        if code in {"HISTORICAL_DATA_UNAVAILABLE", "HISTORICAL_CONTEXT_UNAVAILABLE"}:
+            legacy.update(error["details"])
+    else:
+        legacy = error["message"]
     return JSONResponse(status_code=status, content={"error": error, "detail": legacy},
                         headers={"Cache-Control": "no-store"})
 

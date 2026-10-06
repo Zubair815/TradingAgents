@@ -6,6 +6,7 @@ partial close execution, and automated timeline auditing.
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timezone
 from typing import Any
@@ -23,8 +24,8 @@ from tradingagents.database.models import (
     TradeJournalRecord,
     TradeStatus,
 )
-from tradingagents.forex.domain import normalize_forex_pair
-from tradingagents.forex.pips import pip_size_for, pips_directional
+from tradingagents.forex.domain import get_forex_pair, normalize_forex_pair
+from tradingagents.forex.pips import pip_size_for, pip_value_in_account_currency, pips_directional
 from tradingagents.journal.models import EventType, LifecycleState
 from tradingagents.journal.timeline import EventTimeline
 
@@ -254,6 +255,7 @@ class TradeLifecycleManager:
         take_profit: float | None = None,
         ticket: int | str | None = None,
         actor: str = "MT5Observer",
+        open_time: datetime | str | None = None,
     ) -> str:
         """Transition an approved proposal into an active open position."""
         record = self.journal.get_proposal(proposal_id)
@@ -269,6 +271,11 @@ class TradeLifecycleManager:
         eff_sl = stop_loss if stop_loss is not None else (record.stop_loss or 0.0)
         eff_tp = take_profit if take_profit is not None else record.take_profit_1
 
+        open_time_str = (
+            open_time.astimezone(timezone.utc).isoformat()
+            if isinstance(open_time, datetime)
+            else (str(open_time) if open_time else None)
+        )
         trade_record = self.journal.record_trade_open(
             pair=record.pair,
             action=record.action,
@@ -278,6 +285,7 @@ class TradeLifecycleManager:
             lots=lots,
             proposal_id=proposal_id,
             metadata={"broker_ticket": str(ticket) if ticket else None},
+            open_time_utc=open_time_str,
         )
         trade_id = trade_record.trade_id
 
@@ -302,6 +310,7 @@ class TradeLifecycleManager:
                 "stop_loss": eff_sl,
                 "take_profit": eff_tp,
             },
+            timestamp_utc=open_time_str,
         )
         return trade_id
 
@@ -347,6 +356,7 @@ class TradeLifecycleManager:
                 "open_price": open_price,
                 "unplanned": True,
             },
+            timestamp_utc=open_time_utc,
         )
         return trade_id
 
@@ -470,20 +480,36 @@ class TradeLifecycleManager:
             )
 
         remaining_lots = round(trade.lots - lots_to_close, 2)
-        pip_sz = pip_size_for(trade.pair)
+        pair = get_forex_pair(trade.pair)
+        if pair is None:
+            raise LifecycleError(
+                f"Partial-close P&L is unavailable for unsupported instrument {trade.pair}."
+            )
+        pip_sz = pair.pip_size
         if trade.action == ForexAction.LONG:
             pip_diff = round(pips_directional(trade.open_price, close_price, pip_sz), 1)
         else:
             pip_diff = round(pips_directional(close_price, trade.open_price, pip_sz), 1)
-        realized_profit = pip_diff * (lots_to_close * 10.0)  # Standard ~$10/pip per lot
+        pip_value = pip_value_in_account_currency(
+            pair=pair, lot_size=lots_to_close, account_currency=self.journal.account_currency,
+            current_quote_price=close_price,
+        )
+        realized_profit = pip_diff * pip_value
+
+        metadata = dict(trade.metadata)
+        partial = dict(metadata.get("partial_close_totals", {}))
+        partial["gross_profit"] = round(float(partial.get("gross_profit", 0.0)) + realized_profit, 2)
+        partial["pip_lots"] = round(float(partial.get("pip_lots", 0.0)) + pip_diff * lots_to_close, 8)
+        partial["lots_closed"] = round(float(partial.get("lots_closed", 0.0)) + lots_to_close, 8)
+        metadata["partial_close_totals"] = partial
 
         with self.journal._lock:
             conn = self.journal._get_connection()
             try:
                 with conn:
                     conn.execute(
-                        "UPDATE trades SET lots = ? WHERE trade_id = ?;",
-                        (remaining_lots, trade_id),
+                        "UPDATE trades SET lots = ?, metadata_json = ? WHERE trade_id = ?;",
+                        (remaining_lots, json.dumps(metadata), trade_id),
                     )
             finally:
                 if not self.journal._is_memory and conn is not self.journal._mem_conn:
@@ -535,6 +561,14 @@ class TradeLifecycleManager:
         if trade.status != TradeStatus.OPEN:
             raise LifecycleError(f"Trade {trade_id} is already settled ({trade.status.value}).")
 
+        if close_time is not None:
+            close_dt = close_time if isinstance(close_time, datetime) else datetime.fromisoformat(str(close_time).replace("Z", "+00:00"))
+            if close_dt.tzinfo is None:
+                raise LifecycleError("close_time must include a timezone")
+            open_dt = datetime.fromisoformat(trade.open_time_utc.replace("Z", "+00:00"))
+            if close_dt.astimezone(timezone.utc) < open_dt.astimezone(timezone.utc):
+                raise LifecycleError("close_time cannot be earlier than open_time")
+
         close_time_str = (
             close_time.isoformat()
             if isinstance(close_time, datetime)
@@ -547,6 +581,8 @@ class TradeLifecycleManager:
             exit_reason=exit_reason,
             close_time_utc=close_time_str,
             swap=swap,
+            gross_profit=gross_profit,
+            commission=commission,
         )
 
         self.timeline.record_event(
@@ -578,7 +614,8 @@ class TradeLifecycleManager:
         self.validate_transition(curr_state, LifecycleState.CANCELLED)
 
         self.journal.update_proposal_status(
-            proposal_id=proposal_id, status=ProposalStatus.CANCELLED
+            proposal_id=proposal_id,
+            status=ProposalStatus.CANCELLED,
         )
 
         self.timeline.record_event(
@@ -605,7 +642,8 @@ class TradeLifecycleManager:
         self.validate_transition(curr_state, LifecycleState.EXPIRED)
 
         self.journal.update_proposal_status(
-            proposal_id=proposal_id, status=ProposalStatus.EXPIRED
+            proposal_id=proposal_id,
+            status=ProposalStatus.EXPIRED,
         )
 
         self.timeline.record_event(
@@ -623,12 +661,7 @@ class TradeLifecycleManager:
         actor: str = "User",
         reason: str = "",
     ) -> ProposalStatus:
-        """Record human user decision on a proposal (EXECUTED, SKIPPED, WAIT).
-
-        CRITICAL SAFETY BOUNDARY:
-        'EXECUTED' merely records workflow intent/state in the journal.
-        It does NOT place any live broker trade.
-        """
+        """Record a non-execution human decision on a proposal."""
         record = self.journal.get_proposal(proposal_id)
         if record is None:
             raise LifecycleError(f"Proposal '{proposal_id}' not found.")
@@ -637,11 +670,10 @@ class TradeLifecycleManager:
         action_clean = action.strip().upper()
 
         if action_clean in ("EXECUTED", "EXECUTE"):
-            next_state = LifecycleState.EXECUTED
-            next_status = ProposalStatus.EXECUTED
-            evt_type = EventType.PROPOSAL_EXECUTED
-            desc = f"Trader recorded execution intent: {reason or 'Manual execution recorded'}"
-        elif action_clean == "SKIPPED_BY_USER":
+            raise LifecycleError(
+                "EXECUTED requires a linked journal or MT5 execution; record the actual trade instead."
+            )
+        if action_clean == "SKIPPED_BY_USER":
             next_state = LifecycleState.SKIPPED_BY_USER
             next_status = ProposalStatus.SKIPPED_BY_USER
             evt_type = EventType.PROPOSAL_SKIPPED
@@ -658,7 +690,7 @@ class TradeLifecycleManager:
             desc = f"Trader placed proposal on hold: {reason or 'Awaiting trigger'}"
         else:
             raise LifecycleError(
-                f"Unsupported user action '{action}'. Must be EXECUTED, SKIPPED, SKIPPED_BY_USER, or WAIT."
+                f"Unsupported user action '{action}'. Must be SKIPPED, SKIPPED_BY_USER, or WAIT."
             )
 
         self.validate_transition(curr_state, next_state)
@@ -676,6 +708,26 @@ class TradeLifecycleManager:
             payload={"action": action_clean, "reason": reason},
         )
         return next_status
+
+    def reject_proposal(
+        self, proposal_id: str, reason: str = "Rejected by user", actor: str = "User"
+    ) -> None:
+        """Reject a proposed trade while preserving a complete audit event."""
+        record = self.journal.get_proposal(proposal_id)
+        if record is None:
+            raise LifecycleError(f"Proposal '{proposal_id}' not found.")
+        self.validate_transition(LifecycleState(record.status.value), LifecycleState.REJECTED)
+        self.journal.update_proposal_status(
+            proposal_id,
+            ProposalStatus.REJECTED,
+        )
+        self.timeline.record_event(
+            event_type=EventType.PROPOSAL_REJECTED,
+            proposal_id=proposal_id,
+            actor=actor,
+            description=f"Proposal rejected: {reason}",
+            payload={"reason": reason},
+        )
 
     def supersede_proposal(
         self,
@@ -719,7 +771,10 @@ class TradeLifecycleManager:
         ]
         expired_ids: list[str] = []
         for status in active_statuses:
-            proposals = self.journal.list_proposals(status=status)
+            proposals = self.journal.list_proposals(
+                status=status,
+                limit=self.journal.count_proposals(status=status) or 1,
+            )
             for prop in proposals:
                 valid_until_str = prop.valid_until
                 if not valid_until_str:

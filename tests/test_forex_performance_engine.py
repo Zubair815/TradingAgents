@@ -138,8 +138,9 @@ def test_performance_engine_overall_metrics():
     assert metrics.average_r == 0.50  # (2.0 - 1.0 + 1.0 + 0.0) / 4
     assert metrics.median_r == 0.50   # median of [ -1.0, 0.0, 1.0, 2.0 ] = 0.50
 
-    # Expectancy: (0.5 * 1.5) + (0.5 * -1.0) = 0.75 - 0.5 = 0.25R
-    assert metrics.expectancy == 0.25
+    # Expectancy uses the explicit 25% loss rate; breakevens are not losses.
+    assert metrics.expectancy == 0.50
+    assert metrics.expectancy_cash == 250.0
 
     # Holding duration: (4 + 2 + 6 + 1) / 4 = 13 / 4 = 3.25h = 11700s
     assert metrics.holding_duration_seconds == 11700.0
@@ -310,18 +311,22 @@ def test_generate_performance_report_and_markdown():
 def test_journal_and_metrics_manager_integration():
     """Verify ForexJournalManager and ForexMetricsManager compute comprehensive performance."""
     journal = ForexTradeJournal(db_path=":memory:", auto_migrate=True)
-    journal.record_trade_open(
+    opened = journal.record_trade_open(
         pair="EURUSD", action=ForexAction.LONG, open_price=1.08, stop_loss=1.07,
         lots=1.0, confidence=72.0,
     )
 
     journal_mgr = ForexJournalManager(journal=journal)
     report1 = journal_mgr.compute_comprehensive_performance()
-    assert report1.overall.trade_count == 1
+    assert report1.overall.trade_count == 0
 
     metrics_mgr = ForexMetricsManager(journal=journal)
     report2 = metrics_mgr.get_comprehensive_performance()
-    assert report2.overall.trade_count == 1
+    assert report2.overall.trade_count == 0
+
+    journal.record_trade_close(opened.trade_id, close_price=1.09)
+    assert journal_mgr.compute_comprehensive_performance().overall.trade_count == 1
+    assert metrics_mgr.get_comprehensive_performance().overall.trade_count == 1
 
 
 def test_api_performance_route():
@@ -336,7 +341,7 @@ def test_api_performance_route():
     journal.record_trade_close(
         opened.trade_id,
         close_price=1.24,
-        metadata={"mfe_r": 1.5, "mae_r": -0.25},
+        metadata={"mfe_mae": {"mfe_r": 1.5, "mae_r": -0.25}},
     )
 
     set_forex_dependencies(journal=journal, metrics_manager=metrics_mgr)
@@ -345,7 +350,12 @@ def test_api_performance_route():
     from web.server import _SESSION_TOKEN, DASHBOARD_API_KEY
     client = TestClient(app, headers={"X-API-Key": DASHBOARD_API_KEY or _SESSION_TOKEN})
 
-    res = client.get("/api/forex/analytics/performance")
+    journal.record_execution(
+        deal_id="unsupported-fill", trade_id=opened.trade_id, pair="ALTCOINSINDX",
+        order_type="MARKET", volume=1.0, price=100.0,
+    )
+
+    res = client.get("/api/forex/analytics/performance?initial_capital=250000")
     assert res.status_code == 200
     data = res.json()
     assert "performance" in data
@@ -355,12 +365,65 @@ def test_api_performance_route():
     assert data["performance"]["overall"]["trade_count"] == 1
     assert "GBPUSD" in data["performance"]["segmentation"]["by_pair"]
     assert data["series"]["cumulative_r"][0]["value"] == 1.0
-    assert data["series"]["equity"][0]["value"] > 100000.0
+    assert data["series"]["equity"][0]["value"] > 250000.0
+    assert data["capital_basis"] == {
+        "initial_capital": 250000.0,
+        "source": "analytical_input",
+        "currency": "USD",
+    }
+    assert data["sample"] == {"stored_trades": 1, "closed_trades": 1, "open_trades_excluded": 0}
+    assert data["execution_friction"]["total_executions_excluded"] == 1
     assert data["series"]["mfe_vs_realized"][0] == {
         "trade_id": opened.trade_id,
         "mfe_r": 1.5,
         "realized_r": 1.0,
     }
+
+
+def test_performance_route_excludes_open_trades_and_validates_capital():
+    journal = ForexTradeJournal(db_path=":memory:", auto_migrate=True)
+    journal.record_trade_open(
+        pair="EURUSD", action=ForexAction.LONG, open_price=1.08, stop_loss=1.07,
+        lots=1.0, confidence=75.0,
+    )
+    set_forex_dependencies(journal=journal, metrics_manager=ForexMetricsManager(journal=journal))
+    app = FastAPI()
+    app.include_router(router)
+    from web.server import _SESSION_TOKEN, DASHBOARD_API_KEY
+    client = TestClient(app, headers={"X-API-Key": DASHBOARD_API_KEY or _SESSION_TOKEN})
+
+    response = client.get("/api/forex/analytics/performance")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["performance"]["overall"]["trade_count"] == 0
+    assert data["sample"]["open_trades_excluded"] == 1
+    assert data["series"]["equity"] == []
+
+    invalid = client.get("/api/forex/analytics/performance?initial_capital=0")
+    assert invalid.status_code == 422
+
+
+def test_performance_route_returns_analytics_specific_safe_error(monkeypatch):
+    journal = ForexTradeJournal(db_path=":memory:", auto_migrate=True)
+    manager = ForexMetricsManager(journal=journal)
+
+    def fail_performance(**_kwargs):
+        raise RuntimeError("private calculation detail")
+
+    monkeypatch.setattr(manager, "get_comprehensive_performance", fail_performance)
+    set_forex_dependencies(journal=journal, metrics_manager=manager)
+    app = FastAPI()
+    app.include_router(router)
+    from web.server import _SESSION_TOKEN, DASHBOARD_API_KEY
+    client = TestClient(app, headers={"X-API-Key": DASHBOARD_API_KEY or _SESSION_TOKEN})
+
+    response = client.get("/api/forex/analytics/performance")
+
+    assert response.status_code == 500
+    body = response.json()
+    assert body["error"]["code"] == "PERFORMANCE_CALCULATION_FAILED"
+    assert body["error"]["message"] == "Performance analytics could not be calculated from the stored trade evidence."
+    assert "private calculation detail" not in response.text
 
 
 def test_performance_ui_preserves_zero_and_does_not_fake_missing_series():
@@ -369,4 +432,7 @@ def test_performance_ui_preserves_zero_and_does_not_fake_missing_series():
     assert "Unavailable — no stored source values." in source
     assert "No observations for this segment" in source
     assert "loadPerformanceInterface" in source
+    assert "Promise.allSettled" in source
+    assert "No closed trades" in source
+    assert "initial_capital=${encodeURIComponent(capital)}" in source
     assert "/api/forex/journal/performance" not in source

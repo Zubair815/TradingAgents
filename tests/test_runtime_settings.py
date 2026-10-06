@@ -48,6 +48,23 @@ def test_runtime_settings_validate_types_and_ranges(temp_runtime_settings):
         config_module.save_runtime_settings({"backend_url": "not a url"})
 
 
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("llm_provider", "not-a-provider"),
+        ("max_tokens", 0),
+        ("max_tokens", 100_001),
+        ("forex_min_rr", 10.1),
+        ("forex_max_spread_pips", 50.1),
+        ("forex_news_blackout_minutes", 181),
+        ("mt5_poll_interval_seconds", 30.1),
+    ],
+)
+def test_settings_reject_values_outside_ui_contract(temp_runtime_settings, key, value):
+    with pytest.raises(ValueError, match=key):
+        config_module.save_runtime_settings({key: value})
+
+
 def test_canonical_forex_settings_normalize_and_survive_reload(temp_runtime_settings):
     saved = config_module.save_runtime_settings({
         "forex_default_pair": "eur/usd",
@@ -128,6 +145,22 @@ def test_frontend_settings_use_canonical_keys_and_manual_execution():
     assert "payload.mt5_poll_interval_seconds" in source
     assert 'value="true">ENABLED' not in html
     assert "DISABLED — IMMUTABLE" in html
+    assert '<select id="settingPair">' in html
+    assert 'list="forexPairsList"' not in html
+
+
+def test_learning_filters_are_canonical_selects():
+    root = Path(__file__).resolve().parents[1]
+    html = (root / "web/static/index.html").read_text(encoding="utf-8")
+
+    assert '<select class="form-select" id="lessonsSetupFilter"' in html
+    assert '<select class="form-select" id="lessonsTimeframeFilter"' in html
+    assert 'value="NEWS_MOMENTUM"' in html
+    assert 'value="NEWS_FADE"' in html
+    assert 'value="M1"' in html
+    assert 'value="M5"' in html
+    assert 'id="lessonSetupsList"' not in html
+    assert 'id="lessonTimeframesList"' not in html
 
 
 def test_mt5_runtime_uses_configured_poll_interval(monkeypatch):

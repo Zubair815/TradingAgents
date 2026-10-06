@@ -18,9 +18,9 @@ import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import date as date_type, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -145,6 +145,7 @@ _run_store_lock = threading.RLock()
 _RUN_RETENTION_POLICY = DEFAULT_RETENTION_POLICY
 _last_run_prune_at: float | None = None
 _analysis_threads: set[threading.Thread] = set()
+_run_cancellations: dict[str, threading.Event] = {}
 _shutdown_requested = threading.Event()
 
 
@@ -181,6 +182,7 @@ def _prune_expired_runs(*, now: float | None = None) -> list[str]:
         for run_id in sorted(expired):
             run = _runs.pop(run_id, None)
             _run_events.pop(run_id, None)
+            _run_cancellations.pop(run_id, None)
             if run is None:
                 continue
             _expired_runs[run_id] = {"expired_at": current, "status": run.get("status", "expired")}
@@ -211,11 +213,11 @@ class AnalysisRequest(BaseModel):
         default=["market", "social", "news", "fundamentals"],
         description="Analysts to include",
     )
-    provider: str | None = Field(default=None)
-    quick_model: str | None = Field(default=None)
-    deep_model: str | None = Field(default=None)
-    max_tokens: int | None = Field(default=None)
-    temperature: float | None = Field(default=None)
+    provider: Literal["openrouter", "openai", "google", "anthropic", "deepseek", "ollama"] | None = None
+    quick_model: str | None = Field(default=None, min_length=1, max_length=200)
+    deep_model: str | None = Field(default=None, min_length=1, max_length=200)
+    max_tokens: int | None = Field(default=None, ge=1, le=100_000)
+    temperature: float | None = Field(default=None, ge=0, le=2)
 
     @field_validator("ticker")
     @classmethod
@@ -227,6 +229,55 @@ class AnalysisRequest(BaseModel):
             return safe_ticker_component(v)
         except ValueError as exc:
             raise ValueError(f"Invalid ticker: {exc}") from exc
+
+    @field_validator("date")
+    @classmethod
+    def validate_date(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        try:
+            parsed = date_type.fromisoformat(value)
+        except ValueError as exc:
+            raise ValueError("Analysis date must use YYYY-MM-DD") from exc
+        if parsed > date_type.today():
+            raise ValueError("Analysis date cannot be in the future")
+        return value
+
+    @field_validator("analysts")
+    @classmethod
+    def validate_analysts(cls, values: list[str]) -> list[str]:
+        supported = {"market", "social", "news", "fundamentals"}
+        if not values or len(set(values)) != len(values) or set(values) - supported:
+            raise ValueError("Choose distinct supported equity analysts")
+        return values
+
+    @field_validator("quick_model", "deep_model")
+    @classmethod
+    def validate_model_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if not cleaned or any(char.isspace() for char in cleaned) or any(char in cleaned for char in "<>\0"):
+            raise ValueError("Model ID must be a non-empty identifier without spaces")
+        return cleaned
+
+
+class AnalysisCancelled(RuntimeError):
+    """Internal cooperative cancellation signal for an equity analysis."""
+
+
+def _equity_cancel_requested(run_id: str) -> bool:
+    with _run_store_lock:
+        event = _run_cancellations.get(run_id)
+        status = str(_runs.get(run_id, {}).get("status", "")).lower()
+    return bool(event and event.is_set()) or status == "cancelled"
+
+
+def _raise_if_equity_cancelled(run_id: str, shutdown_event: threading.Event | None) -> None:
+    if shutdown_event is not None and shutdown_event.is_set():
+        raise RuntimeError("Application shutdown requested")
+    if _equity_cancel_requested(run_id):
+        raise AnalysisCancelled("Analysis cancelled")
 
 
 class RunSummary(BaseModel):
@@ -301,8 +352,7 @@ def _run_analysis(
 ):
     """Execute analysis in a background thread, emitting progress events."""
     try:
-        if shutdown_event is not None and shutdown_event.is_set():
-            raise RuntimeError("Application shutdown requested")
+        _raise_if_equity_cancelled(run_id, shutdown_event)
         trade_date = req.date or datetime.now().strftime("%Y-%m-%d")
         with _run_store_lock:
             if run_id not in _runs:
@@ -338,6 +388,8 @@ def _run_analysis(
             debug=True,
             config=config,
         )
+
+        _raise_if_equity_cancelled(run_id, shutdown_event)
 
         _emit(run_id, "status", {
             "status": "running",
@@ -384,8 +436,7 @@ def _run_analysis(
             })
 
             for chunk in graph.graph.stream(graph_input, **args):
-                if shutdown_event is not None and shutdown_event.is_set():
-                    raise RuntimeError("Application shutdown requested")
+                _raise_if_equity_cancelled(run_id, shutdown_event)
                 trace.append(chunk)
 
                 # Identify nodes from state changes across analyst reports, debates, and decisions
@@ -452,6 +503,8 @@ def _run_analysis(
                             "progress": round(progress, 2),
                         })
 
+            _raise_if_equity_cancelled(run_id, shutdown_event)
+
             # Merge streamed chunks
             from tradingagents.graph.trading_graph import _deep_merge_chunks
             final_state = _deep_merge_chunks(trace)
@@ -462,6 +515,8 @@ def _run_analysis(
             graph.record_decision(req.ticker, trade_date, final_state)
             graph.clear_checkpoint_on_success(req.ticker, trade_date)
 
+        _raise_if_equity_cancelled(run_id, shutdown_event)
+
         # Process signal
         signal = graph.process_signal(final_state.get("final_trade_decision", ""))
 
@@ -471,6 +526,8 @@ def _run_analysis(
         # Save reports with explicit trade_date
         report_path = graph.save_reports(final_state, req.ticker, trade_date=trade_date)
         report_folder = report_path.parent.name
+
+        _raise_if_equity_cancelled(run_id, shutdown_event)
 
         # Store the state for retrieval
         report_data = {
@@ -493,6 +550,8 @@ def _run_analysis(
         with _run_store_lock:
             if run_id not in _runs:
                 return
+            if _equity_cancel_requested(run_id):
+                raise AnalysisCancelled("Analysis cancelled")
             _completed_reports[run_id] = report_data
             _completed_reports[report_folder] = report_data
             _runs[run_id].update(
@@ -508,6 +567,19 @@ def _run_analysis(
             "message": f"Analysis complete: {signal}",
         })
 
+    except AnalysisCancelled:
+        with _run_store_lock:
+            if run_id in _runs and str(_runs[run_id].get("status", "")).lower() not in TERMINAL_STATUSES:
+                _runs[run_id].update(
+                    status="cancelled",
+                    error="Cancelled by user",
+                    finished_at=datetime.now().isoformat(),
+                )
+                _emit(run_id, "cancelled", {
+                    "run_id": run_id,
+                    "status": "cancelled",
+                    "message": "Run cancelled by user",
+                })
     except Exception as exc:
         error_msg = "The analysis provider failed. Please retry."
         with _run_store_lock:
@@ -652,6 +724,30 @@ async def get_config():
         "forex_market_source": cfg.get("forex_market_source"),
         "forex_max_spread_pips": cfg.get("forex_max_spread_pips"),
     }
+    providers_list = [
+        {"id": "openrouter", "name": "OpenRouter", "models": [
+            "openrouter/free",
+            "qwen/qwen3.8-27b:free",
+            "google/gemma-4-26b-a4b-it:free",
+            "deepseek/deepseek-chat",
+            "openai/gpt-4o-mini",
+            "meta-llama/llama-3.3-70b-instruct",
+            "google/gemini-2.5-flash",
+            "anthropic/claude-3.5-sonnet",
+        ]},
+        {"id": "openai", "name": "OpenAI", "models": ["gpt-4o", "gpt-4o-mini", "o3-mini", "gpt-5.6", "gpt-5.6-luna"]},
+        {"id": "google", "name": "Google", "models": ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"]},
+        {"id": "anthropic", "name": "Anthropic", "models": ["claude-sonnet-4-5", "claude-sonnet-4-6", "claude-3-5-haiku-20241022"]},
+        {"id": "deepseek", "name": "DeepSeek", "models": ["deepseek-chat", "deepseek-reasoner"]},
+        {"id": "ollama", "name": "Ollama (Local)", "models": ["qwen2.5:7b", "llama3.1:8b", "llama3", "mistral", "codestral"]},
+    ]
+    # Ensure configured models are always present in the active provider's models list
+    active_provider = cfg.get("llm_provider", "openrouter")
+    for p in providers_list:
+        if p["id"] == active_provider:
+            for m in (cfg.get("quick_think_llm"), cfg.get("deep_think_llm")):
+                if m and m not in p["models"]:
+                    p["models"].insert(0, m)
     return {
         "auth_required": bool(DASHBOARD_API_KEY),
         "provider": cfg.get("llm_provider", DEFAULT_CONFIG.get("llm_provider", "openai")),
@@ -665,14 +761,7 @@ async def get_config():
         },
         "analysts": ["market", "social", "news", "fundamentals"],
         "forex_analysts": ["forex_technical", "forex_macro", "forex_news"],
-        "providers": [
-            {"id": "openai", "name": "OpenAI", "models": ["gpt-4o", "gpt-4o-mini", "o3-mini", "gpt-5.6", "gpt-5.6-luna"]},
-            {"id": "openrouter", "name": "OpenRouter", "models": ["deepseek/deepseek-chat-v3-0324", "anthropic/claude-3.5-sonnet", "google/gemini-2.5-flash", "openai/gpt-4o"]},
-            {"id": "google", "name": "Google", "models": ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"]},
-            {"id": "anthropic", "name": "Anthropic", "models": ["claude-sonnet-4-5", "claude-sonnet-4-6"]},
-            {"id": "deepseek", "name": "DeepSeek", "models": ["deepseek-chat", "deepseek-reasoner"]},
-            {"id": "ollama", "name": "Ollama (Local)", "models": ["llama3", "mistral", "codestral"]},
-        ],
+        "providers": providers_list,
     }
 
 
@@ -772,6 +861,7 @@ async def start_analysis(req: AnalysisRequest, request: Request):
             "usage": UsageTracker(run_id=run_id).summary(),
         }
         _run_events[run_id] = []
+        _run_cancellations[run_id] = threading.Event()
         _prune_expired_runs()
 
     thread = threading.Thread(target=_run_analysis_entry, args=(run_id, req), daemon=True)
@@ -783,8 +873,9 @@ async def start_analysis(req: AnalysisRequest, request: Request):
 
 
 @app.get("/api/runs")
-async def list_runs():
+async def list_runs(request: Request):
     """List all runs (most recent first)."""
+    verify_auth(request)
     _prune_expired_runs()
     with _run_store_lock:
         runs = sorted((dict(run) for run in _runs.values()), key=lambda r: r["started_at"], reverse=True)
@@ -801,14 +892,17 @@ async def cancel_run(run_id: str, request: Request):
         run = _runs[run_id]
         if str(run.get("status", "")).lower() in TERMINAL_STATUSES:
             return {"run_id": run_id, "status": run.get("status", "cancelled")}
+        cancellation = _run_cancellations.setdefault(run_id, threading.Event())
+        cancellation.set()
         run.update(status="cancelled", finished_at=datetime.now().isoformat(), error="Cancelled by user")
     _emit(run_id, "cancelled", {"run_id": run_id, "status": "cancelled", "message": "Run cancelled by user"})
     return {"run_id": run_id, "status": "cancelled"}
 
 
 @app.get("/api/runs/{run_id}")
-async def get_run(run_id: str):
+async def get_run(run_id: str, request: Request):
     """Get run details."""
+    verify_auth(request)
     _prune_expired_runs()
     with _run_store_lock:
         if run_id not in _runs:
@@ -902,8 +996,9 @@ def _load_on_disk_report(run_id: str) -> dict | None:
 
 
 @app.get("/api/runs/{run_id}/report")
-async def get_report(run_id: str):
+async def get_report(run_id: str, request: Request):
     """Get the full report for a completed run or saved report."""
+    verify_auth(request)
     _prune_expired_runs()
     with _run_store_lock:
         cached = _completed_reports.get(run_id)
@@ -929,6 +1024,7 @@ async def get_report(run_id: str):
 @app.get("/api/runs/{run_id}/events")
 async def stream_events(run_id: str, request: Request):
     """SSE endpoint for live progress updates."""
+    verify_auth(request)
     _prune_expired_runs()
     with _run_store_lock:
         if run_id not in _runs:
@@ -975,8 +1071,9 @@ async def stream_events(run_id: str, request: Request):
 
 
 @app.get("/api/history")
-async def get_history():
+async def get_history(request: Request):
     """Return past analysis results from results_dir."""
+    verify_auth(request)
     _prune_expired_runs()
     with _run_store_lock:
         live_runs = [dict(run) for run in _runs.values()]

@@ -240,6 +240,7 @@ class MetricsSummary(BaseModel):
 
     total_trades_analyzed: int = 0
     total_executions_analyzed: int = 0
+    total_executions_excluded: int = 0
 
     # Excursion averages
     avg_mfe_pips: float = 0.0

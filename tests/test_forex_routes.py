@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -129,6 +130,48 @@ class TestRuntimeSettingsRoutes:
         assert reset.status_code == 200
         assert reset.json()["settings"]["forex_default_pair"] == "EURUSD"
         assert not isolated_runtime_settings.exists()
+
+    def test_settings_selective_reset_preserves_unrelated_fields(
+        self, client, isolated_runtime_settings
+    ):
+        patch_resp = client.patch("/api/forex/settings", json={
+            "forex_default_pair": "GBPUSD",
+            "forex_min_rr": 2.5,
+            "max_tokens": 2048,
+        })
+        assert patch_resp.status_code == 200
+        assert patch_resp.json()["settings"]["forex_default_pair"] == "GBPUSD"
+        assert patch_resp.json()["settings"]["forex_min_rr"] == 2.5
+        assert patch_resp.json()["settings"]["max_tokens"] == 2048
+
+        # Selective reset of only forex_default_pair
+        reset_resp = client.post("/api/forex/settings/reset", json={
+            "keys": ["forex_default_pair"]
+        })
+        assert reset_resp.status_code == 200
+        data = reset_resp.json()["settings"]
+        assert data["forex_default_pair"] == "EURUSD"
+        assert data["forex_min_rr"] == 2.5
+        assert data["max_tokens"] == 2048
+        assert isolated_runtime_settings.exists()
+
+    @pytest.mark.parametrize("payload", [
+        {"keys": []},
+        {"keys": "forex_default_pair"},
+        {"keys": ["unknown_setting"]},
+    ])
+    def test_settings_selective_reset_rejects_invalid_keys(
+        self, client, isolated_runtime_settings, payload
+    ):
+        assert client.patch("/api/forex/settings", json={
+            "forex_default_pair": "GBPUSD",
+        }).status_code == 200
+        before = isolated_runtime_settings.read_text(encoding="utf-8")
+
+        response = client.post("/api/forex/settings/reset", json=payload)
+
+        assert response.status_code == 400
+        assert isolated_runtime_settings.read_text(encoding="utf-8") == before
 
     @pytest.mark.parametrize("payload", [
         {"auto_order": True},
@@ -326,6 +369,10 @@ class TestJournalRoutes:
             json={"pair": "EURUSD", "action": "LONG", "entry_price": 1.0800, "lots": 1.0},
         )
         trade_id = open_res.json()["trade_id"]
+        client.post(
+            f"/api/forex/journal/trades/{trade_id}/close",
+            json={"close_price": 1.09, "exit_reason": "TAKE_PROFIT"},
+        )
 
         ref_res = client.post(
             f"/api/forex/journal/trades/{trade_id}/reflection",
@@ -339,6 +386,69 @@ class TestJournalRoutes:
         trade_data = ref_res.json()["trade"]
         assert trade_data["reflection"] == "Clean momentum breakout following London session open."
         assert "MOMENTUM_BREAKOUT" in trade_data["tags"]
+
+    def test_manual_timestamps_close_accounting_and_reflection_integrity(self, client):
+        opened = client.post(
+            "/api/forex/journal/trades/manual-open",
+            json={"pair": "EURUSD", "action": "LONG", "entry_price": 1.08,
+                  "stop_loss": 1.07, "lots": 1.0,
+                  "open_time": "2026-01-01T09:00:00+00:00"},
+        )
+        assert opened.status_code == 200
+        trade_id = opened.json()["trade_id"]
+        detail = client.get(f"/api/forex/journal/trades/{trade_id}").json()
+        assert detail["trade"]["open_time_utc"] == "2026-01-01T09:00:00+00:00"
+        assert detail["events"][0]["timestamp_utc"] == "2026-01-01T09:00:00+00:00"
+
+        too_early = client.post(
+            f"/api/forex/journal/trades/{trade_id}/close",
+            json={"close_price": 1.09, "close_time": "2026-01-01T08:59:59+00:00"},
+        )
+        assert too_early.status_code == 400
+
+        closed = client.post(
+            f"/api/forex/journal/trades/{trade_id}/close",
+            json={"close_price": 1.09, "gross_profit": 125.0, "commission": 5.0,
+                  "swap": -2.0, "close_time": "2026-01-01T10:00:00+00:00"},
+        ).json()["trade"]
+        assert closed["gross_profit"] == 125.0
+        assert closed["commission"] == 5.0
+        assert closed["net_profit"] == 118.0
+
+        first = client.post(
+            f"/api/forex/journal/trades/{trade_id}/reflection",
+            json={"reflection_text": "First", "category_tag": "DISCIPLINED", "execution_quality": "GOOD"},
+        )
+        assert first.status_code == 200
+        second = client.post(
+            f"/api/forex/journal/trades/{trade_id}/reflection",
+            json={"reflection_text": "Updated", "category_tag": "REVIEWED", "execution_quality": "FAIR"},
+        ).json()["trade"]
+        assert second["tags"] == ["MANUAL_UNPLANNED", "DISCIPLINED", "REVIEWED"]
+        assert "GOOD" in second["notes"] and "FAIR" in second["notes"]
+        events = client.get(f"/api/forex/journal/trades/{trade_id}").json()["events"]
+        assert sum(event["event_type"] == "NOTE_ADDED" for event in events) == 2
+
+    def test_trade_list_pagination_reports_total(self, client):
+        for index in range(55):
+            response = client.post(
+                "/api/forex/journal/trades/manual-open",
+                json={"pair": "EURUSD", "action": "LONG", "entry_price": 1.08,
+                      "stop_loss": 1.07, "lots": 0.01,
+                      "open_time": f"2026-01-{(index % 28) + 1:02d}T09:00:00+00:00"},
+            )
+            assert response.status_code == 200
+        first = client.get("/api/forex/journal/trades?limit=50&offset=0").json()
+        second = client.get("/api/forex/journal/trades?limit=50&offset=50").json()
+        assert first["total"] == 55 and first["count"] == 50 and first["has_more"] is True
+        assert second["total"] == 55 and second["count"] == 5 and second["has_more"] is False
+
+        invalid = client.get("/api/forex/journal/trades?start_date=not-a-date")
+        assert invalid.status_code == 400
+        reversed_range = client.get(
+            "/api/forex/journal/trades?start_date=2026-02-01&end_date=2026-01-01"
+        )
+        assert reversed_range.status_code == 400
 
     def test_journal_summary_and_timeline(self, client):
         # Open and close two trades
@@ -374,6 +484,52 @@ class TestJournalRoutes:
 # ---------------------------------------------------------------------------
 
 class TestProposalRoutes:
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        (("action", "TYPO"), ("order_type", "SIDEWAYS"), ("setup_type", "LIQUIDITY_SWEEP")),
+    )
+    def test_create_proposal_rejects_unknown_contract_values(self, client, field, value):
+        payload = {
+            "pair": "EURUSD", "action": "LONG", "order_type": "MARKET",
+            "setup_type": "BREAKOUT", "timeframe": "H1",
+            "entry_price": 1.085, "stop_loss": 1.08, "take_profit": 1.095,
+        }
+        payload[field] = value
+        assert client.post("/api/forex/proposals", json=payload).status_code == 422
+
+    def test_no_trade_proposal_does_not_require_fabricated_prices(self, client):
+        response = client.post("/api/forex/proposals", json={
+            "pair": "EURUSD", "action": "NO_TRADE", "reasoning": "No valid setup",
+        })
+        assert response.status_code == 200
+        proposal = response.json()["proposal"]
+        assert proposal["entry_price"] is None
+        assert proposal["stop_loss"] is None
+        assert proposal["take_profit_1"] is None
+
+    def test_proposal_valid_until_requires_timezone(self):
+        with pytest.raises(ValueError, match="explicit UTC offset"):
+            ForexTraderProposal(
+                pair="EURUSD", action=ForexAction.NO_TRADE,
+                reasoning="No valid setup", valid_until="2026-10-05T12:00:00",
+            )
+
+    def test_user_rejection_records_audited_timestamp(self, client, isolated_forex_env):
+        created = client.post("/api/forex/proposals", json={
+            "pair": "EURUSD", "action": "NO_TRADE", "reasoning": "No setup",
+        }).json()
+        proposal_id = created["proposal_id"]
+        response = client.post(
+            f"/api/forex/proposals/{proposal_id}/status",
+            json={"status": "REJECTED", "reason": "Trader declined"},
+        )
+        assert response.status_code == 200
+        events = isolated_forex_env[0].get_events(proposal_id=proposal_id, limit=-1)
+        assert [event["event_type"] for event in events] == ["PROPOSAL_CREATED", "PROPOSAL_REJECTED"]
+        detail = client.get(f"/api/forex/proposals/{proposal_id}").json()
+        assert detail["user_decision"]["reason"] == "Trader declined"
+        assert detail["user_decision"]["updated_at"] == events[-1]["timestamp_utc"]
+
     def test_create_and_list_proposals(self, client):
         payload = {
             "pair": "EURUSD",
@@ -421,10 +577,9 @@ class TestProposalRoutes:
             f"/api/forex/proposals/{prop_id}/status",
             json={"status": "APPROVED"},
         )
-        assert status_res.status_code == 200
-        assert status_res.json()["status"] == "APPROVED"
+        assert status_res.status_code == 400
 
-    def test_update_proposal_status_user_actions_and_transitions(self, client):
+    def test_update_proposal_status_user_actions_and_transitions(self, client, isolated_forex_env):
         prop_res = client.post(
             "/api/forex/proposals",
             json={
@@ -437,23 +592,25 @@ class TestProposalRoutes:
         )
         prop_id = prop_res.json()["proposal_id"]
 
-        # Approve proposal
-        res_app = client.post(f"/api/forex/proposals/{prop_id}/status", json={"status": "APPROVED"})
-        assert res_app.status_code == 200
-
+        decision = ForexRiskDecision(
+            pair="EURUSD", decision=ForexRiskDecisionAction.APPROVE,
+            original_action=ForexAction.LONG, approved_action=ForexAction.LONG,
+            max_risk_percent=1.0, approved_lot_size=0.5,
+            executive_rationale="Approved in fixture",
+        )
+        isolated_forex_env[1].evaluate_risk(prop_id, decision)
         # User action: WAIT
         res_wait = client.post(f"/api/forex/proposals/{prop_id}/status", json={"status": "WAIT", "reason": "Holding for NY"})
         assert res_wait.status_code == 200
         assert res_wait.json()["status"] == "WAITING_USER"
 
-        # User action: EXECUTED
+        # Status-only execution is forbidden without linked execution evidence.
         res_exec = client.post(f"/api/forex/proposals/{prop_id}/status", json={"status": "EXECUTED", "reason": "Executed in MT5 manually"})
-        assert res_exec.status_code == 200
-        assert res_exec.json()["status"] == "EXECUTED"
+        assert res_exec.status_code == 400
 
-        # Illegal transition from terminal state EXECUTED to APPROVED returns 400
-        res_illegal = client.post(f"/api/forex/proposals/{prop_id}/status", json={"status": "APPROVED"})
-        assert res_illegal.status_code == 400
+        detail = client.get(f"/api/forex/proposals/{prop_id}").json()
+        assert detail["user_decision"]["action"] == "WAIT"
+        assert detail["user_decision"]["updated_at"] != detail["proposal"]["created_at_utc"]
 
     def test_list_proposals_advanced_filters(self, client):
         """Phase 28: Validate multi-field proposal filtering (pair, date, status, action, setup, timeframe)."""
@@ -478,8 +635,8 @@ class TestProposalRoutes:
             json={
                 "pair": "USDJPY",
                 "action": "SHORT",
-                "order_type": "LIMIT",
-                "setup_type": "LIQUIDITY_SWEEP",
+                "order_type": "SELL_LIMIT",
+                "setup_type": "REVERSAL",
                 "timeframe": "M15",
                 "entry_price": 150.50,
                 "stop_loss": 150.90,
@@ -500,9 +657,10 @@ class TestProposalRoutes:
         assert all(p["action"] == "SHORT" for p in res_act.json()["proposals"])
 
         # 3. Filter by setup
-        res_setup = client.get("/api/forex/proposals?setup=LIQUIDITY_SWEEP")
+        res_setup = client.get("/api/forex/proposals?setup=REVERSAL")
         assert res_setup.status_code == 200
-        assert all(p["setup_type"] == "LIQUIDITY_SWEEP" for p in res_setup.json()["proposals"])
+        assert res_setup.json()["proposals"]
+        assert all(p["setup_type"] == "REVERSAL" for p in res_setup.json()["proposals"])
 
         # 4. Filter by timeframe
         res_tf = client.get("/api/forex/proposals?timeframe=M15")
@@ -516,14 +674,33 @@ class TestProposalRoutes:
         assert p1 in ids_comb
         assert p2 not in ids_comb
 
-    def test_get_proposal_detail_complete_contract(self, client):
+        options = res_comb.json()["filter_options"]
+        assert "PROPOSED" in options["statuses"]
+        assert "PENDING" not in options["statuses"]
+        assert "REVERSAL" in options["setups"]
+        assert {"EURUSD", "USDJPY"}.issubset(options["pairs"])
+        assert client.get("/api/forex/proposals?date=not-a-date").status_code == 400
+
+    def test_proposal_pagination_reports_total(self, client, isolated_forex_env):
+        journal = isolated_forex_env[0]
+        for index in range(55):
+            journal.save_proposal(ForexTraderProposal(
+                pair="EURUSD", action=ForexAction.NO_TRADE,
+                reasoning=f"page fixture {index}",
+            ))
+        first = client.get("/api/forex/proposals?limit=50&offset=0").json()
+        second = client.get("/api/forex/proposals?limit=50&offset=50").json()
+        assert first["count"] == 50 and first["total"] == 55
+        assert second["count"] == 5 and second["total"] == 55
+
+    def test_get_proposal_detail_complete_contract(self, client, isolated_forex_env):
         """Phase 28: Validate complete proposal detail payload including immutable original proposal, risk review, user decision, matched execution, final outcome, and lessons."""
         prop_res = client.post(
             "/api/forex/proposals",
             json={
                 "pair": "GBPUSD",
                 "action": "LONG",
-                "order_type": "LIMIT",
+                "order_type": "BUY_LIMIT",
                 "setup_type": "TREND_PULLBACK",
                 "timeframe": "H4",
                 "entry_price": 1.2800,
@@ -537,9 +714,17 @@ class TestProposalRoutes:
         assert prop_res.status_code == 200
         prop_id = prop_res.json()["proposal_id"]
 
-        # 1. Update status to APPROVED
-        app_res = client.post(f"/api/forex/proposals/{prop_id}/status", json={"status": "APPROVED"})
-        assert app_res.status_code == 200
+        decision = ForexRiskDecision(
+            pair="GBPUSD", decision=ForexRiskDecisionAction.APPROVE,
+            original_action=ForexAction.LONG, approved_action=ForexAction.LONG,
+            max_risk_percent=1.0, approved_lot_size=1.5,
+            executive_rationale="Approved in fixture",
+        )
+        isolated_forex_env[1].evaluate_risk(prop_id, decision)
+        isolated_forex_env[0].record_lesson(
+            pair="GBPUSD", setup_type="PULLBACK", outcome_category="WIN",
+            actionable_rule="Unrelated same-setup lesson",
+        )
 
         # 2. Record matched execution trade in journal
         open_res = client.post(
@@ -589,6 +774,8 @@ class TestProposalRoutes:
         assert detail["final_outcome"]["exit_reason"] == "TAKE_PROFIT"
         assert detail["final_outcome"]["pips_gained"] > 0
         assert "lessons" in detail
+        assert detail["lessons"] == []
+        assert detail["immutable_evidence_available"] is True
 
     def test_evaluate_risk_endpoint(self, client):
         eval_payload = {
@@ -748,7 +935,9 @@ class TestMT5Routes:
         res = client.get("/api/forex/mt5/account")
         assert res.status_code == 200
         acct = res.json()["account"]
-        assert acct["login"] == 987654
+        assert acct["masked_login"] == "987***"
+        assert "login" not in acct
+        assert "name" not in acct
         assert acct["equity"] == 152500.0
 
     def test_mt5_account_unavailable_returns_503(self, client, isolated_forex_env):
@@ -821,6 +1010,18 @@ class TestMT5Routes:
         assert tick_res.status_code == 200
         assert tick_res.json()["tick"]["bid"] == 1.08500
 
+        mock_observer.get_current_tick.side_effect = DataInsufficientError("future or stale quote")
+        closed_symbol = client.get("/api/forex/mt5/symbol/EURUSD")
+        assert closed_symbol.status_code == 200
+        assert closed_symbol.json()["tick_status"] == "UNAVAILABLE"
+        assert closed_symbol.json()["tick_reason"] == "MARKET_CLOSED_OR_STALE"
+        assert "tick" not in closed_symbol.json()
+
+        closed_tick = client.get("/api/forex/mt5/tick/EURUSD")
+        assert closed_tick.status_code == 503
+        assert closed_tick.json()["error"]["code"] == "MT5_QUOTE_UNAVAILABLE"
+        assert "not connected" not in closed_tick.text.lower()
+
     def test_mt5_positions_orders_deals(self, client, isolated_forex_env):
         _, _, mock_observer = isolated_forex_env
         mock_pos = MT5Position(
@@ -856,6 +1057,37 @@ class TestMT5Routes:
         deal_filtered = client.get("/api/forex/mt5/deals?position=10101&count=5")
         assert deal_filtered.status_code == 200
         mock_observer.get_deals.assert_called_with(date_from=None, date_to=None, position=10101, count=5)
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "date_from=not-a-date",
+            "date_from=2026-10-05T10:00:00",
+            "date_from=2026-10-05T10:00:00%2B00:00&date_to=2026-10-04T10:00:00%2B00:00",
+            "position=0",
+            "count=0",
+            "count=1001",
+        ],
+    )
+    def test_mt5_deals_rejects_invalid_query_boundaries(
+        self, client, isolated_forex_env, query
+    ):
+        _, _, mock_observer = isolated_forex_env
+
+        response = client.get(f"/api/forex/mt5/deals?{query}")
+
+        assert response.status_code == 422
+        assert response.json()["error"]["code"] == "INVALID_REQUEST"
+        mock_observer.get_deals.assert_not_called()
+
+    @pytest.mark.parametrize("payload", [{"login": 0}, {"login": -1}, {"login": "654***"}])
+    def test_mt5_connect_rejects_invalid_login(self, client, isolated_forex_env, payload):
+        _, _, mock_observer = isolated_forex_env
+
+        response = client.post("/api/forex/mt5/connect", json=payload)
+
+        assert response.status_code == 422
+        mock_observer.connection.connect.assert_not_called()
 
     def test_reconciliation_fails_closed_when_positions_are_unavailable(
         self, client, isolated_forex_env
@@ -1686,6 +1918,16 @@ class TestForexAnalysisRuns:
 
             _run_forex_analysis(run_id, req)
 
+        graph_config = mock_graph_cls.call_args.kwargs["config"]
+        assert graph_config["research_depth"] == "deep"
+        assert graph_config["max_debate_rounds"] == 3
+        assert graph_config["max_risk_discuss_rounds"] == 3
+        mock_graph.save_reports.assert_called_once_with(
+            mock_graph.get_state.return_value,
+            "EURUSD",
+            trade_date="2026-03-04",
+        )
+
         # Check run state was updated to completed
         run_record = _forex_runs[run_id]
         assert run_record["status"] == "completed"
@@ -1697,6 +1939,9 @@ class TestForexAnalysisRuns:
         assert run_id in _forex_completed_reports
         rep = _forex_completed_reports[run_id]
         assert rep["signal"] == "LONG"
+        assert rep["date"] == "2026-03-04"
+        assert rep["analysis_cutoff"] == "2026-03-04"
+        assert rep["research_depth"] == "deep"
         assert rep["proposal"]["action"] == "LONG"
         assert rep["risk_decision"]["decision"] == "APPROVE"
         assert rep["sizing"]["recommended_lot_size"] == 1.5
@@ -1728,6 +1973,31 @@ class TestForexAnalysisRuns:
         assert stream_res.status_code == 200
         assert "event: complete" in stream_res.text
         assert "event: preparing_data" in stream_res.text
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("research_depth", "standard"),
+            ("min_rr", 0),
+            ("min_rr", 11),
+            ("max_spread_pips", 0),
+            ("max_spread_pips", 11),
+        ],
+    )
+    def test_forex_analysis_rejects_invalid_research_controls(self, field, value):
+        payload = {
+            "pair": "EURUSD",
+            "account_source": "manual",
+            "account_balance": 10000,
+            "account_equity": 10000,
+            "account_free_margin": 10000,
+            "account_leverage": 100,
+            "account_currency": "USD",
+            field: value,
+        }
+
+        with pytest.raises(ValueError):
+            ForexAnalysisRequest(**payload)
 
     def test_forex_decision_report_modular_cards(self, client):
         """Phase 27: Verify run endpoint returns all 7 modular intelligence cards & report payload."""
@@ -1946,25 +2216,83 @@ class TestForexBacktestRoutes:
         assert journal.get_events() == []
 
         bt_id = data["backtest_id"]
-
-        # Query backtest run
         get_res = client.get(f"/api/forex/backtest/{bt_id}")
         assert get_res.status_code == 200
         assert get_res.json()["backtest_id"] == bt_id
-        for key in ("demo_mode", "data_source", "strategy", "validated_strategy_performance", "notice", "markdown_report"):
+        for key in (
+            "demo_mode", "data_source", "strategy",
+            "validated_strategy_performance", "notice", "markdown_report",
+        ):
             assert get_res.json()[key] == data[key]
 
-        # List runs
         list_res = client.get("/api/forex/backtest/runs")
         assert list_res.status_code == 200
         assert list_res.json()["count"] >= 1
         assert "backtests" not in list_res.json()
-        listed = next(run for run in list_res.json()["runs"] if run["backtest_id"] == bt_id)
+        listed = next(
+            run for run in list_res.json()["runs"] if run["backtest_id"] == bt_id
+        )
         assert listed["mode"] == "DEMO"
         assert listed["data_source"] == data["data_source"]
         assert listed["validated_strategy_performance"] is False
         assert listed["notice"] == data["notice"]
         assert listed["total_trades"] == result["total_trades"]
+
+    def test_demo_estimate_reports_no_agent_or_token_usage(self, client, isolated_forex_env):
+        res = client.post("/api/forex/backtest/estimate", json={
+            "workflow": "DEMO", "pair": "EURUSD", "timeframe": "H1", "count": 300,
+        })
+
+        assert res.status_code == 200
+        estimate = res.json()
+        assert estimate["workflow"] == "DEMO"
+        assert estimate["expected_analyses_count"] == 0
+        assert estimate["estimated_llm_calls"] == 0
+        assert estimate["estimated_tokens"] == 0
+        assert estimate["estimated_cost_usd"] == 0.0
+        assert estimate["pricing_status"] == "NOT_APPLICABLE"
+
+    def test_synthetic_demo_uses_requested_timeframe_and_period(self, client, isolated_forex_env):
+        res = client.post("/api/forex/backtest/run", json={
+            "demo_mode": True,
+            "pair": "EURUSD",
+            "timeframe": "H1",
+            "date_from": "2025-01-01",
+            "date_to": "2025-01-02",
+            "count": 20,
+        })
+
+        assert res.status_code == 200
+        data = res.json()
+        provenance = data["market_data_provenance"]
+        assert data["timeframe"] == "H1"
+        assert provenance["timeframe"] == "H1"
+        assert provenance["candle_count"] == 24
+        assert provenance["actual_start"] == "2025-01-01T00:00:00+00:00"
+        assert provenance["actual_end"] == "2025-01-02T00:00:00+00:00"
+        assert data["analyses_performed"] == 0
+        assert data["provider"] is None
+
+    @pytest.mark.parametrize("payload", [
+        {"demo_mode": True, "pair": ""},
+        {"demo_mode": True, "timeframe": ""},
+        {"demo_mode": True, "date_from": "2025-02-01", "date_to": "2025-01-01"},
+    ])
+    def test_backtest_rejects_invalid_identity_and_period(
+        self, client, isolated_forex_env, payload
+    ):
+        res = client.post("/api/forex/backtest/run", json=payload)
+        assert res.status_code == 422
+
+    def test_demo_rejects_candle_without_source_timestamp(self, client, isolated_forex_env):
+        candle = {"open": 1.0, "high": 1.1, "low": 0.9, "close": 1.05}
+        res = client.post("/api/forex/backtest/run", json={
+            "demo_mode": True,
+            "candles": [candle] * 20,
+        })
+
+        assert res.status_code == 400
+        assert client.get("/api/forex/backtest/runs").json()["count"] == 0
 
     def test_run_backtest_with_custom_candles(self, client, isolated_forex_env):
         # 20 custom candles
@@ -2500,8 +2828,11 @@ class TestDashboardOverview:
         assert data["mt5"]["connection_status"] == "DISCONNECTED"
         assert data["mt5"]["is_connected"] is False
         assert data["mt5"]["account"] is None
+        assert data["mt5"]["account_available"] is False
         assert data["mt5"]["open_positions"] == []
+        assert data["mt5"]["positions_available"] is False
         assert data["mt5"]["pending_orders"] == []
+        assert data["mt5"]["orders_available"] is False
 
         # Trading subsystem
         assert "trading" in data
@@ -2523,6 +2854,84 @@ class TestDashboardOverview:
         assert perf["is_sample_size_adequate"] is False
         assert "Sample size warning" in perf["sample_warning"]
         assert "30" in perf["sample_warning"]
+
+    def test_dashboard_rejects_unsupported_pair(self, client):
+        response = client.get("/api/forex/dashboard/overview?pair=INVALID")
+
+        assert response.status_code == 422
+        assert response.json()["detail"]["code"] == "INVALID_REQUEST"
+
+    def test_dashboard_preserves_unavailable_mt5_fields_and_failures(
+        self, client, isolated_forex_env
+    ):
+        _, _, observer = isolated_forex_env
+        connection = observer.connection
+        connection.is_connected.return_value = True
+        connection.get_status.return_value = MT5ConnectionStatus.CONNECTED
+        account = SimpleNamespace(
+            balance=None,
+            equity=None,
+            margin=None,
+            margin_free=None,
+            profit=None,
+            currency=None,
+            leverage=None,
+        )
+        connection.get_account_info.return_value = account
+        connection.get_positions.side_effect = RuntimeError("broker positions unavailable")
+        connection.get_orders.side_effect = RuntimeError("broker orders unavailable")
+
+        response = client.get("/api/forex/dashboard/overview")
+
+        assert response.status_code == 200
+        mt5 = response.json()["mt5"]
+        assert mt5["account_available"] is True
+        assert mt5["account"] == {
+            "balance": None,
+            "equity": None,
+            "margin": None,
+            "margin_free": None,
+            "profit": None,
+            "currency": None,
+            "leverage": None,
+        }
+        assert mt5["positions_available"] is False
+        assert mt5["open_positions"] == []
+        assert mt5["orders_available"] is False
+        assert mt5["pending_orders"] == []
+
+    def test_dashboard_preserves_zero_net_profit(self, client, isolated_forex_env):
+        journal, _, _ = isolated_forex_env
+        today = datetime.now(timezone.utc).isoformat()
+        trade = SimpleNamespace(
+            close_time_utc=today,
+            status="CLOSED",
+            net_profit=0.0,
+            gross_profit=125.0,
+            r_multiple=0.0,
+        )
+        with patch.object(journal, "list_trades", return_value=[trade]):
+            response = client.get("/api/forex/dashboard/overview")
+
+        assert response.status_code == 200
+        assert response.json()["trading"]["today_result"] == {
+            "trade_count": 1,
+            "net_profit": 0.0,
+            "total_r": 0.0,
+        }
+
+    def test_dashboard_distinguishes_calendar_failure_from_empty_day(self, client):
+        with patch(
+            "tradingagents.forex.calendar.get_calendar_events_for_pair",
+            side_effect=RuntimeError("provider unavailable"),
+        ):
+            response = client.get("/api/forex/dashboard/overview?pair=EURUSD")
+
+        assert response.status_code == 200
+        research = response.json()["research"]
+        assert research["upcoming_events"] == []
+        assert research["calendar_available"] is False
+        assert research["calendar_date_utc"] == datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     @pytest.mark.parametrize("pair", ["EURUSD", "USDJPY", "GBPUSD"])
     def test_dashboard_events_follow_requested_pair(self, client, pair):
@@ -2594,6 +3003,9 @@ class TestDashboardOverview:
         assert data["mt5"]["server"] == "Demo-Server-01"
         assert data["mt5"]["account"]["balance"] == 25000.0
         assert data["mt5"]["account"]["equity"] == 25450.0
+        assert data["mt5"]["account_available"] is True
+        assert data["mt5"]["positions_available"] is True
+        assert data["mt5"]["orders_available"] is True
         assert len(data["mt5"]["open_positions"]) == 1
         assert data["trading"]["open_positions_count"] == 1
         assert data["trading"]["today_result"]["trade_count"] == 1

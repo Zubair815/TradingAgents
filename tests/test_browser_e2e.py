@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import socket
 import threading
 import time
@@ -32,6 +33,7 @@ from tradingagents.mt5.errors import MT5DataError
 from tradingagents.mt5.models import (
     MT5AccountInfo,
     MT5ConnectionStatus,
+    MT5Deal,
     MT5Position,
     MT5SymbolInfo,
     MT5Tick,
@@ -392,6 +394,107 @@ def test_dashboard_boot_authentication_and_secret_storage(e2e_environment):
         server.DASHBOARD_API_KEY = None
 
 
+def test_dashboard_truthful_availability_pair_and_refresh_states(e2e_environment):
+    with quality_page(
+        e2e_environment,
+        allowed_failed_paths=("/api/forex/dashboard/overview?pair=GBPUSD",),
+    ) as page:
+        payload = {
+            "pair": "EURUSD",
+            "mt5": {
+                "connection_status": "CONNECTED",
+                "is_connected": True,
+                "server": "Fixture-Demo",
+                "masked_login": "654***",
+                "account_available": True,
+                "account": {
+                    "balance": None, "equity": None, "margin": None,
+                    "margin_free": None, "profit": None, "currency": None,
+                    "leverage": None,
+                },
+                "positions_available": False,
+                "open_positions": [],
+                "orders_available": False,
+                "pending_orders": [],
+            },
+            "trading": {
+                "recent_proposals": [
+                    {
+                        "proposal_id": "prop_shared_prefix_alpha001",
+                        "pair": "EURUSD", "action": "LONG", "entry_price": 1.08,
+                        "stop_loss": 1.07, "take_profit_1": 1.10, "status": "EXECUTED",
+                    },
+                    {
+                        "proposal_id": "prop_shared_prefix_beta0002",
+                        "pair": "GBPUSD", "action": "SHORT", "entry_price": 1.25,
+                        "stop_loss": 1.26, "take_profit_1": 1.23, "status": "SKIPPED",
+                    },
+                ],
+                "today_result": {"trade_count": 1, "net_profit": 0.0, "total_r": 0.0},
+            },
+            "performance": {
+                "expectancy": None, "profit_factor": None, "average_r": None,
+                "max_drawdown_pct": None, "is_sample_size_adequate": False,
+                "sample_warning": "Sample size warning",
+            },
+            "research": {
+                "upcoming_events": [], "calendar_available": False,
+                "calendar_date_utc": "2026-10-06", "recent_lessons": [],
+            },
+        }
+        page.route(
+            "**/api/forex/dashboard/overview?*",
+            lambda route: route.fulfill(
+                status=200, content_type="application/json", body=json.dumps(payload)
+            ),
+        )
+
+        page.locator("#btnDashRefreshPositions").click()
+        page.locator("#dashPositionsContainer").get_by_text("Unavailable: positions").wait_for()
+        assert page.locator("#dashMargin").inner_text() == "Margin Used: Unavailable"
+        assert page.locator("#dashLeverage").inner_text() == "Leverage: Unavailable"
+        assert page.locator("#dashEventsContainer").get_by_text("Unavailable: economic calendar").is_visible()
+        assert page.get_by_role("heading", name="Recent Decision Proposals").is_visible()
+        assert page.get_by_role("heading", name="Today's Realized Result (UTC)").is_visible()
+        assert page.locator("#dashTodayPnl").inner_text() == "+$0.00"
+        ids = page.locator("#dashProposalsContainer tbody td:first-child")
+        assert ids.count() == 2
+        assert ids.nth(0).inner_text() != ids.nth(1).inner_text()
+        assert ids.nth(0).inner_text() == "prop_shared_prefix_alpha001"
+        assert ids.nth(0).get_attribute("title") == "prop_shared_prefix_alpha001"
+        assert page.locator("#btnDashRefreshPositions").is_enabled()
+        assert "calendar day 2026-10-06 UTC" in page.locator("#dashLastUpdated").inner_text()
+
+        requested_urls: list[str] = []
+        page.on(
+            "request",
+            lambda request: requested_urls.append(request.url)
+            if "/api/forex/dashboard/overview" in request.url else None,
+        )
+        page.locator("#dashPair").select_option("GBPUSD")
+        page.wait_for_function("document.querySelector('#dashPair').value === 'GBPUSD'")
+        page.locator("#dashLastUpdated").get_by_text("calendar day 2026-10-06 UTC", exact=False).wait_for()
+        assert any("pair=GBPUSD" in url for url in requested_urls)
+
+        page.unroute("**/api/forex/dashboard/overview?*")
+        requested_urls.clear()
+        page.route(
+            "**/api/forex/dashboard/overview?*",
+            lambda route: route.fulfill(
+                status=503,
+                content_type="application/json",
+                body=json.dumps({"detail": {"message": "Dashboard fixture unavailable"}}),
+            ),
+        )
+        page.locator("#btnDashRefreshProposals").click()
+        page.locator("#dashProposalsContainer").get_by_text("Unavailable: proposals").wait_for()
+        assert page.locator("#dashTodayPnl").inner_text() == "Unavailable"
+        assert page.locator("#dashLastUpdated").inner_text() == "Dashboard fixture unavailable"
+        page.get_by_text("Dashboard could not be refreshed", exact=True).wait_for()
+        assert page.locator("#btnDashRefreshProposals").is_enabled()
+        assert len(requested_urls) == 1
+
+
 def test_analysis_form_sse_and_decision_report(e2e_environment):
     with quality_page(e2e_environment) as page:
         captured: list[dict] = []
@@ -408,6 +511,8 @@ def test_analysis_form_sse_and_decision_report(e2e_environment):
         mandatory = page.locator(".mandatory-stage")
         assert mandatory.count() == 2
         assert all(mandatory.nth(index).is_disabled() for index in range(mandatory.count()))
+        assert page.locator("#modeForex").get_attribute("aria-pressed") == "true"
+        assert page.locator('[data-fxanalyst="news"]').get_attribute("aria-pressed") == "false"
         assert page.locator("#btnRun").is_enabled()
         invalid = page.evaluate("[...document.querySelectorAll('#analysisForm :invalid')].map(element => element.id)")
         assert invalid == []
@@ -429,10 +534,50 @@ def test_analysis_form_sse_and_decision_report(e2e_environment):
         assert "RISK ENGINE: APPROVE" in report
         assert "Model confidence: Unavailable" in report
         assert "Model confidence: 0" not in report
+        assert "London / New York Overlap" not in report
+        assert "Upward momentum confirmed" not in report
+        assert "Current Session" not in report
+        assert "Analysis History" in page.locator("#analysisHistoryCard").inner_text()
+        page.locator("#historyContent").get_by_text("USDJPY", exact=True).first.wait_for()
+
+
+def test_manual_analysis_fields_and_payload(e2e_environment):
+    with quality_page(e2e_environment) as page:
+        captured: list[dict] = []
+        page.on(
+            "request",
+            lambda request: captured.append(request.post_data_json)
+            if request.url.endswith("/api/forex/analyze") and request.method == "POST" else None,
+        )
+        page.locator("#tab-analyze").click()
+        page.locator("#forexAccountSource").select_option("manual")
+        manual_fields = [
+            "#accountBalance", "#accountEquity", "#accountFreeMargin",
+            "#accountLeverage", "#accountCurrency",
+        ]
+        for selector in manual_fields:
+            assert page.locator(selector).get_attribute("required") is not None
+            assert page.locator(selector).is_enabled()
+        page.locator("#accountBalance").fill("100000")
+        page.locator("#accountEquity").fill("99500")
+        page.locator("#accountFreeMargin").fill("98000")
+        page.locator("#accountLeverage").fill("100")
+        page.locator("#accountCurrency").fill("usd")
+        page.locator("#analysisForm").evaluate("form => form.requestSubmit()")
+        page.locator("#progressPercent").wait_for(state="visible")
+        page.wait_for_function("document.querySelector('#progressPercent')?.textContent === '100%'")
+        assert captured
+        payload = captured[0]
+        assert payload["account_source"] == "manual"
+        assert payload["account_balance"] == 100000
+        assert payload["account_equity"] == 99500
+        assert payload["account_free_margin"] == 98000
+        assert payload["account_leverage"] == 100
+        assert payload["account_currency"] == "USD"
 
 
 def test_analysis_cancellation_is_terminal_in_browser(e2e_environment):
-    def cancellable_worker(run_id, _request):
+    def cancellable_worker(run_id, _request, _shutdown_event=None):
         deadline = time.time() + 5
         while time.time() < deadline and not forex_routes._forex_cancel_requested(run_id):
             time.sleep(0.02)
@@ -457,6 +602,35 @@ def test_analysis_cancellation_is_terminal_in_browser(e2e_environment):
         forex_routes._run_forex_analysis = original_worker
 
 
+def test_equity_analysis_cancellation_is_terminal_in_browser(e2e_environment):
+    def cancellable_worker(run_id, _request, _shutdown_event=None):
+        deadline = time.time() + 5
+        while time.time() < deadline and not server._equity_cancel_requested(run_id):
+            time.sleep(0.02)
+
+    original_worker = server._run_analysis
+    server._run_analysis = cancellable_worker
+    try:
+        with quality_page(e2e_environment) as page:
+            page.locator("#tab-analyze").click()
+            page.locator("#modeEquities").click()
+            assert page.locator("#modeEquities").get_attribute("aria-pressed") == "true"
+            page.locator("#analysisForm").evaluate("form => form.requestSubmit()")
+            cancel = page.locator("#btnCancelAnalysis")
+            cancel.wait_for(state="visible")
+            cancel.click()
+            page.get_by_text("Equity analysis cancelled", exact=True).wait_for()
+            page.locator('[data-analysis-state="cancelled"]').wait_for()
+            cancelled = page.evaluate(
+                "fetch('/api/runs').then(r=>r.json()).then(d=>d.runs.find(x=>x.status==='cancelled'))"
+            )
+            assert cancelled["status"] == "cancelled"
+            assert cancelled["finished_at"]
+            assert cancelled["run_id"] not in server._completed_reports
+    finally:
+        server._run_analysis = original_worker
+
+
 def test_proposals_mt5_journal_and_learning_workflows(e2e_environment):
     with quality_page(
         e2e_environment,
@@ -466,19 +640,53 @@ def test_proposals_mt5_journal_and_learning_workflows(e2e_environment):
             "/api/forex/mt5/orders",
         ),
     ) as page:
+        proposal_requests = []
+        page.on(
+            "request",
+            lambda request: proposal_requests.append(request.url)
+            if "/api/forex/proposals?" in request.url else None,
+        )
         page.locator("#tab-proposals").click()
         page.locator("#proposalsTableContainer").get_by_text("prop_e2e").wait_for()
+        proposal_table = page.locator("#proposalsTableContainer")
+        assert proposal_table.get_attribute("role") == "region"
+        scroll_styles = proposal_table.evaluate(
+            "el => ({x: getComputedStyle(el).overflowX, y: getComputedStyle(el).overflowY, "
+            "maxHeight: getComputedStyle(el).maxHeight, "
+            "header: getComputedStyle(el.querySelector('thead th')).position, "
+            "minWidth: getComputedStyle(el.querySelector('table')).minWidth})"
+        )
+        assert scroll_styles == {
+            "x": "auto", "y": "auto", "maxHeight": "350px",
+            "header": "sticky", "minWidth": "1480px",
+        }
+        assert "PROPOSED" in page.locator("#proposalsStatusFilter").locator("option").all_text_contents()
+        assert "PENDING" not in page.locator("#proposalsStatusFilter").locator("option").all_text_contents()
+        assert "PULLBACK" in page.locator("#proposalsSetupFilter").locator("option").all_text_contents()
+        assert "EURUSD" in page.locator("#proposalsPairFilter").locator("option").all_text_contents()
+        initial_request_count = len(proposal_requests)
+        with page.expect_response(lambda response: "/api/forex/proposals?" in response.url):
+            page.locator("#btnRefreshProposals").click()
+        assert len(proposal_requests) == initial_request_count + 1
         page.locator("#proposalsTableContainer button", has_text="View").click()
         page.locator("#reportModalBody").get_by_text("Immutable Original Proposal").wait_for()
-        page.get_by_role("button", name="Approve").click()
-        page.locator("#reportModalBody").get_by_text("APPROVED", exact=True).wait_for()
-        assert e2e_environment.journal.get_proposal("prop_e2e").status == ProposalStatus.APPROVED
+        assert page.get_by_role("button", name="Approve").count() == 0
+        assert page.get_by_role("button", name="Mark Executed").count() == 0
+        assert page.get_by_role("button", name="Reject").is_visible()
+        assert e2e_environment.journal.get_proposal("prop_e2e").status == ProposalStatus.PROPOSED
         assert not any(call[0].startswith("place") for call in e2e_environment.observer.method_calls)
         page.locator("#reportModalClose").click()
 
         page.locator("#tab-mt5").click()
         assert "DISCONNECTED" in page.locator("#mt5ConnBadge").inner_text()
+        assert page.locator("#mt5CurrencyVal").inner_text() == "Unavailable"
         assert page.locator('input[type="password"]#mt5Password').count() == 0
+        connect_calls = e2e_environment.connection.connect.call_count
+        page.locator("#mt5LoginInput").fill("654***")
+        page.locator("#btnMT5Connect").click()
+        page.get_by_text("Account login must contain digits only", exact=True).wait_for()
+        assert e2e_environment.connection.connect.call_count == connect_calls
+        page.locator("#mt5LoginInput").fill("")
         account = MT5AccountInfo(
             login=654321, name="E2E", server="Fixture-Demo", currency="USD", leverage=100,
             balance=100000.0, equity=100250.0, profit=250.0, margin=1000.0,
@@ -497,11 +705,63 @@ def test_proposals_mt5_journal_and_learning_workflows(e2e_environment):
         e2e_environment.connection.get_orders.return_value = []
         e2e_environment.observer.get_account_info.return_value = account
         e2e_environment.observer.get_open_positions.return_value = positions
+        e2e_environment.observer.get_deals.return_value = [
+            MT5Deal(ticket=90, order=0, position_id=0, time=datetime(2026, 10, 1, tzinfo=timezone.utc),
+                    type="2", entry="IN", symbol="", volume=0, price=0, profit=1000),
+            MT5Deal(ticket=91, order=80, position_id=70, time=datetime(2026, 10, 2, tzinfo=timezone.utc),
+                    type="DEAL_TYPE_BUY", entry="OUT", symbol="EURUSD", volume=0.5,
+                    price=1.09, commission=-2, swap=-1, fee=-0.5, profit=100),
+            MT5Deal(ticket=92, order=81, position_id=71, time=datetime(2026, 10, 3, tzinfo=timezone.utc),
+                    type="DEAL_TYPE_SELL", entry="OUT", symbol="USDJPY", volume=0.2,
+                    price=150.001, commission=-1, swap=0, fee=0, profit=25),
+        ]
         page.locator("#btnMT5RefreshStatus").click()
         page.locator("#mt5Balance").get_by_text("$100,000.00").wait_for()
+        assert page.locator("#mt5LoginInput").input_value() == ""
+        assert "Observed account" in page.locator("#mt5Currency").inner_text()
+        assert "#654***" in page.locator("#mt5Status").inner_text()
         positions_text = page.locator("#mt5PositionsContainer").inner_text()
         assert "BUY" in positions_text and "SELL" in positions_text
         assert "150.001" in positions_text and "1.08500" in positions_text
+
+        updated_positions = [
+            positions[0].model_copy(update={"price_current": 1.0795, "profit": -12.5}),
+            positions[1],
+        ]
+        e2e_environment.observer.get_open_positions.return_value = updated_positions
+        page.locator("#mt5PositionsContainer").get_by_text("$-12.50", exact=True).wait_for(timeout=8000)
+
+        closed_gold = MT5Deal(
+            ticket=93, order=82, position_id=72,
+            time=datetime.now(timezone.utc), type="DEAL_TYPE_BUY", entry="OUT",
+            symbol="GOLD", volume=0.1, price=4143.01, profit=0.3,
+        )
+        e2e_environment.observer.get_deals.return_value = [
+            *e2e_environment.observer.get_deals.return_value,
+            closed_gold,
+        ]
+        page.locator("#mt5DealsContainer").get_by_text("#93", exact=True).wait_for(timeout=8000)
+
+        deal_rows = page.locator("#mt5DealsContainer tbody tr")
+        assert deal_rows.count() == 3
+        assert "#93" in deal_rows.first.inner_text()
+        assert "+$0.30" in deal_rows.first.inner_text()
+        orders_card = page.locator("#mt5OrdersContainer").locator("xpath=..").bounding_box()
+        deals_card = page.locator("#mt5DealsContainer").locator("xpath=..").bounding_box()
+        assert orders_card is not None and deals_card is not None
+        assert abs(orders_card["x"] - deals_card["x"]) < 2
+        assert orders_card["width"] > 900 and deals_card["width"] > 900
+        assert page.locator("#mt5DealsContainer th").first.evaluate(
+            "element => getComputedStyle(element).whiteSpace"
+        ) == "nowrap"
+        deals_scroll = page.locator("#mt5DealsContainer")
+        assert deals_scroll.get_attribute("role") == "region"
+        assert deals_scroll.evaluate("element => getComputedStyle(element).overflowY") == "auto"
+        assert deals_scroll.locator("thead th").first.evaluate(
+            "element => getComputedStyle(element).position"
+        ) == "sticky"
+        assert "#90" not in page.locator("#mt5DealsContainer").inner_text()
+        assert "1 non-trade balance or account adjustment" in page.locator("#mt5DealsContainer").inner_text()
 
         e2e_environment.observer.get_open_positions.side_effect = MT5DataError(
             "internal position IPC detail", code=-10005
@@ -529,21 +789,68 @@ def test_proposals_mt5_journal_and_learning_workflows(e2e_environment):
         page.locator("#tab-journal").click()
         page.locator("#journalTableContainer [data-trade-id]").click()
         detail = page.locator("#tradeDetailBody")
+        assert detail.get_by_role("tab", name="Overview").get_attribute("aria-selected") == "true"
+        detail.get_by_role("tab", name="Timeline").click()
         detail.get_by_text("Deterministic trade opened", exact=True).wait_for()
+        assert detail.get_by_role("tab", name="Timeline").get_attribute("aria-selected") == "true"
+        detail.get_by_role("tab", name="Reflection & Lessons").click()
         detail.get_by_text("Followed the plan", exact=False).first.wait_for()
         assert "Unavailable" in detail.inner_text()
+        detail.get_by_role("tab", name="Timeline").click()
+        compact = detail.locator('[data-action="toggle-compact"]')
+        compact.click()
+        assert compact.get_attribute("aria-pressed") == "true"
+        assert "Expanded view" in compact.inner_text()
         page.locator("#tradeDetailClose").click()
+        assert "of" in page.locator("#journalResultSummary").inner_text()
+        with page.expect_response(lambda response: "/api/forex/journal/trades?" in response.url) as journal_filter_response:
+            page.locator("#journalStatusFilter").select_option("CLOSED")
+            page.locator("#btnApplyJournalFilters").click()
+        assert "status=CLOSED" in journal_filter_response.value.url
+        page.locator("#journalTableContainer [data-trade-id]").first.wait_for()
+        assert page.locator("#btnRefreshJournal").is_enabled()
+        page.locator("#btnClearJournalFilters").click()
 
         page.locator("#tab-learning").click()
-        page.locator("#lessonsSetupFilter").fill("PULLBACK")
+        page.locator("#lessonsSetupFilter").select_option("PULLBACK")
         page.locator("#lessonsDirectionFilter").select_option("LONG")
         page.locator("#lessonsEvidenceFilter").select_option("3")
-        page.locator("#lessonsTimeframeFilter").fill("M15")
+        page.locator("#lessonsTimeframeFilter").select_option("M15")
         page.locator("#btnRefreshLessons").click()
         page.locator("#lessonsContainer").get_by_text("Require a closed confirmation candle.").wait_for()
+        assert "Showing 1 lesson matching" in page.locator("#lessonsResultSummary").inner_text()
+        with page.expect_response(lambda response: "/api/forex/learning/lessons" in response.url) as clear_response:
+            page.locator("#btnClearLessonFilters").click()
+        assert "?" not in clear_response.value.url
+        assert page.locator("#lessonsPairFilter").input_value() == ""
+        assert page.locator("#lessonsSetupFilter").input_value() == ""
+        assert page.locator("#lessonsDirectionFilter").input_value() == ""
+        assert page.locator("#lessonsTimeframeFilter").input_value() == ""
+        assert page.locator("#lessonsEvidenceFilter").input_value() == ""
+        assert page.locator("#lessonsStatusFilter").input_value() == ""
+        page.locator("#lessonsSetupFilter").select_option("PULLBACK")
+        page.locator("#lessonsContainer").get_by_text("Require a closed confirmation candle.").wait_for()
+        page.locator("#lessonsContainer [data-proposal-id]").click()
+        page.locator("#reportModalBody").get_by_text("This is the original trade plan", exact=False).wait_for()
+        page.locator("#reportModalBody").get_by_text("Read-only historical evidence", exact=True).wait_for()
+        assert page.locator("#reportModalBody").get_by_role("button", name="Approve").count() == 0
+        section_icon_sizes = page.locator(
+            "#reportModalBody .decision-section-title .icon"
+        ).evaluate_all(
+            "icons => icons.map(icon => ({ width: icon.getBoundingClientRect().width, "
+            "height: icon.getBoundingClientRect().height }))"
+        )
+        assert section_icon_sizes
+        assert all(size["width"] <= 20 and size["height"] <= 20 for size in section_icon_sizes)
+        source_summary = page.locator("#reportModalBody .info-banner").inner_text()
+        assert "Risk review: APPROVE" in source_summary
+        assert "historical evidence" in source_summary
+        page.locator("#reportModalClose").click()
         page.locator("#lessonsContainer [data-trade-id]").click()
         assert page.locator("#view-journal").is_visible()
-        page.locator("#tradeDetailBody").get_by_text("Followed the plan").wait_for()
+        source_detail = page.locator("#tradeDetailBody")
+        source_detail.get_by_role("tab", name="Reflection & Lessons").click()
+        source_detail.get_by_text("Followed the plan").wait_for()
 
 
 def test_truthful_forex_rendering_and_validation_contracts(e2e_environment):
@@ -576,6 +883,8 @@ def test_truthful_forex_rendering_and_validation_contracts(e2e_environment):
         row.get_by_role("button", name="View").click()
         detail = page.locator("#reportModalBody")
         detail.get_by_text("Risk checks unavailable").wait_for()
+        detail.get_by_text("Immutable proposal evidence is unavailable", exact=False).wait_for()
+        assert detail.locator("[data-proposal-action]").count() == 0
         assert "Verified Risk:Reward" not in detail.inner_text()
         assert "Account equity protection" not in detail.inner_text()
         page.locator("#reportModalClose").click()
@@ -592,27 +901,111 @@ def test_truthful_forex_rendering_and_validation_contracts(e2e_environment):
 
 
 def test_performance_backtests_and_settings(e2e_environment):
-    with quality_page(e2e_environment) as page:
+    with quality_page(
+        e2e_environment,
+        allowed_failed_paths=(
+            "/api/forex/backtest/run",
+            "/api/forex/analytics/performance?initial_capital=100000",
+        ),
+    ) as page:
         page.locator("#tab-performance").click()
         page.locator("#performanceOverallContainer").get_by_text("Total trades").wait_for()
         overall = page.locator("#performanceOverallContainer").inner_text()
         assert "WIN RATE" in overall and "PROFIT FACTOR" in overall
+        assert page.locator("#performanceInitialCapital").input_value() == "100000"
+        assert "Refresh Calibration" in page.locator("#btnRunCalibration").inner_text()
+        assert "$100,000 starting capital" in page.locator("#performanceStatus").inner_text()
         assert page.locator("#sampleSizeWarning").is_visible()
         page.locator("#performanceSegmentSelect").select_option("by_direction")
         page.locator("#perfBreakdownContainer").get_by_text("LONG", exact=True).wait_for()
+
+        page.route(
+            "**/api/forex/analytics/performance?*",
+            lambda route: route.fulfill(
+                status=500,
+                content_type="application/json",
+                body=json.dumps({"error": {"message": "Performance fixture failure"}}),
+            ),
+        )
+        page.locator("#btnRefreshAnalytics").click()
+        page.locator("#performanceOverallContainer").get_by_text("Performance fixture failure", exact=False).wait_for()
+        assert "ECE:" in page.locator("#confidenceCalibrationContainer").inner_text()
+        assert page.locator("#btnRefreshAnalytics").is_enabled()
+        assert page.locator("#btnRunCalibration").is_enabled()
+        page.unroute("**/api/forex/analytics/performance?*")
+
+        page.locator("#performanceInitialCapital").fill("0")
+        assert page.locator("#performanceInitialCapital").evaluate("element => element.checkValidity()") is False
+        page.locator("#performanceInitialCapital").fill("100000")
 
         page.locator("#tab-backtest").click()
         runs = page.locator("#backtestRunsContainer")
         runs.get_by_text("DEMO", exact=True).wait_for()
         runs.get_by_text("WALK_FORWARD", exact=True).wait_for()
+        table_scroll = runs.locator(".backtest-table-scroll")
+        assert table_scroll.get_attribute("role") == "region"
+        assert table_scroll.evaluate("element => element.scrollWidth > element.clientWidth") is True
+        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth") is True
         runs.get_by_text("wf_e2e").click()
         runs.get_by_text("Walk-forward splits (out-of-sample)").wait_for()
         assert "split-1" in runs.inner_text()
+        page.locator("#btnRefreshBacktests").click()
+        assert page.locator("#btCapital").evaluate("element => element.checkValidity()") is True
+        assert page.locator("#btStartDate").get_attribute("required") is not None
+        assert page.locator("#btEndDate").get_attribute("required") is not None
+        page.locator("#btnModeBacktestDemo").click()
+        assert page.locator("#btStartDate").get_attribute("required") is None
+        assert page.locator("#btEndDate").get_attribute("required") is None
+        page.locator("#btnLaunchBacktest").click()
+        runs.locator(".info-banner").get_by_text("DEMO ONLY:", exact=False).wait_for()
+        estimate_text = page.locator("#backtestEstimate").inner_text()
+        assert "LLM calls: 0" in estimate_text
+        assert "Total tokens: 0" in estimate_text
+        assert runs.get_by_role("button", name="Back to Runs").is_visible()
+        with page.expect_download() as download_info:
+            runs.get_by_role("button", name="Export JSON").click()
+        assert download_info.value.suggested_filename.startswith("bt_")
+        runs.get_by_role("button", name="Back to Runs").click()
+        runs.get_by_text("DEMO", exact=True).first.wait_for()
+
+        page.locator("#btnModeBacktestReal").click()
+        page.locator("#btStartDate").fill("2025-01-06")
+        page.locator("#btEndDate").fill("2025-01-07")
+        page.route(
+            "**/api/forex/backtest/run",
+            lambda route: route.fulfill(
+                status=422,
+                content_type="application/json",
+                body=json.dumps({"detail": {
+                    "code": "HISTORICAL_DATA_UNAVAILABLE",
+                    "message": "MT5 did not provide complete historical candles for this period. Connect the MT5 terminal or select Yahoo in Settings > Market Data Provider, then retry.",
+                }}),
+            ),
+        )
+        page.locator("#btnLaunchBacktest").click()
+        failure = page.locator("#backtestEstimate[role='alert']")
+        failure.get_by_text("Historical backtest could not start", exact=True).wait_for()
+        assert "select Yahoo in Settings" in failure.inner_text()
+        assert "No result was created" in failure.inner_text()
+        page.unroute("**/api/forex/backtest/run")
 
         with page.expect_response(lambda response: response.url.endswith("/api/forex/settings")):
             page.locator("#tab-settings").click()
         page.wait_for_function("document.querySelector('#settingProviderInput')?.options.length > 0")
-        page.locator("#settingPair").fill("GBPUSD")
+        page.locator("#settingProviderInput").select_option("google")
+        assert page.locator("#settingQuickModelInput").input_value().startswith("gemini-")
+        assert page.locator("#settingDeepModelInput").input_value().startswith("gemini-")
+        page.locator("#settingProviderInput").select_option("openrouter")
+
+        page.locator("#settingMaxTokens").fill("0")
+        assert page.locator("#settingMaxTokens").evaluate("element => element.checkValidity()") is False
+        page.locator("#btnSaveLlmSettings").click()
+        assert "error" in (page.locator("#settingsLlmStatus").get_attribute("class") or "")
+        page.locator("#settingMaxTokens").fill("")
+
+        assert page.locator("#settingPair").evaluate("element => element.tagName") == "SELECT"
+        assert page.locator("#settingPair option").count() == 43
+        page.locator("#settingPair").select_option("GBPUSD")
         page.locator("#settingTimeframe").select_option("M15")
         page.locator("#settingRiskPercent").fill("1.4")
         page.locator("#btnSaveSettings").click()
@@ -629,6 +1022,10 @@ def test_performance_backtests_and_settings(e2e_environment):
         assert page.locator("#settingPair").input_value() == "GBPUSD"
         assert page.locator("#settingTimeframe").input_value() == "M15"
         assert page.locator("#settingRiskPercent").input_value() == "1.4"
+        page.once("dialog", lambda dialog: dialog.dismiss())
+        page.locator("#btnResetSettings").click()
+        assert page.evaluate("fetch('/api/forex/settings').then(r => r.json()).then(data => data.settings.forex_default_pair)") == "GBPUSD"
+        page.once("dialog", lambda dialog: dialog.accept())
         page.locator("#btnResetSettings").click()
         page.locator("#settingsStatus").get_by_text("Defaults restored").wait_for()
         assert E2E_API_KEY not in page.locator("body").inner_text()

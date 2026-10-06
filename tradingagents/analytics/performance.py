@@ -32,6 +32,36 @@ from tradingagents.metrics.mfe_mae import parse_utc_timestamp
 logger = logging.getLogger(__name__)
 
 
+def is_settled_trade(trade: Any) -> bool:
+    """Return whether a journal-like record has a realized outcome."""
+    status = getattr(trade, "status", None)
+    if isinstance(trade, dict):
+        status = trade.get("status", status)
+        net_profit = trade.get("net_profit")
+        close_time = trade.get("close_time_utc")
+    else:
+        net_profit = getattr(trade, "net_profit", None)
+        close_time = getattr(trade, "close_time_utc", None)
+    status_value = getattr(status, "value", status)
+    return str(status_value).upper() == TradeStatus.CLOSED.value or (
+        net_profit is not None and close_time is not None
+    )
+
+
+def get_excursion_value(trade: Any, key: str) -> Any:
+    """Read excursion evidence from canonical nested metadata with legacy fallback."""
+    direct = trade.get(key) if isinstance(trade, dict) else getattr(trade, key, None)
+    if direct is not None:
+        return direct
+    metadata = trade.get("metadata") if isinstance(trade, dict) else getattr(trade, "metadata", None)
+    if not isinstance(metadata, dict):
+        return None
+    nested = metadata.get("mfe_mae")
+    if isinstance(nested, dict) and nested.get(key) is not None:
+        return nested[key]
+    return metadata.get(key)
+
+
 # ---------------------------------------------------------------------------
 # Data Models
 # ---------------------------------------------------------------------------
@@ -263,27 +293,19 @@ class ForexPerformanceEngine:
                 streak_loss = 0
 
             # Excursion tracking
-            mfe_r_val = getattr(t, "mfe_r", None)
-            if mfe_r_val is None and isinstance(t, dict):
-                mfe_r_val = t.get("mfe_r")
+            mfe_r_val = get_excursion_value(t, "mfe_r")
             if mfe_r_val is not None:
                 mfe_rs.append(float(mfe_r_val))
 
-            mfe_p_val = getattr(t, "mfe_pips", None)
-            if mfe_p_val is None and isinstance(t, dict):
-                mfe_p_val = t.get("mfe_pips")
+            mfe_p_val = get_excursion_value(t, "mfe_pips")
             if mfe_p_val is not None:
                 mfe_pips.append(float(mfe_p_val))
 
-            mae_r_val = getattr(t, "mae_r", None)
-            if mae_r_val is None and isinstance(t, dict):
-                mae_r_val = t.get("mae_r")
+            mae_r_val = get_excursion_value(t, "mae_r")
             if mae_r_val is not None:
                 mae_rs.append(float(mae_r_val))
 
-            mae_p_val = getattr(t, "mae_pips", None)
-            if mae_p_val is None and isinstance(t, dict):
-                mae_p_val = t.get("mae_pips")
+            mae_p_val = get_excursion_value(t, "mae_pips")
             if mae_p_val is not None:
                 mae_pips.append(float(mae_p_val))
 
@@ -329,8 +351,9 @@ class ForexPerformanceEngine:
         median_r = round(float(statistics.median(all_rs)), 2) if all_rs else 0.0
 
         # Expectancy: (P(Win) * AvgWinR) + (P(Loss) * AvgLossR)
-        expectancy = round((win_rate * avg_winner_r) + ((1.0 - win_rate) * avg_loser_r), 2)
-        expectancy_cash = round((win_rate * avg_winner) - ((1.0 - win_rate) * avg_loser), 2)
+        loss_rate = losses / trade_count if trade_count > 0 else 0.0
+        expectancy = round((win_rate * avg_winner_r) + (loss_rate * avg_loser_r), 2)
+        expectancy_cash = round((win_rate * avg_winner) - (loss_rate * avg_loser), 2)
 
         avg_duration_sec = round(sum(durations) / len(durations), 1) if durations else 0.0
         hrs = int(avg_duration_sec // 3600)
@@ -643,12 +666,7 @@ class ForexPerformanceEngine:
         cap = initial_capital if initial_capital is not None else self.initial_capital
 
         # Realized performance across executed journal trades
-        realized_trades = [
-            t for t in trades
-            if getattr(t, "status", None) == TradeStatus.CLOSED
-            or (isinstance(t, dict) and t.get("status") in (TradeStatus.CLOSED, "CLOSED"))
-            or getattr(t, "net_profit", None) is not None
-        ]
+        realized_trades = [t for t in trades if is_settled_trade(t)]
         realized_metrics = self.calculate_metrics(realized_trades, initial_capital=cap)
 
         # Theoretical performance across AI proposals / counterfactual simulations
@@ -658,13 +676,13 @@ class ForexPerformanceEngine:
         theoretical_metrics = self.calculate_metrics(theoretical_items, initial_capital=cap)
 
         # Overall metrics (combined executed trades)
-        overall_metrics = self.calculate_metrics(trades, initial_capital=cap)
+        overall_metrics = self.calculate_metrics(realized_trades, initial_capital=cap)
 
         # Execution friction & management
-        exec_metrics = self.calculate_execution_metrics(trades=trades, events=events, proposals=proposals)
+        exec_metrics = self.calculate_execution_metrics(trades=realized_trades, events=events, proposals=proposals)
 
         # Segmentation
-        segmentation = self.calculate_segmentation(trades=trades)
+        segmentation = self.calculate_segmentation(trades=realized_trades)
 
         # Markdown Scorecard
         md = self._render_performance_markdown(

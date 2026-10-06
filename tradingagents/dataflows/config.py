@@ -11,10 +11,18 @@ _config: dict | None = None
 _active_config: ContextVar[dict | None] = ContextVar("tradingagents_config", default=None)
 _RUNTIME_CONFIG_PATH = Path.home() / ".tradingagents" / "runtime_settings.json"
 _SECRET_KEY_PATTERNS = ("api_key", "token", "secret", "password", "passwd")
+_NON_SECRET_KEYS = frozenset({"max_tokens"})
+_SUPPORTED_LLM_PROVIDERS = frozenset({
+    "anthropic", "azure", "bedrock", "deepseek", "glm", "glm-cn", "google",
+    "groq", "kimi", "minimax", "minimax-cn", "mistral", "nvidia", "ollama",
+    "openai", "openai_compatible", "openrouter", "qwen", "qwen-cn", "xai",
+})
 
 
 def _is_secret_like_key(key: str) -> bool:
     normalized = str(key).lower()
+    if normalized in _NON_SECRET_KEYS:
+        return False
     return any(pattern in normalized for pattern in _SECRET_KEY_PATTERNS)
 
 
@@ -36,6 +44,10 @@ def _validate_runtime_value(key: str, value):
     if key not in default_config.DEFAULT_CONFIG:
         raise ValueError(f"Unsupported runtime setting: {key!r}")
 
+    if key == "llm_provider":
+        if not isinstance(value, str) or value.lower() not in _SUPPORTED_LLM_PROVIDERS:
+            raise ValueError(f"{key} must be a supported LLM provider")
+        return value.lower()
     if key == "forex_default_pair":
         if not isinstance(value, str):
             raise ValueError(f"{key} must be a string")
@@ -75,21 +87,21 @@ def _validate_runtime_value(key: str, value):
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise ValueError(f"{key} must be numeric")
         value = float(value)
-        if value <= 0:
-            raise ValueError(f"{key} must be greater than 0")
+        if not 0.5 <= value <= 10:
+            raise ValueError(f"{key} must be between 0.5 and 10")
         return value
     if key == "forex_news_blackout_minutes":
         if isinstance(value, bool) or not isinstance(value, int):
             raise ValueError(f"{key} must be an integer")
-        if value < 0:
-            raise ValueError(f"{key} must be >= 0")
+        if not 0 <= value <= 180:
+            raise ValueError(f"{key} must be between 0 and 180")
         return value
     if key == "mt5_poll_interval_seconds":
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise ValueError(f"{key} must be numeric")
         value = float(value)
-        if value < 0.5:
-            raise ValueError(f"{key} must be at least 0.5 seconds")
+        if not 0.5 <= value <= 30:
+            raise ValueError(f"{key} must be between 0.5 and 30 seconds")
         return value
     if key == "llm_max_retries":
         if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 10:
@@ -106,7 +118,9 @@ def _validate_runtime_value(key: str, value):
     reference = default_config.DEFAULT_CONFIG.get(key)
     explicit_type = default_config._CONFIG_KEY_TYPES.get(key)
     if key == "max_tokens":
-        explicit_type = int
+        if isinstance(value, bool) or not isinstance(value, int) or not 512 <= value <= 100_000:
+            raise ValueError(f"{key} must be an integer between 512 and 100000")
+        return value
     if explicit_type is bool:
         if not isinstance(value, bool):
             raise ValueError(f"{key} must be a boolean")
@@ -123,8 +137,8 @@ def _validate_runtime_value(key: str, value):
         value = float(value)
         if key == "temperature" and not 0.0 <= value <= 2.0:
             raise ValueError(f"{key} must be between 0 and 2")
-        if key in {"forex_max_spread_pips"} and value < 0:
-            raise ValueError(f"{key} must be >= 0")
+        if key == "forex_max_spread_pips" and not 0 <= value <= 50:
+            raise ValueError(f"{key} must be between 0 and 50")
         return value
     if explicit_type is str:
         if not isinstance(value, str):
@@ -148,8 +162,8 @@ def _validate_runtime_value(key: str, value):
         value = float(value)
         if key == "temperature" and not 0.0 <= value <= 2.0:
             raise ValueError(f"{key} must be between 0 and 2")
-        if key in {"forex_max_spread_pips"} and value < 0:
-            raise ValueError(f"{key} must be >= 0")
+        if key == "forex_max_spread_pips" and not 0 <= value <= 50:
+            raise ValueError(f"{key} must be between 0 and 50")
         return value
     if isinstance(reference, str):
         if not isinstance(value, str):
@@ -184,9 +198,21 @@ def save_runtime_settings(patch: dict) -> dict:
     return get_config()
 
 
-def reset_runtime_settings() -> dict:
-    """Clear any local runtime overrides and return the default config state."""
+def reset_runtime_settings(keys: list[str] | set[str] | None = None) -> dict:
+    """Clear any local runtime overrides (or specific keys) and return the updated config state."""
     global _config
+    if keys is not None:
+        current = _load_runtime_settings()
+        for k in keys:
+            current.pop(k, None)
+        if current:
+            _RUNTIME_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            _RUNTIME_CONFIG_PATH.write_text(json.dumps(current, indent=2, sort_keys=True), encoding="utf-8")
+        elif _RUNTIME_CONFIG_PATH.exists():
+            _RUNTIME_CONFIG_PATH.unlink()
+        _config = build_config()
+        return get_config()
+
     _config = deepcopy(default_config.DEFAULT_CONFIG)
     if _RUNTIME_CONFIG_PATH.exists():
         _RUNTIME_CONFIG_PATH.unlink()

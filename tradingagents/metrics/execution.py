@@ -14,6 +14,7 @@ from typing import Any
 
 from tradingagents.agents.schemas_forex import ForexAction
 from tradingagents.database.models import OrderExecutionRecord
+from tradingagents.forex.conversion import FXConversionUnavailable
 from tradingagents.forex.pips import pip_size_for, pip_value_in_account_currency
 from tradingagents.forex.sessions import session_for_pair
 from tradingagents.metrics.mfe_mae import parse_utc_timestamp
@@ -265,11 +266,13 @@ class ExecutionQualityAnalyzer:
             }
 
         analyzed: list[ExecutionQuality] = []
+        excluded: list[dict[str, str]] = []
         for item in executions:
-            if isinstance(item, ExecutionQuality):
-                analyzed.append(item)
-            elif isinstance(item, OrderExecutionRecord):
-                eq = self.analyze_execution(
+            try:
+                if isinstance(item, ExecutionQuality):
+                    analyzed.append(item)
+                elif isinstance(item, OrderExecutionRecord):
+                    eq = self.analyze_execution(
                     trade_id=item.trade_id,
                     pair=item.pair,
                     action=ForexAction.LONG,
@@ -282,16 +285,16 @@ class ExecutionQualityAnalyzer:
                     order_type=item.order_type,
                     timestamp_utc=item.timestamp_utc,
                 )
-                eq.slippage_pips = item.slippage_pips
-                eq.slippage_cost_usd = calculate_slippage_cost(
-                    item.slippage_pips, item.volume, item.pair, self.account_currency
-                )
-                eq.quality_score = calculate_execution_quality_score(
-                    item.slippage_pips, item.spread_at_open_pips
-                )
-                analyzed.append(eq)
-            elif isinstance(item, dict):
-                eq = self.analyze_execution(
+                    eq.slippage_pips = item.slippage_pips
+                    eq.slippage_cost_usd = calculate_slippage_cost(
+                        item.slippage_pips, item.volume, item.pair, self.account_currency
+                    )
+                    eq.quality_score = calculate_execution_quality_score(
+                        item.slippage_pips, item.spread_at_open_pips
+                    )
+                    analyzed.append(eq)
+                elif isinstance(item, dict):
+                    eq = self.analyze_execution(
                     trade_id=str(item.get("trade_id", "trd_unspecified")),
                     pair=str(item.get("pair", "EURUSD")),
                     action=item.get("action", ForexAction.LONG),
@@ -302,7 +305,29 @@ class ExecutionQualityAnalyzer:
                     execution_delay_ms=float(item["execution_delay_ms"]) if item.get("execution_delay_ms") is not None else None,
                     session=item.get("session"),
                 )
-                analyzed.append(eq)
+                    analyzed.append(eq)
+            except FXConversionUnavailable as exc:
+                pair = item.get("pair", "UNKNOWN") if isinstance(item, dict) else getattr(item, "pair", "UNKNOWN")
+                excluded.append({"pair": str(pair), "reason": str(exc)})
+                logger.info("Execution friction unavailable for pair %s", pair)
+
+        if not analyzed:
+            return {
+                "total_executions": 0,
+                "total_executions_requested": len(executions),
+                "excluded_executions": len(excluded),
+                "exclusions": excluded,
+                "avg_quality_score": 0.0,
+                "avg_slippage_pips": 0.0,
+                "adverse_fill_pct": 0.0,
+                "price_improvement_pct": 0.0,
+                "exact_fill_pct": 0.0,
+                "total_slippage_cost_usd": 0.0,
+                "total_spread_cost_usd": 0.0,
+                "total_friction_usd": 0.0,
+                "by_pair": {},
+                "by_session": {},
+            }
 
         total_count = len(analyzed)
         scores = [e.quality_score for e in analyzed]
@@ -357,6 +382,9 @@ class ExecutionQualityAnalyzer:
 
         return {
             "total_executions": total_count,
+            "total_executions_requested": len(executions),
+            "excluded_executions": len(excluded),
+            "exclusions": excluded,
             "avg_quality_score": round(sum(scores) / total_count, 1),
             "avg_slippage_pips": round(sum(slippages) / total_count, 2),
             "max_adverse_slippage_pips": round(max(slippages), 2) if slippages else 0.0,

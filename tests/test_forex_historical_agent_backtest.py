@@ -474,6 +474,36 @@ def test_api_estimate_backtest_costs():
     assert data["actual_usage"] is None
 
 
+def test_historical_cost_confirmation_remains_a_409():
+    client = TestClient(app)
+    client.get("/")
+    estimate = MagicMock()
+    estimate.to_dict.return_value = {
+        "estimated_cost_usd": 2.0,
+        "estimated_llm_calls": 8,
+    }
+    bars = generate_bars(4)
+    with (
+        patch(
+            "tradingagents.backtest.historical_data.load_historical_candles",
+            return_value=(bars, {"source": "MT5"}),
+        ),
+        patch("web.forex_routes.estimate_agent_analyses", return_value=estimate),
+        patch("web.forex_routes.create_historical_forex_pipeline", return_value=MagicMock()),
+    ):
+        response = client.post("/api/forex/backtest/run", json={
+            "mode": "HISTORICAL_AGENT_BACKTEST",
+            "pair": "EURUSD",
+            "timeframe": "H1",
+            "date_from": "2025-01-01",
+            "date_to": "2025-01-02",
+        })
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "COST_CONFIRMATION_REQUIRED"
+    assert response.json()["detail"]["estimate"]["estimated_cost_usd"] == 2.0
+
+
 def test_walk_forward_estimate_uses_actual_four_period_structure():
     client = TestClient(app)
     client.get("/")

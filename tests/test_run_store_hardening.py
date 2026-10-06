@@ -49,6 +49,7 @@ def isolated_transient_stores(monkeypatch):
     with server._run_store_lock:
         server._runs.clear()
         server._run_events.clear()
+        server._run_cancellations.clear()
         server._completed_reports.clear()
         server._expired_runs.clear()
     with forex_routes._lock:
@@ -63,6 +64,7 @@ def isolated_transient_stores(monkeypatch):
     with server._run_store_lock:
         server._runs.clear()
         server._run_events.clear()
+        server._run_cancellations.clear()
         server._completed_reports.clear()
         server._expired_runs.clear()
     with forex_routes._lock:
@@ -105,6 +107,33 @@ def test_run_cancel_endpoint_sets_terminal_state(isolated_transient_stores):
     assert server._runs[run_id]["status"] == "cancelled"
     assert server._runs[run_id]["finished_at"]
     assert server._run_events[run_id][-1]["type"] == "cancelled"
+
+
+def test_equity_cancel_stops_worker_and_cannot_persist_success(isolated_transient_stores):
+    run_id = "run-cancel-worker"
+    server._runs[run_id] = {
+        "run_id": run_id,
+        "ticker": "AAPL",
+        "date": "2026-10-01",
+        "status": "cancelled",
+        "started_at": _iso(time.time()),
+        "finished_at": _iso(time.time()),
+    }
+    server._run_events[run_id] = []
+    event = threading.Event()
+    event.set()
+    server._run_cancellations[run_id] = event
+    graph = MagicMock()
+
+    with patch("web.server.TradingAgentsGraph", return_value=graph):
+        server._run_analysis(
+            run_id,
+            server.AnalysisRequest(ticker="AAPL", date="2026-10-01", analysts=["market"]),
+        )
+
+    assert server._runs[run_id]["status"] == "cancelled"
+    assert run_id not in server._completed_reports
+    graph.graph.stream.assert_not_called()
 
 
 def test_forex_cancel_is_cooperative_terminal_and_never_persists_success(
@@ -420,11 +449,10 @@ def test_sse_exits_after_terminal_event(isolated_transient_stores):
     server._run_events["terminal"] = [
         {"type": "complete", "data": {"status": "completed"}, "ts": time.time()}
     ]
-    with (
-        TestClient(server.app) as client,
-        client.stream("GET", "/api/runs/terminal/events") as response,
-    ):
-        body = "".join(response.iter_text())
+    with TestClient(server.app) as client:
+        assert client.get("/").status_code == 200
+        with client.stream("GET", "/api/runs/terminal/events") as response:
+            body = "".join(response.iter_text())
     assert response.status_code == 200
     assert "event: complete" in body
 

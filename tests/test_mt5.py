@@ -25,6 +25,7 @@ import pytest
 
 from tradingagents.agents.schemas_forex import ForexAction
 from tradingagents.dataflows.forex_data import ForexBar, MultiTimeframeData
+from tradingagents.dataflows.forex_quality import DataInsufficientError
 from tradingagents.forex.domain import Timeframe
 from tradingagents.mt5.connection import MT5ConnectionManager
 from tradingagents.mt5.errors import (
@@ -241,7 +242,9 @@ class MockDealData:
         price: float = 1.08500,
         commission: float = -5.0,
         swap: float = -2.5,
+        fee: float = 0.0,
         profit: float = 500.0,
+        reason: int = 0,
         comment: str = "ClosedTakeProfit",
     ):
         self.ticket = ticket
@@ -256,7 +259,9 @@ class MockDealData:
         self.price = price
         self.commission = commission
         self.swap = swap
+        self.fee = fee
         self.profit = profit
+        self.reason = reason
         self.comment = comment
 
 
@@ -566,6 +571,16 @@ class TestMT5ObserverAccount:
             observer.get_account_info()
         assert "Account not found" in str(exc_info.value)
 
+    def test_missing_risk_critical_account_field_fails_closed(self):
+        mock_api = MockMT5API()
+        incomplete = MockAccountInfoData()
+        del incomplete.leverage
+        mock_api.account_info = MagicMock(return_value=incomplete)
+        observer = MT5Observer(connection=MT5ConnectionManager(mt5_api=mock_api))
+
+        with pytest.raises(DataInsufficientError, match="leverage"):
+            observer.get_account_info()
+
 
 class TestMT5ObserverSymbols:
     """Test broker symbol specification, spread in pips, and constraints."""
@@ -609,6 +624,29 @@ class TestMT5ObserverSymbols:
         with pytest.raises(MT5SymbolError):
             observer.get_symbol_info("INVALID_COIN")
 
+    def test_xauusd_resolves_common_gold_broker_alias(self):
+        mock_api = MockMT5API()
+        mock_api.known_symbols["GOLD"] = MockSymbolInfoData(
+            name="GOLD",
+            digits=2,
+            point=0.01,
+            spread=25,
+            bid=2650.10,
+            ask=2650.35,
+            trade_contract_size=100.0,
+            currency_base="XAU",
+        )
+        observer = MT5Observer(connection=MT5ConnectionManager(mt5_api=mock_api))
+
+        symbol = observer.get_symbol_info("XAUUSD")
+        tick = observer.get_current_tick("XAUUSD")
+
+        assert symbol.name == "GOLD"
+        assert symbol.canonical_symbol == "XAUUSD"
+        assert symbol.pip_size == 0.01
+        assert tick.broker_symbol == "GOLD"
+        assert tick.bid == 2650.10
+
     def test_get_symbols_catalog(self):
         mock_api = MockMT5API()
         mgr = MT5ConnectionManager(mt5_api=mock_api)
@@ -619,6 +657,16 @@ class TestMT5ObserverSymbols:
         names = [s.canonical_symbol for s in symbols]
         assert "EURUSD" in names
         assert "GBPJPY" in names
+
+    def test_missing_broker_contract_field_fails_closed(self):
+        mock_api = MockMT5API()
+        for symbol_info in mock_api.known_symbols.values():
+            if hasattr(symbol_info, "trade_contract_size"):
+                del symbol_info.trade_contract_size
+        observer = MT5Observer(connection=MT5ConnectionManager(mt5_api=mock_api))
+
+        with pytest.raises(DataInsufficientError, match="trade_contract_size"):
+            observer.get_symbol_info("EURUSD")
 
 
 class TestMT5ObserverTicksAndCandles:
@@ -779,6 +827,31 @@ class TestMT5ObserverPositionsAndOrders:
 
         assert realized == 485.0
         assert day_start == datetime(2026, 9, 30, tzinfo=timezone.utc)
+
+    def test_xm_deal_range_and_timestamp_normalize_broker_wall_clock(self):
+        mock_api = MockMT5API()
+        raw_close_time = datetime(2026, 10, 5, 7, 2, 38, tzinfo=timezone.utc)
+        mock_api.history_deals_get = MagicMock(return_value=[
+            MockDealData(
+                ticket=7010,
+                time=int(raw_close_time.timestamp()),
+                symbol="GOLD",
+                entry=1,
+                profit=0.30,
+            )
+        ])
+        manager = MT5ConnectionManager(mt5_api=mock_api, server="XMGlobal-MT5 2")
+        observer = MT5Observer(connection=manager)
+        date_from = datetime(2026, 10, 5, 3, 0, tzinfo=timezone.utc)
+        date_to = datetime(2026, 10, 5, 4, 7, tzinfo=timezone.utc)
+
+        deals = observer.get_deals(date_from=date_from, date_to=date_to)
+
+        mock_api.history_deals_get.assert_called_once_with(
+            datetime(2026, 10, 5, 6, 0, tzinfo=timezone.utc),
+            datetime(2026, 10, 5, 7, 7, tzinfo=timezone.utc),
+        )
+        assert deals[0].time == datetime(2026, 10, 5, 4, 2, 38, tzinfo=timezone.utc)
 
     def test_get_orders_history(self):
         mock_api = MockMT5API()

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from tradingagents.agents.schemas_forex import (
+    ForexAction,
     ForexRiskDecision,
     ForexTraderProposal,
 )
@@ -142,6 +143,7 @@ class ForexJournalManager:
         take_profit: float | None = None,
         ticket: int | str | None = None,
         actor: str = "MT5Observer",
+        open_time: datetime | str | None = None,
     ) -> str:
         """Transition proposal into an active open trade."""
         return self.lifecycle.open_position_from_proposal(
@@ -152,6 +154,34 @@ class ForexJournalManager:
             take_profit=take_profit,
             ticket=ticket,
             actor=actor,
+            open_time=open_time,
+        )
+
+    def open_unplanned_trade(
+        self,
+        pair: str,
+        action: ForexAction,
+        open_price: float,
+        lots: float,
+        stop_loss: float = 0.0,
+        take_profit: float | None = None,
+        ticket: int | str | None = None,
+        open_time_utc: str | None = None,
+        actor: str = "MT5Observer",
+        notes: str = "Unplanned manual trade",
+    ) -> str:
+        """Record an unplanned trade through the canonical lifecycle."""
+        return self.lifecycle.open_unplanned_position(
+            pair=pair,
+            action=action,
+            open_price=open_price,
+            lots=lots,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            ticket=ticket,
+            open_time_utc=open_time_utc,
+            actor=actor,
+            notes=notes,
         )
 
     def modify_stop_loss(

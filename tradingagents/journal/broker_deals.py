@@ -2,7 +2,7 @@
 
 import json
 
-from tradingagents.forex.pips import pip_size_for
+from tradingagents.forex.domain import get_forex_pair
 
 
 def record_broker_deal(journal, trade_id, deal):
@@ -37,9 +37,17 @@ def record_broker_deal(journal, trade_id, deal):
                 meta.setdefault("broker_deal_ids", []).append(deal.ticket)
                 if final:
                     meta["post_close_status"] = "PENDING"
+                pair = get_forex_pair(trade.pair)
                 direction = 1 if trade.action.value == "LONG" else -1
-                pips = direction * (deal.price-trade.open_price) / pip_size_for(trade.pair)
-                risk = abs(trade.open_price-meta.get("initial_stop_loss", trade.stop_loss)) / pip_size_for(trade.pair)
+                deal_pips = direction * (deal.price-trade.open_price) / pair.pip_size if pair else None
+                initial_lots = float(meta.get("initial_lots", trade.lots))
+                if closing and deal_pips is not None:
+                    meta["realized_pip_lots"] = float(meta.get("realized_pip_lots", 0.0)) + deal_pips * deal.volume
+                pips = (
+                    round(float(meta.get("realized_pip_lots", 0.0)) / initial_lots, 2)
+                    if final and pair and initial_lots > 0 else None
+                )
+                risk = abs(trade.open_price-meta.get("initial_stop_loss", trade.stop_loss)) / pair.pip_size if pair else None
                 reason = "STOP_LOSS" if deal.reason == 4 else "TAKE_PROFIT" if deal.reason == 5 else "MANUAL"
                 conn.execute("""INSERT INTO executions
                     (deal_id,trade_id,proposal_id,pair,order_type,volume,price,slippage_pips,spread_at_open_pips,timestamp_utc)
@@ -52,8 +60,8 @@ def record_broker_deal(journal, trade_id, deal):
                      deal.time.isoformat() if final else trade.close_time_utc,
                      deal.price if final else trade.close_price, totals["profit"],
                      -(totals["commission"]+totals["fee"]), totals["swap"], sum(totals.values()),
-                     round(pips, 2) if final else trade.pips_gained,
-                     round(pips/risk, 2) if final and risk else trade.r_multiple,
+                     pips if final else trade.pips_gained,
+                     round(pips/risk, 2) if final and pips is not None and risk else trade.r_multiple,
                      reason if final else None, json.dumps(meta), trade_id))
                 payload = deal.model_dump(mode="json")
                 payload.update(deal_ticket=deal.ticket, remaining_volume=remaining, volume_closed=deal.volume if closing else 0)

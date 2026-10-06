@@ -637,6 +637,8 @@ body::before {
 
 /* ---------- Run detail modal/overlay ---------- */
 .journal-scroll { overflow-x: auto; max-width: 100%; }
+.journal-filter-bar { display:flex; align-items:center; gap:.5rem; flex-wrap:wrap; margin-bottom:.5rem; }
+.journal-filter-bar .form-label { margin:0; }
 .journal-table { min-width: 1300px; }
 .journal-table td { white-space: nowrap; }
 .journal-state { padding: 1.5rem; color: var(--text-secondary); }
@@ -646,9 +648,18 @@ body::before {
 .trade-detail-header { display: flex; align-items: center; justify-content: space-between; gap: 1rem;
   padding: 1.25rem 1.5rem; border-bottom: 1px solid var(--border); }
 .trade-detail-header h2 { font-size: 1.1rem; overflow-wrap: anywhere; }
-.trade-detail-body { padding: 1.5rem; }
+.trade-detail-body { padding: 1.5rem; max-height: calc(92vh - 5.5rem); overflow-y: auto; }
 .trade-evidence-note { color: var(--text-muted); font-size: .78rem; line-height: 1.6; margin-bottom: .65rem; }
-.trade-detail-grid { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 1rem; margin: 1rem 0; }
+.trade-detail-tabs { position: sticky; top: -1.5rem; z-index: 3; display: flex; gap: .35rem; overflow-x: auto;
+  padding: .75rem 0; margin: 0 0 1rem; background: var(--bg-secondary); border-bottom: 1px solid var(--border);
+  scrollbar-width: thin; }
+.trade-detail-tabs button { flex: 0 0 auto; padding: .65rem .85rem; border: 1px solid transparent; border-radius: 8px;
+  background: transparent; color: var(--text-secondary); font: inherit; font-size: .82rem; font-weight: 600; cursor: pointer; }
+.trade-detail-tabs button:hover { color: var(--text-primary); background: var(--bg-card); }
+.trade-detail-tabs button[aria-selected="true"] { color: var(--cyan); border-color: rgba(0, 212, 255, .35);
+  background: rgba(0, 212, 255, .09); }
+.trade-detail-panels [role="tabpanel"][hidden] { display: none; }
+.trade-detail-grid { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 1rem; margin: 0; }
 .trade-section { padding: 1.2rem; border: 1px solid var(--border); border-radius: 10px; min-width: 0; }
 .trade-section h3 { font-size: .95rem; margin: 0 0 1rem; }
 .trade-section h4 { font-size: .85rem; overflow-wrap: anywhere; }
@@ -697,6 +708,8 @@ body::before {
   .trade-detail-grid { grid-template-columns: minmax(0,1fr); }
   .trade-detail-dialog { width: calc(100vw - 1rem); max-height: 95vh; }
   .trade-detail-body, .trade-detail-header { padding: 1rem; }
+  .trade-detail-body { max-height: calc(95vh - 5rem); }
+  .trade-detail-tabs { top: -1rem; }
 }
 @media (max-width: 480px) {
   .trade-fields { grid-template-columns: minmax(0,1fr); }
@@ -869,6 +882,35 @@ body::before {
   margin-bottom: 1.5rem;
 }
 
+/* Keep large proposal result sets usable without making the whole page scroll. */
+.proposals-table-scroll {
+  max-height: 350px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.proposals-table-scroll .data-table {
+  min-width: 1480px;
+}
+
+.proposals-table-scroll .data-table th,
+.proposals-table-scroll .data-table td {
+  height: 58px;
+  white-space: nowrap;
+}
+
+.proposals-table-scroll .data-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
+.proposals-table-scroll:focus-visible {
+  outline: 2px solid var(--cyan);
+  outline-offset: 3px;
+}
+
 .data-table {
   width: 100%;
   border-collapse: collapse;
@@ -903,7 +945,7 @@ body::before {
 
 .lesson-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
   gap: 1.25rem;
 }
 
@@ -970,7 +1012,70 @@ body::before {
   .logo-badge { display: none; }
   .stat-cards { grid-template-columns: 1fr 1fr; }
   .lesson-grid { grid-template-columns: 1fr; }
+  .tabs-wrapper { overflow-x: visible; }
+  .tabs {
+    display: flex;
+    flex-wrap: wrap;
+    width: 100%;
+  }
+  .tab { flex: 1 1 135px; }
   .dashboard-grid { grid-template-columns: 1fr; }
+}
+
+.backtest-retention-note {
+  margin: 0.9rem 0 0;
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+#view-backtest .analysis-grid > *,
+.backtest-results-card,
+#backtestRunsContainer {
+  min-width: 0;
+}
+
+.backtest-results-header {
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 1rem;
+}
+
+.backtest-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+
+.backtest-table-scroll {
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+  scrollbar-gutter: stable;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+
+.backtest-table-scroll .data-table {
+  min-width: 1180px;
+}
+
+.backtest-table-scroll:focus-visible {
+  outline: 2px solid var(--cyan);
+  outline-offset: 3px;
+}
+
+@media (max-width: 600px) {
+  .backtest-actions {
+    width: 100%;
+    justify-content: stretch;
+  }
+
+  .backtest-actions .btn-sm {
+    flex: 1 1 100%;
+  }
 }
 
 /* ---------- Institutional UI Utilities ---------- */
@@ -979,6 +1084,48 @@ body::before {
   grid-template-columns: 1fr 1fr;
   gap: 1.5rem;
   margin-bottom: 1.5rem;
+}
+
+.mt5-history-grid {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.mt5-table-scroll {
+  width: 100%;
+  overflow-x: auto;
+  scrollbar-gutter: stable;
+}
+
+.mt5-orders-table .data-table {
+  min-width: 860px;
+}
+
+.mt5-deals-table .data-table {
+  min-width: 1040px;
+}
+
+.mt5-deals-table {
+  max-height: 430px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.mt5-deals-table .data-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--bg-primary);
+}
+
+.mt5-deals-table:focus-visible {
+  outline: 2px solid var(--cyan);
+  outline-offset: 3px;
+}
+
+.mt5-table-scroll .data-table th,
+.mt5-table-scroll .data-table td {
+  white-space: nowrap;
+  vertical-align: middle;
 }
 
 .toolbar {
@@ -1049,6 +1196,13 @@ body::before {
   margin-bottom: 1.25rem;
 }
 
+.info-banner.error {
+  background: rgba(255, 77, 109, 0.08);
+  border-color: rgba(255, 77, 109, 0.35);
+  color: var(--red);
+  line-height: 1.55;
+}
+
 .badge-readonly {
   font-size: 0.7rem;
   color: var(--cyan);
@@ -1064,8 +1218,14 @@ body::before {
 /* Settings Sections */
 .settings-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 1.5rem;
+}
+
+@media (max-width: 960px) {
+  .settings-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .settings-card {
@@ -1127,8 +1287,11 @@ body::before {
 .settings-actions {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: 0.65rem;
-  padding-top: 0.25rem;
+  margin-top: auto;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
 }
 
 .btn-primary {
@@ -1178,6 +1341,44 @@ body::before {
   border-color: rgba(255, 82, 82, 0.35);
   background: rgba(255, 82, 82, 0.08);
   color: var(--red);
+}
+
+/* Global batch action bar across bottom of settings view */
+.settings-global-bar {
+  margin-top: 1.5rem;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1.25rem 1.5rem;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+}
+
+.settings-global-bar-info {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.settings-global-bar-title {
+  font-weight: 600;
+  font-size: 0.92rem;
+  color: var(--text-primary);
+}
+
+.settings-global-bar-desc {
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+}
+
+.settings-global-bar-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
 }
 
 .settings-row {
@@ -1282,6 +1483,14 @@ body::before {
   margin-bottom: 1rem;
   padding-bottom: 0.5rem;
   border-bottom: 1px solid var(--border);
+}
+
+.decision-section-title .icon {
+  display: block;
+  width: 20px;
+  height: 20px;
+  min-width: 20px;
+  flex: 0 0 20px;
 }
 
 .proposal-meta-grid {

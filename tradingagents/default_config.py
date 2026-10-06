@@ -199,7 +199,7 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "forex_news_archive_dir": None,
     # Applied when a new MT5 observation service is created. Changing this
     # while the service exists requires an application restart.
-    "mt5_poll_interval_seconds": 5.0,
+    "mt5_poll_interval_seconds": 3.0,
     # Data vendor configuration
     # Category-level configuration (default for all tools in category).
     # The configured value is the exact vendor chain — requests are NOT silently

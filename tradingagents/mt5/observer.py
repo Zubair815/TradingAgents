@@ -8,11 +8,13 @@ Never places, modifies, or cancels trading orders.
 from __future__ import annotations
 
 import logging
+import math
 import threading
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from numbers import Real
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from tradingagents.agents.schemas_forex import ForexAction
 from tradingagents.dataflows.config import get_config
@@ -30,7 +32,6 @@ from tradingagents.dataflows.forex_quality import (
 from tradingagents.forex.conversion import AvailabilityStatus, ForexConversionRate
 from tradingagents.forex.domain import Timeframe, normalize_forex_pair
 from tradingagents.forex.indicators import calculate_atr_pips
-from tradingagents.forex.pips import pip_size_for
 from tradingagents.forex.symbols import canonical_to_broker
 from tradingagents.mt5.connection import MT5ConnectionManager
 from tradingagents.mt5.errors import (
@@ -70,6 +71,60 @@ def _get_field(obj: Any, key: str, default: Any = None) -> Any:
     if isinstance(obj, dict):
         return obj.get(key, default)
     return getattr(obj, key, default)
+
+
+_MISSING = object()
+
+# Canonical instruments whose common MT5 broker name is not a simple suffix
+# variant. Explicit ``forex_broker_symbols`` configuration still takes
+# precedence over these discovery fallbacks.
+_COMMON_BROKER_SYMBOL_ALIASES: dict[str, tuple[str, ...]] = {
+    "XAUUSD": ("GOLD",),
+}
+
+_XM_SERVER_TIMEZONE = ZoneInfo("Europe/Athens")
+
+
+def _broker_timezone(server: str | None) -> ZoneInfo | None:
+    """Return the wall-clock timezone for brokers that expose local epochs."""
+    return _XM_SERVER_TIMEZONE if str(server or "").upper().startswith("XM") else None
+
+
+def _utc_to_broker_query_time(value: datetime, server: str | None) -> datetime:
+    """Translate a UTC boundary to the broker wall-clock epoch expected by MT5."""
+    broker_tz = _broker_timezone(server)
+    utc_value = value.astimezone(timezone.utc)
+    if broker_tz is None:
+        return utc_value
+    broker_wall = utc_value.astimezone(broker_tz)
+    return broker_wall.replace(tzinfo=timezone.utc)
+
+
+def _parse_broker_timestamp(value: Any, server: str | None) -> datetime:
+    """Normalize a broker wall-clock epoch into a truthful UTC timestamp."""
+    raw = _parse_timestamp(value)
+    broker_tz = _broker_timezone(server)
+    if broker_tz is None:
+        return raw
+    return raw.replace(tzinfo=None).replace(tzinfo=broker_tz).astimezone(timezone.utc)
+
+
+def _required_field(obj: Any, key: str) -> Any:
+    """Read a broker field without substituting a plausible financial default."""
+    value = _get_field(obj, key, _MISSING)
+    if value is _MISSING or value is None:
+        raise DataInsufficientError(f"required MT5 field unavailable: {key}")
+    return value
+
+
+def _required_number(obj: Any, key: str, *, positive: bool = False) -> float:
+    try:
+        value = float(_required_field(obj, key))
+    except (TypeError, ValueError) as exc:
+        raise DataInsufficientError(f"invalid MT5 numeric field: {key}") from exc
+    if not math.isfinite(value) or (positive and value <= 0):
+        raise DataInsufficientError(f"invalid MT5 numeric field: {key}")
+    return value
 
 
 def _extract_rate_val(r: Any, key: str, index: int, default: Any = 0.0) -> Any:
@@ -139,25 +194,25 @@ class MT5Observer:
             raise MT5DataError(f"Failed to fetch MT5 account info: {desc}", code=code)
 
         mode_map = {0: "DEMO", 1: "CONTEST", 2: "REAL"}
-        raw_trade_mode = _get_field(raw_info, "trade_mode", 0)
+        raw_trade_mode = _required_field(raw_info, "trade_mode")
         trade_mode = mode_map.get(raw_trade_mode, "DEMO") if isinstance(raw_trade_mode, int) else str(raw_trade_mode)
 
         return MT5AccountInfo(
-            login=int(_get_field(raw_info, "login", 0)),
+            login=int(_required_number(raw_info, "login", positive=True)),
             name=str(_get_field(raw_info, "name", "")),
-            server=str(_get_field(raw_info, "server", "")),
-            currency=str(_get_field(raw_info, "currency", "USD")),
-            leverage=int(_get_field(raw_info, "leverage", 100)),
-            balance=float(_get_field(raw_info, "balance", 0.0)),
-            equity=float(_get_field(raw_info, "equity", 0.0)),
-            profit=float(_get_field(raw_info, "profit", 0.0)),
-            margin=float(_get_field(raw_info, "margin", 0.0)),
-            margin_free=float(_get_field(raw_info, "margin_free", 0.0)),
-            margin_level=float(_get_field(raw_info, "margin_level", 0.0)),
-            margin_so_call=float(_get_field(raw_info, "margin_so_call", 100.0)),
-            margin_so_so=float(_get_field(raw_info, "margin_so_so", 50.0)),
+            server=str(_required_field(raw_info, "server")),
+            currency=str(_required_field(raw_info, "currency")),
+            leverage=int(_required_number(raw_info, "leverage", positive=True)),
+            balance=_required_number(raw_info, "balance"),
+            equity=_required_number(raw_info, "equity"),
+            profit=_required_number(raw_info, "profit"),
+            margin=_required_number(raw_info, "margin"),
+            margin_free=_required_number(raw_info, "margin_free"),
+            margin_level=_required_number(raw_info, "margin_level"),
+            margin_so_call=_required_number(raw_info, "margin_so_call"),
+            margin_so_so=_required_number(raw_info, "margin_so_so"),
             trade_mode=trade_mode,
-            trade_allowed=bool(_get_field(raw_info, "trade_allowed", True)),
+            trade_allowed=bool(_required_field(raw_info, "trade_allowed")),
         )
 
     def to_sizing_account_profile(self) -> ForexAccountProfile:
@@ -176,23 +231,28 @@ class MT5Observer:
 
         canon = normalize_forex_pair(symbol)
         explicit_symbol = get_config().get("forex_broker_symbols", {}).get(canon) or (symbol if symbol != canon else None)
-        broker_sym = explicit_symbol or canonical_to_broker(canon)
+        if explicit_symbol:
+            candidates = [explicit_symbol]
+        else:
+            candidates = [
+                canonical_to_broker(canon),
+                canon,
+                symbol,
+                *_COMMON_BROKER_SYMBOL_ALIASES.get(canon, ()),
+            ]
 
-        # Select symbol in Market Watch if not already selected
-        selected = mt5.symbol_select(broker_sym, True)
-        if not selected and explicit_symbol:
+        info = None
+        broker_sym = candidates[0]
+        for candidate in dict.fromkeys(candidates):
+            mt5.symbol_select(candidate, True)
+            candidate_info = mt5.symbol_info(candidate)
+            if candidate_info is not None:
+                broker_sym = candidate
+                info = candidate_info
+                break
+
+        if info is None and explicit_symbol:
             raise MT5SymbolError(f"Configured broker symbol {broker_sym!r} is unavailable")
-        if not selected:
-            # Try canonical symbol as fallback
-            selected = mt5.symbol_select(canon, True)
-            if selected:
-                broker_sym = canon
-
-        info = mt5.symbol_info(broker_sym)
-        if info is None and not explicit_symbol:
-            # Try raw symbol string
-            info = mt5.symbol_info(symbol)
-            broker_sym = symbol
 
         if info is None:
             code, desc = self.connection._get_last_error()
@@ -205,8 +265,12 @@ class MT5Observer:
                 raise ValueError("invalid precision")
         except (TypeError, ValueError):
             raise DataInsufficientError("broker symbol precision unavailable") from None
-        pip_sz = pip_size_for(canon) if canon else (point * 10.0)
-        spread_pts = int(_get_field(info, "spread", 10))
+        # MT5 quotes fractional pips for 3/5-digit FX contracts. For other
+        # instruments (for example XM GOLD with 2 digits), one point is the
+        # smallest meaningful price increment and must not inherit the
+        # unknown-Forex fallback of 0.0001.
+        pip_sz = point * 10.0 if digits in {3, 5} else point
+        spread_pts = int(_required_number(info, "spread"))
         spread_pips = round((spread_pts * point) / pip_sz, 2) if pip_sz > 0 else float(spread_pts)
 
         return MT5SymbolInfo(
@@ -221,14 +285,14 @@ class MT5Observer:
             bid=float(_get_field(info, "bid", 0.0)),
             ask=float(_get_field(info, "ask", 0.0)),
             last=float(_get_field(info, "last", 0.0)),
-            volume_min=float(_get_field(info, "volume_min", 0.01)),
-            volume_max=float(_get_field(info, "volume_max", 100.0)),
-            volume_step=float(_get_field(info, "volume_step", 0.01)),
-            contract_size=float(_get_field(info, "trade_contract_size", 100000.0)),
-            currency_base=str(_get_field(info, "currency_base", "EUR")),
-            currency_profit=str(_get_field(info, "currency_profit", "USD")),
-            currency_margin=str(_get_field(info, "currency_margin", "USD")),
-            trade_mode=int(_get_field(info, "trade_mode", 4)),
+            volume_min=_required_number(info, "volume_min", positive=True),
+            volume_max=_required_number(info, "volume_max", positive=True),
+            volume_step=_required_number(info, "volume_step", positive=True),
+            contract_size=_required_number(info, "trade_contract_size", positive=True),
+            currency_base=str(_required_field(info, "currency_base")),
+            currency_profit=str(_required_field(info, "currency_profit")),
+            currency_margin=str(_required_field(info, "currency_margin")),
+            trade_mode=int(_required_number(info, "trade_mode")),
         )
 
     def to_broker_constraints(self, symbol: str) -> BrokerExecutionConstraints:
@@ -455,25 +519,25 @@ class MT5Observer:
 
         positions: list[MT5Position] = []
         for p in raw_positions:
-            t_type = _get_field(p, "type", 0)
+            t_type = _required_field(p, "type")
             action = ForexAction.LONG if (t_type == 0 or t_type == "POSITION_TYPE_BUY") else ForexAction.SHORT
             dt = _parse_timestamp(_get_field(p, "time", 0))
 
             positions.append(
                 MT5Position(
-                    ticket=int(_get_field(p, "ticket", 0)),
+                    ticket=int(_required_number(p, "ticket", positive=True)),
                     identifier=int(_get_field(p, "identifier", _get_field(p, "ticket", 0))),
                     time=dt,
                     type=action,
                     magic=int(_get_field(p, "magic", 0)),
-                    symbol=str(_get_field(p, "symbol", "")),
-                    volume=float(_get_field(p, "volume", 0.0)),
-                    price_open=float(_get_field(p, "price_open", 0.0)),
+                    symbol=str(_required_field(p, "symbol")),
+                    volume=_required_number(p, "volume", positive=True),
+                    price_open=_required_number(p, "price_open", positive=True),
                     sl=float(_get_field(p, "sl", 0.0)),
                     tp=float(_get_field(p, "tp", 0.0)),
-                    price_current=float(_get_field(p, "price_current", 0.0)),
-                    swap=float(_get_field(p, "swap", 0.0)),
-                    profit=float(_get_field(p, "profit", 0.0)),
+                    price_current=_required_number(p, "price_current", positive=True),
+                    swap=_required_number(p, "swap"),
+                    profit=_required_number(p, "profit"),
                     comment=str(_get_field(p, "comment", "")),
                 )
             )
@@ -544,15 +608,15 @@ class MT5Observer:
 
             orders.append(
                 MT5Order(
-                    ticket=int(_get_field(o, "ticket", 0)),
+                    ticket=int(_required_number(o, "ticket", positive=True)),
                     time_setup=dt,
                     type=type_str,
-                    state=str(_get_field(o, "state", "PLACED")),
+                    state=str(_required_field(o, "state")),
                     magic=int(_get_field(o, "magic", 0)),
-                    symbol=str(_get_field(o, "symbol", "")),
-                    volume_initial=float(_get_field(o, "volume_initial", 0.0)),
-                    volume_current=float(_get_field(o, "volume_current", 0.0)),
-                    price_open=float(_get_field(o, "price_open", 0.0)),
+                    symbol=str(_required_field(o, "symbol")),
+                    volume_initial=_required_number(o, "volume_initial", positive=True),
+                    volume_current=_required_number(o, "volume_current", positive=True),
+                    price_open=_required_number(o, "price_open", positive=True),
                     sl=float(_get_field(o, "sl", 0.0)),
                     tp=float(_get_field(o, "tp", 0.0)),
                     comment=str(_get_field(o, "comment", "")),
@@ -616,6 +680,9 @@ class MT5Observer:
         if pos is not None:
             kwargs["position"] = pos
 
+        account_info = mt5.account_info()
+        broker_server = self.connection.server or str(_get_field(account_info, "server", ""))
+
         # Default to last 30 days if no range provided
         if "date_from" not in kwargs and "position" not in kwargs:
             from datetime import timedelta
@@ -625,7 +692,10 @@ class MT5Observer:
         if "position" in kwargs:
             raw_deals = mt5.history_deals_get(position=kwargs["position"])
         else:
-            raw_deals = mt5.history_deals_get(kwargs["date_from"], kwargs["date_to"])
+            raw_deals = mt5.history_deals_get(
+                _utc_to_broker_query_time(kwargs["date_from"], broker_server),
+                _utc_to_broker_query_time(kwargs["date_to"], broker_server),
+            )
         if raw_deals is None:
             code, desc = self.connection._get_last_error()
             raise MT5DataError(f"Failed to fetch MT5 deal history: {desc}", code=code)
@@ -636,10 +706,10 @@ class MT5Observer:
         entry_map = {0: "IN", 1: "OUT", 2: "INOUT", 3: "OUT_BY"}
         deals: list[MT5Deal] = []
         for d in raw_deals:
-            dt = _parse_timestamp(_get_field(d, "time", 0))
-            e_val = _get_field(d, "entry", 0)
+            dt = _parse_broker_timestamp(_required_field(d, "time"), broker_server)
+            e_val = _required_field(d, "entry")
             entry_str = entry_map.get(e_val, str(e_val) if isinstance(e_val, str) else "IN")
-            d_type = _get_field(d, "type", 0)
+            d_type = _required_field(d, "type")
             if d_type == 0 or d_type == "DEAL_TYPE_BUY":
                 deal_type_str = "DEAL_TYPE_BUY"
             elif d_type == 1 or d_type == "DEAL_TYPE_SELL":
@@ -647,23 +717,30 @@ class MT5Observer:
             else:
                 deal_type_str = str(d_type)
 
+            symbol = str(_get_field(d, "symbol", ""))
+            volume = _required_number(d, "volume")
+            price = _required_number(d, "price")
+            if deal_type_str in {"DEAL_TYPE_BUY", "DEAL_TYPE_SELL"} and (
+                not symbol or volume <= 0 or price <= 0
+            ):
+                raise DataInsufficientError("trade deal is missing symbol, volume, or price")
             deals.append(
                 MT5Deal(
-                    ticket=int(_get_field(d, "ticket", 0)),
-                    order=int(_get_field(d, "order", 0)),
-                    position_id=int(_get_field(d, "position_id", 0)),
+                    ticket=int(_required_number(d, "ticket", positive=True)),
+                    order=int(_required_number(d, "order")),
+                    position_id=int(_required_number(d, "position_id")),
                     time=dt,
                     type=deal_type_str,
                     entry=entry_str,
                     magic=int(_get_field(d, "magic", 0)),
-                    symbol=str(_get_field(d, "symbol", "")),
-                    volume=float(_get_field(d, "volume", 0.0)),
-                    price=float(_get_field(d, "price", 0.0)),
-                    commission=float(_get_field(d, "commission", 0.0)),
-                    swap=float(_get_field(d, "swap", 0.0)),
-                    fee=float(_get_field(d, "fee", 0.0)),
-                    reason=int(_get_field(d, "reason", 0)),
-                    profit=float(_get_field(d, "profit", 0.0)),
+                    symbol=symbol,
+                    volume=volume,
+                    price=price,
+                    commission=_required_number(d, "commission"),
+                    swap=_required_number(d, "swap"),
+                    fee=_required_number(d, "fee"),
+                    reason=int(_required_number(d, "reason")),
+                    profit=_required_number(d, "profit"),
                     comment=str(_get_field(d, "comment", "")),
                 )
             )

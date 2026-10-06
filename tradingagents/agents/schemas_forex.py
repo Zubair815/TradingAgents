@@ -13,6 +13,7 @@ Provides:
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from enum import Enum
 from typing import Any
 
@@ -376,17 +377,57 @@ class ForexTraderProposal(BaseModel):
     @field_validator("action", mode="before")
     @classmethod
     def _coerce_action(cls, v: Any) -> ForexAction:
-        return ForexAction.from_str(v)
+        if isinstance(v, ForexAction):
+            return v
+        normalized = str(v).strip().upper().replace(" ", "_").replace("-", "_")
+        aliases = {
+            "BUY": ForexAction.LONG, "BULL": ForexAction.LONG, "BULLISH": ForexAction.LONG,
+            "SELL": ForexAction.SHORT, "BEAR": ForexAction.SHORT, "BEARISH": ForexAction.SHORT,
+            "HOLD": ForexAction.NO_TRADE, "NEUTRAL": ForexAction.NO_TRADE,
+            "PASS": ForexAction.NO_TRADE, "NONE": ForexAction.NO_TRADE,
+        }
+        if normalized in aliases:
+            return aliases[normalized]
+        try:
+            return ForexAction(normalized)
+        except ValueError as exc:
+            raise ValueError(f"unsupported Forex action: {v}") from exc
 
     @field_validator("order_type", mode="before")
     @classmethod
     def _coerce_order_type(cls, v: Any) -> OrderType:
-        return OrderType.from_str(v)
+        if isinstance(v, OrderType):
+            return v
+        normalized = str(v).strip().upper().replace(" ", "_").replace("-", "_")
+        try:
+            return OrderType(normalized)
+        except ValueError as exc:
+            raise ValueError(f"unsupported order type: {v}") from exc
 
     @field_validator("setup_type", mode="before")
     @classmethod
     def _coerce_setup_type(cls, v: Any) -> SetupType:
-        return SetupType.from_str(v)
+        if isinstance(v, SetupType):
+            return v
+        normalized = str(v).strip().upper().replace(" ", "_").replace("-", "_")
+        aliases = {"TREND_PULLBACK": SetupType.PULLBACK}
+        if normalized in aliases:
+            return aliases[normalized]
+        try:
+            return SetupType(normalized)
+        except ValueError as exc:
+            raise ValueError(f"unsupported setup type: {v}") from exc
+
+    @field_validator("valid_until")
+    @classmethod
+    def _validate_valid_until(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip().replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(normalized)
+        if parsed.tzinfo is None:
+            raise ValueError("valid_until requires an explicit UTC offset")
+        return parsed.isoformat()
 
     @model_validator(mode="after")
     def _compute_derived_parameters(self) -> ForexTraderProposal:

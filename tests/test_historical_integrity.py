@@ -152,6 +152,7 @@ def test_provider_failure_never_reaches_demo_generator():
     client = TestClient(app)
     client.get("/")
     with (patch("tradingagents.backtest.historical_data.fetch_forex_candles", side_effect=RuntimeError("secret provider URL")),
+          patch("web.forex_routes.get_runtime_config", return_value={"forex_market_source": "mt5"}),
           patch("web.forex_routes.math.sin", side_effect=AssertionError("synthetic generation")),
           patch("web.forex_routes.ForexTradingAgentsGraph") as graph):
         response = client.post("/api/forex/backtest/run", json={
@@ -159,8 +160,42 @@ def test_provider_failure_never_reaches_demo_generator():
             "date_from": "2025-01-06", "date_to": "2025-01-07"})
     assert response.status_code == 422
     assert response.json()["detail"]["code"] == "HISTORICAL_DATA_UNAVAILABLE"
+    assert response.json()["detail"]["market_data_source"] == "MT5"
+    assert "Connect the MT5 terminal" in response.json()["detail"]["message"]
+    assert response.json()["detail"]["date_from"] == "2025-01-06"
     assert "secret" not in response.text
     graph.assert_not_called()
+
+
+def test_historical_api_distinguishes_missing_calendar_context_from_candles():
+    client = TestClient(app)
+    client.get("/")
+    bars, provenance = sourced_bars()
+    estimate = MagicMock()
+    estimate.to_dict.return_value = {"estimated_cost_usd": 0.0}
+    with (
+        patch("tradingagents.backtest.historical_data.load_historical_candles", return_value=(bars, provenance)),
+        patch("web.forex_routes.estimate_agent_analyses", return_value=estimate),
+        patch("web.forex_routes.create_historical_forex_pipeline", return_value=MagicMock()),
+        patch(
+            "web.forex_routes.HistoricalForexAgentBacktester.run",
+            side_effect=DataInsufficientError(
+                "no timely Trading Economics calendar snapshot existed at cutoff"
+            ),
+        ),
+        patch("web.forex_routes.get_runtime_config", return_value={"forex_market_source": "mt5"}),
+    ):
+        response = client.post("/api/forex/backtest/run", json={
+            "mode": "HISTORICAL_AGENT_BACKTEST",
+            "date_from": "2025-01-06",
+            "date_to": "2025-01-07",
+        })
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["code"] == "HISTORICAL_CONTEXT_UNAVAILABLE"
+    assert "Historical candles are available" in detail["message"]
+    assert "economic calendar archive" in detail["message"]
 
 
 @pytest.mark.parametrize("candles", [[], [{"open": 1.0}]])

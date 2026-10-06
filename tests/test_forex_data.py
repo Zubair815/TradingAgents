@@ -396,6 +396,26 @@ class TestFetchForexCandles:
             assert len(df) == 5
 
     @patch("yfinance.download")
+    def test_timezone_aware_history_boundaries_use_yahoo_date_strings(self, mock_download, tmp_path):
+        mock_download.return_value = make_sample_h1_df(12)
+        start = datetime(2026, 3, 10, 0, 0, tzinfo=timezone.utc)
+        end = datetime(2026, 3, 10, 7, 30, tzinfo=timezone.utc)
+
+        with patch("tradingagents.dataflows.forex_data.get_config", return_value={
+            "data_cache_dir": str(tmp_path),
+            "forex_market_source": "yahoo",
+            "forex_candle_max_age_seconds": 10**9,
+        }):
+            df = fetch_forex_candles(
+                "EURUSD", timeframe=Timeframe.H1, count=None, as_of=end,
+                start_date=start, end_date=end, use_cache=False,
+            )
+
+        assert mock_download.call_args.kwargs["start"] == "2026-03-10"
+        assert mock_download.call_args.kwargs["end"] == "2026-03-11"
+        assert len(df) == 7
+
+    @patch("yfinance.download")
     def test_empty_response_raises_no_market_data(self, mock_download, tmp_path):
         mock_download.return_value = pd.DataFrame()
 

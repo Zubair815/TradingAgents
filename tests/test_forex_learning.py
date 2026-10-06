@@ -2,6 +2,7 @@
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 from fastapi import FastAPI
@@ -1343,6 +1344,7 @@ def test_learning_api_filters_and_reports_missing_sources(tmp_path: Path):
         actionable_rule="Require a closed confirmation candle.",
     )
     manager.store.save_lesson(lesson)
+    manager.store.list_lessons = MagicMock(wraps=manager.store.list_lessons)
     set_forex_dependencies(journal=journal, learning_manager=manager)
     app = FastAPI()
     app.include_router(router)
@@ -1355,6 +1357,12 @@ def test_learning_api_filters_and_reports_missing_sources(tmp_path: Path):
     )
     assert response.status_code == 200
     assert [item["lesson_id"] for item in response.json()["lessons"]] == ["lsn_ui_trace"]
+    assert response.json()["lessons"][0]["source_availability"] == {
+        "trade": False,
+        "proposal": False,
+    }
+    assert response.json()["limit"] == 200
+    assert manager.store.list_lessons.call_args.kwargs["limit"] == 200
 
     detail = client.get("/api/forex/learning/lessons/lsn_ui_trace")
     assert detail.status_code == 200
@@ -1364,7 +1372,7 @@ def test_learning_api_filters_and_reports_missing_sources(tmp_path: Path):
     }
     missing = client.get("/api/forex/learning/lessons/not-present")
     assert missing.status_code == 404
-    assert missing.json()["detail"] == "Run not found"
+    assert missing.json()["detail"] == "Lesson not found"
 
 
 # ===========================================================================

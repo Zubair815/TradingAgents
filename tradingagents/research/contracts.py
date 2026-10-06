@@ -57,9 +57,9 @@ class AnalysisRequest(Record):
     account_currency: str | None = None
     session: str | None = None
     requirements: tuple[str, ...] = ()
-    research_depth: str = "deep"
-    min_rr: float | None = None
-    max_spread_pips: float | None = None
+    research_depth: Literal["quick", "deep", "comprehensive"] = "deep"
+    min_rr: float | None = Field(default=None, ge=1.0, le=10.0)
+    max_spread_pips: float | None = Field(default=None, ge=0.5, le=10.0)
     max_open_positions: int = Field(default=5, ge=1)
     max_account_risk_percent: float = Field(default=6.0, gt=0, le=100)
     max_currency_exposure_percent: float = Field(default=5.0, gt=0, le=100)

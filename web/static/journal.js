@@ -54,16 +54,14 @@
     const metrics = data.metrics || {}, m = metrics.is_available === false ? {} : metrics;
     const comparison = data.execution_comparison || {}, reflection = data.reflection || {};
     const ticket = meta.broker_ticket ?? meta.ticket;
-    return `<p class="trade-evidence-note">Stored evidence · Times shown in UTC · Missing values are unavailable. Opening this panel does not recalculate results.</p>
-      <div class="trade-detail-grid">` +
-      section('Identity', fields([
+    const identity = section('Identity', fields([
         ['Trade ID', t.trade_id], ['Proposal ID', t.proposal_id], ['Broker ticket', ticket],
         ['Pair', t.pair], ['Direction', t.action], ['Status', t.status],
         ['Setup', p.setup_type ?? reference.setup_type ?? meta.setup_type],
         ['Timeframe', p.timeframe ?? reference.timeframe ?? meta.timeframe], ['Session', meta.session ?? p.session],
         ['Post-close processing', meta.post_close_status],
-      ])) +
-      section('Original proposal', (data.original_proposal ? '<p class="trade-evidence-note">Immutable saved proposal snapshot</p>' :
+      ]));
+    const proposal = section('Original proposal', (data.original_proposal ? '<p class="trade-evidence-note">Immutable saved proposal snapshot</p>' :
         '<p class="journal-state">Unavailable: no immutable proposal snapshot was stored.</p>') + fields([
         ['Proposed entry', p.entry_price], ['Entry zone low', p.entry_zone_low], ['Entry zone high', p.entry_zone_high],
         ['Stop', p.stop_loss], ['TP1', p.take_profit_1], ['TP2', p.take_profit_2],
@@ -71,49 +69,61 @@
         ['Risk/reward', p.risk_reward_ratio], ['Invalidation', p.invalidation_condition], ['Reasoning', p.reasoning],
         ['Provider', p.provider], ['Quick model', p.quick_model], ['Deep model', p.deep_model],
         ['Prompt version', p.prompt_version], ['Strategy version', p.strategy_version], ['System version', p.system_version],
-      ])) +
-      section('Risk decision', fields([
+      ]));
+    const riskDecision = section('Risk decision', fields([
         ['Decision', risk.decision ?? risk.action], ['Violations', risk.risk_violations],
         ['Modifications', risk.modifications_required], ['Checks passed', risk.risk_checks_passed],
         ['Approved lots', risk.position_size_lots ?? risk.approved_lot_size],
         ['Approved risk (%)', risk.max_risk_percent ?? risk.risk_percent ?? risk.approved_risk_percent],
         ['Sizing details', risk.position_sizing ?? risk.sizing_details ?? meta.sizing_details], ['Reasoning', risk.executive_rationale ?? risk.reasoning],
-      ])) +
-      section('Actual execution', fields([
+      ]));
+    const actualExecution = section('Actual execution', fields([
         ['Actual entry', t.open_price], ['Initial size (lots)', meta.initial_lots], ['Journal size (lots)', t.lots],
         ['Open time', t.open_time_utc, 'time'], ['Spread (pips)', comparison.spread_pips ?? meta.spread_at_open_pips],
         ['Commission', t.commission], ['Slippage (pips)', comparison.slippage_pips ?? meta.slippage_pips], ['Broker ticket', ticket],
-      ]) + fills(data.executions || [])) +
-      section('Exit', fields([
+      ]) + fills(data.executions || []));
+    const exit = section('Exit', fields([
         ['Actual exit', t.close_price], ['Close time', t.close_time_utc, 'time'], ['Exit reason', t.exit_reason],
         ['Commission', t.commission], ['Swap', t.swap], ['Gross PnL', t.gross_profit], ['Net PnL', t.net_profit],
         ['Pips', t.pips_gained], ['R multiple', t.r_multiple], ['Outcome classification', meta.outcome_category],
-      ])) +
-      section('Excursion metrics', fields([
+      ]));
+    const excursion = section('Excursion metrics', fields([
         ['MFE price', m.mfe_price], ['MFE pips', m.mfe_pips], ['MFE R', m.mfe_r], ['MFE timestamp', m.mfe_time_utc, 'time'],
         ['MAE price', m.mae_price], ['MAE pips', m.mae_pips], ['MAE R', m.mae_r], ['MAE timestamp', m.mae_time_utc, 'time'],
         ['Exit efficiency (%)', m.exit_efficiency_pct], ['Precision', metrics.precision], ['Source', metrics.source],
         ['Resolution', metrics.resolution], ['Unavailable reason', metrics.unavailable_reason ??
           (!data.metrics ? 'No excursion metrics were stored.' : undefined)],
-      ])) +
-      section('Execution comparison', fields([
+      ]));
+    const executionComparison = section('Execution comparison', fields([
         ['Proposed entry', comparison.proposed_entry], ['Actual entry', comparison.actual_entry],
         ['Entry deviation (pips)', comparison.entry_deviation_pips], ['Proposed lots', comparison.proposed_volume],
         ['Actual lots', comparison.actual_volume], ['Volume deviation', comparison.volume_deviation],
         ['Slippage (pips)', comparison.slippage_pips], ['Slippage cost', comparison.slippage_cost],
         ['Timing deviation (seconds)', comparison.timing_deviation_seconds], ['Total execution friction', comparison.total_execution_friction],
-      ]) + (data.execution_comparison ? `<details><summary>All stored execution quality fields</summary><pre>${text(JSON.stringify(comparison, null, 2))}</pre></details>` : '')) +
-      section('Reflection', fields([
+      ]) + (data.execution_comparison ? `<details><summary>All stored execution quality fields</summary><pre>${text(JSON.stringify(comparison, null, 2))}</pre></details>` : ''));
+    const reflectionSection = section('Reflection', fields([
         ['Summary', reflection.summary], ['Rating', reflection.rating], ['Tags', reflection.tags],
-      ])) +
-      section('Lessons', (data.lessons || []).length ? (data.lessons || []).map(lesson =>
+      ]));
+    const lessons = section('Lessons', (data.lessons || []).length ? (data.lessons || []).map(lesson =>
         `<article class="trade-lesson"><h4>${text(lesson.lesson_id)}</h4>${fields([
           ['Directive', lesson.actionable_rule], ['Confidence', lesson.confidence ?? lesson.confidence_score],
           ['Source trade', lesson.source_trade_id ?? lesson.trade_id], ['Source proposal', lesson.proposal_id],
           ['Observation', lesson.observation], ['Root cause', lesson.root_cause], ['Recorded at', lesson.created_at_utc ?? lesson.created_at, 'time'],
-        ])}</article>`).join('') : '<p class="journal-state">No lessons recorded for this trade.</p>', true) +
-      '</div><section class="trade-section"><h3>Chronological lifecycle timeline</h3><div id="tradeTimeline">' +
-      timeline(data.events || []) + '</div></section>';
+        ])}</article>`).join('') : '<p class="journal-state">No lessons recorded for this trade.</p>', true);
+    const tab = (id, label, selected = false) => `<button type="button" role="tab" id="trade-tab-${id}" aria-controls="trade-panel-${id}" aria-selected="${selected}" tabindex="${selected ? '0' : '-1'}" data-detail-tab="${id}">${label}</button>`;
+    const panel = (id, content, selected = false) => `<div role="tabpanel" id="trade-panel-${id}" aria-labelledby="trade-tab-${id}" data-detail-panel="${id}"${selected ? '' : ' hidden'}><div class="trade-detail-grid">${content}</div></div>`;
+    return `<p class="trade-evidence-note">Stored evidence · Times shown in UTC · Missing values are unavailable. Opening this panel does not recalculate results.</p>
+      <div class="trade-detail-tabs" role="tablist" aria-label="Trade detail sections">
+        ${tab('overview', 'Overview', true)}${tab('proposal', 'Proposal & Risk')}${tab('execution', 'Execution')}${tab('analysis', 'Analysis')}${tab('learning', 'Reflection & Lessons')}${tab('timeline', 'Timeline')}
+      </div>
+      <div class="trade-detail-panels">
+        ${panel('overview', identity + exit, true)}
+        ${panel('proposal', proposal + riskDecision)}
+        ${panel('execution', actualExecution)}
+        ${panel('analysis', excursion + executionComparison)}
+        ${panel('learning', reflectionSection + lessons)}
+        ${panel('timeline', section('Chronological lifecycle timeline', `<div id="tradeTimeline">${timeline(data.events || [])}</div>`, true))}
+      </div>`;
   }
 
   function timeline(events) {
@@ -146,9 +156,10 @@
 
     // Toolbar with compact/expanded toggle, export and print actions
     const toolbar = `<div class="timeline-toolbar" role="toolbar" aria-label="Timeline controls">
-        <button type="button" class="btn-sm" data-action="toggle-compact">Compact</button>
+        <button type="button" class="btn-sm" data-action="toggle-compact" aria-pressed="false">Compact view</button>
         <button type="button" class="btn-sm" data-action="export-json">Export JSON</button>
         <button type="button" class="btn-sm" data-action="print">Print</button>
+        <span class="sr-only" data-timeline-action-status aria-live="polite"></span>
       </div>`;
 
     return `${toolbar}<div class="timeline-root">` +
@@ -216,13 +227,22 @@
     dialog.addEventListener('close', () => { ++generation; abort?.abort(); opener?.focus(); });
     body.addEventListener('click', event => {
       if (event.target.closest('[data-retry-trade]')) return loadTradeDetail(selected);
+      const detailTab = event.target.closest('[data-detail-tab]');
+      if (detailTab) {
+        activateDetailTab(detailTab);
+        return;
+      }
       const actionBtn = event.target.closest('[data-action]');
       if (actionBtn) {
         const action = actionBtn.dataset.action;
         const win = doc.defaultView || (typeof window !== 'undefined' ? window : null);
         if (action === 'toggle-compact') {
           const root = doc.getElementById('tradeTimeline')?.querySelector('.timeline-root');
-          if (root) root.classList.toggle('timeline-compact');
+          if (root) {
+            const compact = root.classList.toggle('timeline-compact');
+            actionBtn.setAttribute('aria-pressed', String(compact));
+            actionBtn.textContent = compact ? 'Expanded view' : 'Compact view';
+          }
           return;
         }
         if (action === 'export-json') {
@@ -236,26 +256,59 @@
               a.href = url; a.download = `trade-${lastData.trade?.trade_id || 'timeline'}.json`;
               doc.body.appendChild(a); a.click(); a.remove();
               win.URL.revokeObjectURL(url);
+              const status = body.querySelector('[data-timeline-action-status]');
+              if (status) status.textContent = 'Timeline JSON export started.';
             }
-          } catch (e) { /* silent */ }
+          } catch (e) {
+            const status = body.querySelector('[data-timeline-action-status]');
+            if (status) status.textContent = 'Timeline JSON could not be exported.';
+          }
           return;
         }
         if (action === 'print') {
           if (!lastData) return;
           try {
-            const eventsHtml = timeline(lastData.events || []);
+            const eventsHtml = doc.getElementById('tradeTimeline')?.querySelector('.timeline-root')?.outerHTML || '';
             const printer = win ? win.open('', '_blank') : null;
             if (printer) {
               printer.document.write(`<html><head><title>Trade timeline</title><style>body{font-family:Arial,Helvetica,sans-serif;padding:12px;color:#111} .trade-timeline{list-style:none;padding-left:0} .timeline-event{margin-bottom:12px;border-left:1px solid #ccc;padding-left:12px}</style></head><body>${eventsHtml}</body></html>`);
               printer.document.close();
               printer.focus();
               printer.print();
+            } else {
+              const status = body.querySelector('[data-timeline-action-status]');
+              if (status) status.textContent = 'Print preview was blocked by the browser.';
             }
-          } catch (e) { /* silent */ }
+          } catch (e) {
+            const status = body.querySelector('[data-timeline-action-status]');
+            if (status) status.textContent = 'Timeline could not be printed.';
+          }
           return;
         }
       }
     });
+    body.addEventListener('keydown', event => {
+      const current = event.target.closest?.('[data-detail-tab]');
+      if (!current || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+      const tabs = [...body.querySelectorAll('[data-detail-tab]')];
+      const index = tabs.indexOf(current);
+      const next = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 :
+        (index + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+      event.preventDefault();
+      activateDetailTab(tabs[next]);
+      tabs[next].focus();
+    });
+    function activateDetailTab(nextTab) {
+      const name = nextTab.dataset.detailTab;
+      body.querySelectorAll('[data-detail-tab]').forEach(tab => {
+        const active = tab === nextTab;
+        tab.setAttribute('aria-selected', String(active));
+        tab.tabIndex = active ? 0 : -1;
+      });
+      body.querySelectorAll('[data-detail-panel]').forEach(panel => {
+        panel.hidden = panel.dataset.detailPanel !== name;
+      });
+    }
     return { loadTradeDetail };
   }
   const api = { table, detail, timeline, createController };

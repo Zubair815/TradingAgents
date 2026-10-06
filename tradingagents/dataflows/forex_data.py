@@ -455,9 +455,18 @@ def _fetch_yahoo_candles(
             start_date = (cutoff - timedelta(seconds=tf.seconds * (count or 100) * 3, days=7)).date()
             end_date = (cutoff + timedelta(days=1)).date()
         if start_date is not None:
-            dl_kwargs = {"start": str(start_date)}
+            # yfinance accepts date-only strings here.  ``str()`` on an aware
+            # datetime produces ``YYYY-MM-DD HH:MM:SS+00:00``, which its date
+            # parser rejects. Download whole boundary days, then apply the
+            # exact UTC timestamp filters below.
+            start_boundary = _ensure_utc_datetime(start_date)
+            dl_kwargs = {"start": start_boundary.date().isoformat()}
             if end_date is not None:
-                dl_kwargs["end"] = str(end_date)
+                end_boundary = _ensure_utc_datetime(end_date)
+                end_day = end_boundary.date()
+                if end_boundary.time() != datetime.min.time():
+                    end_day += timedelta(days=1)
+                dl_kwargs["end"] = end_day.isoformat()
         elif tf == Timeframe.M1:
             dl_kwargs = {"period": "7d"}
         elif tf in (Timeframe.M5, Timeframe.M15, Timeframe.M30):

@@ -218,6 +218,19 @@ class ConfidenceCalibrationEngine:
         unlabeled = 0
 
         for t in trades:
+            status = getattr(t, "status", None)
+            net_profit = getattr(t, "net_profit", None)
+            close_time = getattr(t, "close_time_utc", None)
+            if isinstance(t, dict):
+                status = t.get("status", status)
+                net_profit = t.get("net_profit", net_profit)
+                close_time = t.get("close_time_utc", close_time)
+            status_value = str(getattr(status, "value", status)).upper()
+            has_simulated_outcome = any(token in status_value for token in ("TP", "SL", "WIN", "LOSS"))
+            is_settled = status_value == "CLOSED" or (net_profit is not None and close_time is not None)
+            if not is_settled and not has_simulated_outcome:
+                continue
+
             total_analyzed += 1
 
             # 1. Extract confidence
@@ -331,7 +344,8 @@ class ConfidenceCalibrationEngine:
 
             # Mathematical Expectancy: (P(Win) * AvgWinR) + (P(Loss) * AvgLossR)
             # which algebraically aligns with overall avg_r
-            expectancy = round((win_rate * avg_win_r) + ((1.0 - win_rate) * avg_loss_r), 2) if count > 0 else 0.0
+            loss_rate = losses / count if count > 0 else 0.0
+            expectancy = round((win_rate * avg_win_r) + (loss_rate * avg_loss_r), 2) if count > 0 else 0.0
 
             # Calibration check & warning rules
             is_calib = count >= eff_min
