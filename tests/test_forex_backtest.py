@@ -128,6 +128,44 @@ def test_forex_symbols_exported_from_forex_root():
     assert runForexFromForex is run_forex_backtest
 
 
+def test_zero_and_missing_lot_never_execute():
+    candle = make_candle(datetime(2026, 1, 5, tzinfo=timezone.utc), 1.08, 1.09, 1.07, 1.085)
+    engine = ForexBacktestEngine()
+    assert engine.execute_proposal(make_proposal(lots=0.0), candle) is None
+    assert engine.execute_proposal(
+        make_proposal().model_copy(update={"suggested_lot_size": None}), candle
+    ) is None
+    assert engine.open_trades == []
+
+
+def test_backtest_prices_follow_configured_broker_precision():
+    candle = ForexBar(
+        timestamp=datetime(2026, 1, 5, tzinfo=timezone.utc),
+        open=150.1234,
+        high=150.5,
+        low=149.5,
+        close=150.2,
+        volume=100.0,
+        spread_pips=1.0,
+    )
+    engine = ForexBacktestEngine(
+        ForexBacktestConfig(
+            default_spread_pips=0.0,
+            default_slippage_pips=0.0,
+            broker_digits=3,
+            broker_point=0.001,
+        )
+    )
+    trade = engine.execute_proposal(
+        make_proposal(pair="USDJPY", entry=150.1234, sl=149.9234, tp=150.5234),
+        candle,
+    )
+    assert trade is not None
+    assert trade.entry_price == 150.123
+    assert trade.stop_loss == 149.923
+    assert trade.take_profit == 150.523
+
+
 def test_backtest_trade_model_properties():
     """Verify BacktestTrade helper properties and state tracking."""
     now = datetime(2026, 3, 1, 10, 0, tzinfo=timezone.utc)

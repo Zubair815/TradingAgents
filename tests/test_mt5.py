@@ -828,6 +828,27 @@ class TestMT5ObserverPositionsAndOrders:
         assert realized == 485.0
         assert day_start == datetime(2026, 9, 30, tzinfo=timezone.utc)
 
+    def test_daily_realized_pnl_uses_configured_utc_reset_boundary(self):
+        mock_api = MockMT5API()
+        mock_api.history_deals_get = MagicMock(return_value=[])
+        mgr = MT5ConnectionManager(mt5_api=mock_api)
+        mgr._status = MT5ConnectionStatus.CONNECTED
+        observer = MT5Observer(connection=mgr)
+        cutoff = datetime(2026, 9, 30, 2, tzinfo=timezone.utc)
+
+        realized, day_start = observer.get_daily_realized_pnl(
+            cutoff, reset_hour_utc=5
+        )
+
+        assert realized == 0.0
+        assert day_start == datetime(2026, 9, 29, 5, tzinfo=timezone.utc)
+
+    @pytest.mark.parametrize("value", [-1, 24, 1.5, True])
+    def test_daily_realized_pnl_rejects_invalid_reset_hour(self, value):
+        observer = MT5Observer(connection=MT5ConnectionManager(mt5_api=MockMT5API()))
+        with pytest.raises(ValueError, match="reset_hour_utc"):
+            observer.get_daily_realized_pnl(reset_hour_utc=value)
+
     def test_xm_deal_range_and_timestamp_normalize_broker_wall_clock(self):
         mock_api = MockMT5API()
         raw_close_time = datetime(2026, 10, 5, 7, 2, 38, tzinfo=timezone.utc)

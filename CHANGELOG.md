@@ -8,6 +8,22 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ## [Unreleased]
 
+### Target-state financial-path remediation (2026-10-07)
+
+- Enforced one authoritative position-sizing call after deterministic risk policy,
+  including propagation of the policy-approved effective risk percentage.
+- Made broker contract size and symbol precision authoritative for pip value,
+  margin, exposure, P&L, costs, MT5 observations, and historical simulation.
+- Removed historical fallback lots and same-observation fills; zero or unavailable
+  size now fails closed and final-observation proposals remain unfilled.
+- Added point-in-time ATR, broker-assumption provenance, pending-exposure parity,
+  configurable UTC daily-loss boundaries, and fail-closed MT5 capabilities.
+- Removed tracked transient/cache artifacts and extended repository ignore rules.
+- Local verification: 2,378 non-E2E tests and 9 Chromium E2E tests passed, plus
+  Ruff, compileall, JavaScript syntax, dependency, and whitespace checks.
+- External XM manual lifecycle acceptance and GitHub CI remain pending; no broker
+  write capability was added and no performance claim is made.
+
 ### Master Forex Remediation Plan Completion (Phases 1–11)
 
 - **Domain Contracts, Provenance & PIT Integrity (Phases 1–5):** Enforced canonical `AnalysisRun`, `MarketSnapshot`, `AgentReport`, `BrokerEvent`, and `AnalysisRequest` contracts; added SQLite Migration 5 with `schema_version = 1` for `trades`; attached SHA-256 system prompt hashes to proposal evidence; applied strict point-in-time publication cutoffs (`published_at_utc <= cutoff`) and post-cache filtering (`DATA-008`, `TIME-006`, `DOM-009`, `DOM-010`, `DOM-011`, `AGENT-007`).

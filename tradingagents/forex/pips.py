@@ -22,8 +22,10 @@ volume step is required, callers supply ``volume_step`` explicitly.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from datetime import datetime, timedelta
+from decimal import ROUND_HALF_UP, Decimal
 
 from tradingagents.forex.conversion import ForexConversionRate, resolve_conversion_rate
 from tradingagents.forex.domain import ForexPair, get_forex_pair
@@ -141,6 +143,22 @@ def price_to_pips(price_distance: float, pip_size: float | ForexPair | str) -> f
     return abs(price_distance) / effective_pip
 
 
+def normalize_price(price: float, digits: int, point: float | None = None) -> float:
+    """Normalize a price to the broker's tick grid and decimal precision."""
+    if not math.isfinite(price) or price < 0:
+        raise ValueError("price must be a finite non-negative number")
+    if not isinstance(digits, int) or not 0 <= digits <= 10:
+        raise ValueError("digits must be an integer between 0 and 10")
+    quantum = Decimal(1).scaleb(-digits)
+    value = Decimal(str(price))
+    if point is not None:
+        if not math.isfinite(point) or point <= 0:
+            raise ValueError("point must be a finite positive number")
+        tick = Decimal(str(point))
+        value = (value / tick).quantize(Decimal("1"), rounding=ROUND_HALF_UP) * tick
+    return float(value.quantize(quantum, rounding=ROUND_HALF_UP))
+
+
 
 # ---------------------------------------------------------------------------
 # Pip value in account currency
@@ -155,6 +173,7 @@ def pip_value_in_account_currency(
     conversions: Sequence[ForexConversionRate] = (),
     as_of_utc: datetime | None = None,
     max_conversion_age: timedelta | None = None,
+    contract_size: float | None = None,
 ) -> float:
     """Value of one pip move for ``lot_size`` lots in the account currency.
 
@@ -189,7 +208,9 @@ def pip_value_in_account_currency(
         pair_obj = pair
 
     ps = pair_obj.pip_size
-    cs = pair_obj.contract_size
+    cs = pair_obj.contract_size if contract_size is None else float(contract_size)
+    if not math.isfinite(cs) or cs <= 0:
+        raise ValueError("contract_size must be a finite positive number")
     acc = account_currency.upper()
 
     # If the quote currency equals the account currency, direct calculation.
@@ -229,6 +250,7 @@ def lot_size_from_risk(
     volume_step: float = 0.01,
     min_volume: float = 0.01,
     max_volume: float = 100.0,
+    contract_size: float | None = None,
 ) -> dict:
     """Compute a risk-normalised lot size.
 
@@ -289,8 +311,14 @@ def lot_size_from_risk(
     stop_distance_pips = stop_distance_price / pip_sz
 
     pip_val = pip_value_in_account_currency(
-        pair_obj, 1.0, account_currency, current_quote_price,
-        conversions, as_of_utc, max_conversion_age,
+        pair_obj,
+        1.0,
+        account_currency,
+        current_quote_price,
+        conversions,
+        as_of_utc,
+        max_conversion_age,
+        contract_size,
     )
     if pip_val <= 0:
         raise ValueError(f"pip_value_per_lot must be positive, got {pip_val}")

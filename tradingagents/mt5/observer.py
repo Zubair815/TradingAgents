@@ -569,6 +569,7 @@ class MT5Observer:
                 conversions=tuple(observed),
                 as_of_utc=as_of_utc,
                 max_conversion_age=max_conversion_age,
+                contract_size=self.get_symbol_info(p.symbol).contract_size,
             )
             for p in raw_positions
         ]
@@ -650,6 +651,7 @@ class MT5Observer:
                 conversions=tuple(observed),
                 as_of_utc=as_of_utc,
                 max_conversion_age=max_conversion_age,
+                contract_size=self.get_symbol_info(o.symbol).contract_size,
             )
             for o in raw_orders
         ]
@@ -747,10 +749,22 @@ class MT5Observer:
 
         return deals
 
-    def get_daily_realized_pnl(self, as_of_utc: datetime | None = None) -> tuple[float, datetime]:
-        """Return broker-realized net P&L for the current UTC trading day."""
+    def get_daily_realized_pnl(
+        self,
+        as_of_utc: datetime | None = None,
+        reset_hour_utc: int = 0,
+    ) -> tuple[float, datetime]:
+        """Return broker-realized net P&L since the configured UTC boundary."""
+        if isinstance(reset_hour_utc, bool) or not isinstance(reset_hour_utc, int):
+            raise ValueError("reset_hour_utc must be an integer")
+        if not 0 <= reset_hour_utc <= 23:
+            raise ValueError("reset_hour_utc must be between 0 and 23")
         cutoff = utc_timestamp(as_of_utc) if as_of_utc is not None else datetime.now(timezone.utc)
-        day_start = cutoff.replace(hour=0, minute=0, second=0, microsecond=0)
+        day_start = cutoff.replace(
+            hour=reset_hour_utc, minute=0, second=0, microsecond=0
+        )
+        if cutoff < day_start:
+            day_start -= timedelta(days=1)
         deals = self.get_deals(date_from=day_start, date_to=cutoff)
         realized = sum(
             deal.profit + deal.commission + deal.swap + deal.fee

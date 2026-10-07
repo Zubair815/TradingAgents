@@ -76,6 +76,7 @@ def test_mt5_context_contains_authoritative_market_account_and_portfolio():
     observer.get_conversion_observations.return_value = ()
     observer.get_pending_orders.return_value = []
     observer.to_open_positions.return_value = []
+    observer.to_pending_exposures.return_value = []
 
     context = build_mt5_application_context(
         observer,
@@ -134,9 +135,44 @@ def test_mt5_context_fails_closed_when_exposure_is_unavailable(
     observer.get_conversion_observations.return_value = ()
     observer.get_pending_orders.return_value = []
     observer.to_open_positions.return_value = []
+    observer.to_pending_exposures.return_value = []
     getattr(observer, failing_method).side_effect = MT5Error(message, code=-10005)
 
     with pytest.raises(DataInsufficientError, match="complete MT5 risk context"):
+        build_mt5_application_context(
+            observer,
+            pair="EURUSD",
+            execution_timeframe="M15",
+        )
+
+
+def test_mt5_context_fails_closed_without_pending_exposure_builder():
+    observed_at = datetime.now(timezone.utc)
+    observer = MagicMock()
+    observer.connection.is_connected.return_value = True
+    observer.to_sizing_account_profile.return_value = ForexAccountProfile(
+        balance=25_000,
+        equity=24_500,
+        free_margin=20_000,
+        currency="USD",
+        leverage=100,
+    )
+    observer.get_current_tick.return_value = SimpleNamespace(
+        bid=1.1,
+        ask=1.1002,
+        spread_pips=2.0,
+        source="MT5",
+        broker_symbol="EURUSDm",
+        time=observed_at,
+    )
+    observer.to_broker_constraints.return_value = BrokerExecutionConstraints()
+    observer.get_atr_pips.return_value = 18.0
+    observer.get_conversion_observations.return_value = ()
+    observer.get_pending_orders.return_value = []
+    observer.to_open_positions.return_value = []
+    observer.to_pending_exposures = None
+
+    with pytest.raises(DataInsufficientError, match="pending-order exposure"):
         build_mt5_application_context(
             observer,
             pair="EURUSD",

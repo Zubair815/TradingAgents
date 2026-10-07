@@ -471,3 +471,14 @@ Phase 11: Full Verification & Release Evidence (REL-003, Final Quality Gate)
 - **Phase 10 (Cleanup & Maintainability):** **COMPLETE**
 - **Phase 11 (Full Verification & Release Evidence):** **COMPLETE**
 - **Overall Status:** **ENGINEERING COMPLETE — READY FOR XM DEMO ACCEPTANCE**
+
+---
+
+## 21. Target-State Financial-Path Remediation Update (2026-10-07)
+
+- **Baseline:** `57e0eb4b282ee7f715a5fb18e7c46a95d80f7b4c`; changes remain intentionally uncommitted.
+- **Implemented:** one sizing authority, policy-risk propagation, broker contract-size and precision authority, causal next-observation historical fills, fail-closed zero/unavailable lots, point-in-time ATR, pending-exposure parity, and configurable UTC daily-loss reset.
+- **Verification:** 2,378 non-E2E tests and 9 Chromium E2E tests passed; Ruff, compileall, JavaScript syntax, dependency integrity, and whitespace checks passed.
+- **Browser:** verified 3-second polling, UTC reset-hour control, manual/read-only mode, and truthful unavailable states in the running application.
+- **External boundary:** GitHub CI and the real XM manual lifecycle checklist remain pending. This is not an XM acceptance or trading-performance claim.
+- **Requirement evidence:** see `docs/TARGET_STATE_REQUIREMENT_MATRIX.md`.

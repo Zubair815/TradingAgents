@@ -282,7 +282,7 @@ def calculate_required_margin(
     quote_curr = pair_obj.quote_currency if pair_obj else str(pair)[3:6].upper()
     acc_curr = account_currency.upper()
 
-    cs = pair_obj.contract_size if pair_obj else contract_size
+    cs = contract_size
     notional_base = lot_size * cs
 
     # Case 1: Base currency is account currency (e.g. USDJPY, USDCAD from USD account)
@@ -293,16 +293,32 @@ def calculate_required_margin(
     elif quote_curr == acc_curr:
         notional_account = notional_base * entry_price
 
-    # Case 3: convert base currency to account currency explicitly.
+    # Case 3: value the base notional in quote currency using the traded
+    # pair price, then convert quote -> account. This reuses the same
+    # point-in-time conversion direction required by pip value.
     else:
-        base_to_account = resolve_conversion_rate(
-            base_curr,
-            acc_curr,
-            conversions,
-            as_of_utc=as_of_utc,
-            max_age=max_conversion_age,
-        )
-        notional_account = notional_base * base_to_account
+        try:
+            quote_to_account = resolve_conversion_rate(
+                quote_curr,
+                acc_curr,
+                conversions,
+                as_of_utc=as_of_utc,
+                max_age=max_conversion_age,
+            )
+        except FXConversionUnavailable as quote_error:
+            try:
+                base_to_account = resolve_conversion_rate(
+                    base_curr,
+                    acc_curr,
+                    conversions,
+                    as_of_utc=as_of_utc,
+                    max_age=max_conversion_age,
+                )
+            except FXConversionUnavailable:
+                raise quote_error from None
+            notional_account = notional_base * base_to_account
+        else:
+            notional_account = notional_base * entry_price * quote_to_account
 
     required_margin = notional_account / leverage
     return round(required_margin, 2)
@@ -655,6 +671,7 @@ class ForexPositionSizingEngine:
                 conversions=conversions,
                 as_of_utc=as_of_utc,
                 max_conversion_age=max_conversion_age,
+                contract_size=cons.contract_size,
             )
         except FXConversionUnavailable as exc:
             return self._build_unexecutable(pair, action, sizing_method, acc, str(exc))
@@ -945,8 +962,16 @@ class ForexPositionSizingEngine:
         daily_realized_pnl: float | None = None,
         day_start_balance: float | None = None,
         daily_pnl_available: bool = False,
+        effective_risk_percent: float | None = None,
     ) -> PositionSizingResult:
-        """Convenience method to compute sizing directly from a ForexTraderProposal."""
+        """Compute the one authoritative size for a validated proposal.
+
+        ``effective_risk_percent`` is the deterministic policy allocation. A
+        caller that has already run risk policy must pass it explicitly so a
+        proposal's larger requested allocation cannot bypass a clamp or event
+        reduction. Direct callers remain backward compatible and use the
+        proposal value when no policy result is available.
+        """
         if proposal.action == ForexAction.NO_TRADE or proposal.entry_price is None or proposal.stop_loss is None:
             return self.compute_size(
                 pair=proposal.pair,
@@ -968,7 +993,11 @@ class ForexPositionSizingEngine:
             sizing_method=sizing_method,
             account=account,
             constraints=constraints,
-            risk_percent=proposal.suggested_risk_percent,
+            risk_percent=(
+                effective_risk_percent
+                if effective_risk_percent is not None
+                else proposal.suggested_risk_percent
+            ),
             atr_pips=atr_pips,
             win_rate=win_rate,
             win_loss_ratio=win_loss_ratio or proposal.risk_reward_ratio,

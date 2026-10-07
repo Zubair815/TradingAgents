@@ -58,6 +58,7 @@ def test_runtime_settings_validate_types_and_ranges(temp_runtime_settings):
         ("forex_max_spread_pips", 50.1),
         ("forex_news_blackout_minutes", 181),
         ("mt5_poll_interval_seconds", 30.1),
+        ("forex_daily_loss_reset_hour_utc", 24),
     ],
 )
 def test_settings_reject_values_outside_ui_contract(temp_runtime_settings, key, value):
@@ -75,6 +76,7 @@ def test_canonical_forex_settings_normalize_and_survive_reload(temp_runtime_sett
         "forex_max_spread_pips": 2.5,
         "forex_news_blackout_minutes": 45,
         "mt5_poll_interval_seconds": 2,
+        "forex_daily_loss_reset_hour_utc": 5,
     })
 
     assert saved["forex_default_pair"] == "EURUSD"
@@ -85,6 +87,7 @@ def test_canonical_forex_settings_normalize_and_survive_reload(temp_runtime_sett
     assert reloaded["forex_default_risk_percent"] == 1.25
     assert reloaded["forex_min_rr"] == 2.0
     assert reloaded["mt5_poll_interval_seconds"] == 2.0
+    assert reloaded["forex_daily_loss_reset_hour_utc"] == 5
 
 
 @pytest.mark.parametrize(
@@ -101,6 +104,9 @@ def test_canonical_forex_settings_normalize_and_survive_reload(temp_runtime_sett
         ("forex_news_blackout_minutes", -1),
         ("mt5_poll_interval_seconds", 0.1),
         ("mt5_poll_interval_seconds", True),
+        ("forex_daily_loss_reset_hour_utc", -1),
+        ("forex_daily_loss_reset_hour_utc", 1.5),
+        ("forex_daily_loss_reset_hour_utc", True),
         ("forex_market_source", "alpha_vantage"),
     ],
 )

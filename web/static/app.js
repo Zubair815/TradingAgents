@@ -262,6 +262,7 @@
     settingBrokerMode: $('#settingBrokerMode'),
     settingAutoOrder: $('#settingAutoOrder'),
     settingPollInterval: $('#settingPollInterval'),
+    settingDailyLossResetHour: $('#settingDailyLossResetHour'),
     settingReflection: $('#settingReflection'),
     // Per-card action buttons & statuses
     btnSaveLlmSettings: $('#btnSaveLlmSettings'),
@@ -3045,6 +3046,7 @@
     if (DOM.settingMaxSpread) DOM.settingMaxSpread.value = String(runtimeSettings.forex_max_spread_pips ?? 5.0);
     if (DOM.settingNewsBlackout) DOM.settingNewsBlackout.value = String(runtimeSettings.forex_news_blackout_minutes ?? 120);
     if (DOM.settingPollInterval) DOM.settingPollInterval.value = String(runtimeSettings.mt5_poll_interval_seconds ?? 3.0);
+    if (DOM.settingDailyLossResetHour) DOM.settingDailyLossResetHour.value = String(runtimeSettings.forex_daily_loss_reset_hour_utc ?? 0);
     if (DOM.settingBrokerMode) DOM.settingBrokerMode.textContent = 'Passive Observer / Manual Execution';
     if (DOM.settingAutoOrder) DOM.settingAutoOrder.textContent = 'DISABLED — IMMUTABLE';
     if (DOM.settingReflection) DOM.settingReflection.textContent = 'Enabled by closed-trade workflow';
@@ -3253,10 +3255,13 @@
 
   // 4. MT5 Observer Settings
   async function saveMt5Settings() {
-    if (!validateSettingsInputs([DOM.settingPollInterval], DOM.settingsMt5Status)) return;
+    if (!validateSettingsInputs([DOM.settingPollInterval, DOM.settingDailyLossResetHour], DOM.settingsMt5Status)) return;
     const payload = {};
     if (DOM.settingPollInterval && DOM.settingPollInterval.value) {
       payload.mt5_poll_interval_seconds = Number(DOM.settingPollInterval.value);
+    }
+    if (DOM.settingDailyLossResetHour && DOM.settingDailyLossResetHour.value !== '') {
+      payload.forex_daily_loss_reset_hour_utc = Number(DOM.settingDailyLossResetHour.value);
     }
     try {
       const res = await apiFetch('/api/forex/settings', {
@@ -3285,7 +3290,7 @@
       const res = await apiFetch('/api/forex/settings/reset', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ keys: ['mt5_poll_interval_seconds'] })
+        body: JSON.stringify({ keys: ['mt5_poll_interval_seconds', 'forex_daily_loss_reset_hour_utc'] })
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(apiErrorMessage(data, 'MT5 reset failed'));
@@ -3309,7 +3314,8 @@
       DOM.settingQuickCustomModel, DOM.settingDeepCustomModel, DOM.settingMaxTokens,
       DOM.settingTemperature, DOM.settingBackendUrl, DOM.settingPair, DOM.settingTimeframe,
       DOM.settingMarketSource, DOM.settingRiskPercent, DOM.settingMinRR,
-      DOM.settingMaxSpread, DOM.settingNewsBlackout, DOM.settingPollInterval
+      DOM.settingMaxSpread, DOM.settingNewsBlackout, DOM.settingPollInterval,
+      DOM.settingDailyLossResetHour
     ], DOM.settingsStatus)) return;
     const payload = {};
     if (DOM.settingProviderInput && DOM.settingProviderInput.value) {
@@ -3345,6 +3351,7 @@
     if (DOM.settingMinRR && DOM.settingMinRR.value) payload.forex_min_rr = Number(DOM.settingMinRR.value);
     if (DOM.settingNewsBlackout && DOM.settingNewsBlackout.value) payload.forex_news_blackout_minutes = Number(DOM.settingNewsBlackout.value);
     if (DOM.settingPollInterval && DOM.settingPollInterval.value) payload.mt5_poll_interval_seconds = Number(DOM.settingPollInterval.value);
+    if (DOM.settingDailyLossResetHour && DOM.settingDailyLossResetHour.value !== '') payload.forex_daily_loss_reset_hour_utc = Number(DOM.settingDailyLossResetHour.value);
     try {
       const res = await apiFetch('/api/forex/settings', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
       const data = await res.json().catch(() => ({}));

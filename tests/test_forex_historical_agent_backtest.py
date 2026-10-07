@@ -100,7 +100,7 @@ def test_historical_non_usd_costs_pnl_margin_and_swap_use_timestamped_conversion
     assert engine.total_spread_drag == pytest.approx(16.0)
     assert engine.total_slippage_drag == pytest.approx(8.0)
     snapshot = engine.account_snapshot()
-    assert snapshot.used_margin == pytest.approx(880.0)
+    assert snapshot.used_margin == pytest.approx(880.16)
 
     next_day = replace(
         entry_bar,
@@ -328,6 +328,7 @@ def test_pending_order_expires_when_valid_until_exceeded():
                 entry_price=1.0750,  # Never hit
                 stop_loss=1.0700,
                 take_profit_1=1.0900,
+                    suggested_lot_size=0.1,
                 valid_until=valid_until,
                 reasoning="Expiring limit order",
             )
@@ -420,6 +421,7 @@ def test_intrabar_collision_resolved_by_lower_timeframe_candles():
                 order_type=OrderType.MARKET,
                 stop_loss=1.0780,
                 take_profit_1=1.0850,
+                    suggested_lot_size=0.1,
                 reasoning="Sub-candle resolution test",
             )
         return None

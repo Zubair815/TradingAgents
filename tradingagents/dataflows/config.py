@@ -103,6 +103,12 @@ def _validate_runtime_value(key: str, value):
         if not 0.5 <= value <= 30:
             raise ValueError(f"{key} must be between 0.5 and 30 seconds")
         return value
+    if key == "forex_daily_loss_reset_hour_utc":
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"{key} must be an integer")
+        if not 0 <= value <= 23:
+            raise ValueError(f"{key} must be between 0 and 23")
+        return value
     if key == "llm_max_retries":
         if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 10:
             raise ValueError(f"{key} must be an integer between 0 and 10")

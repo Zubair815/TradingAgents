@@ -34,6 +34,7 @@ from tradingagents.learning.manager import ForexLearningManager
 from tradingagents.learning.models import ReflectionRating
 from tradingagents.learning.store import ForexLessonStore
 from tradingagents.metrics.models import TradeOutcomeCategory
+from tradingagents.risk.sizing import ForexAccountProfile, ForexPositionSizingEngine
 
 
 @pytest.fixture
@@ -87,8 +88,18 @@ def test_full_closed_loop_lifecycle_profitable_trade(temp_journal_and_learning):
     )
 
     assert risk_decision.decision == ForexRiskDecisionAction.APPROVE
-    assert risk_decision.approved_lot_size is not None and risk_decision.approved_lot_size > 0.0
     assert risk_decision.max_risk_percent <= 1.0
+    sizing = ForexPositionSizingEngine().size_proposal(
+        proposal,
+        account=ForexAccountProfile(
+            balance=100_000.0,
+            equity=100_000.0,
+            free_margin=100_000.0,
+        ),
+        effective_risk_percent=risk_decision.max_risk_percent,
+    )
+    assert sizing.is_executable
+    risk_decision.approved_lot_size = sizing.lot_size
 
     # -------------------------------------------------------------------------
     # 3. Journal Persistence (Immutable Proposal)

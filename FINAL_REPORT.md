@@ -1,8 +1,9 @@
 # TradingAgents Forex remediation final verification report
 
-- Verification date: 2026-10-03
-- Final implementation base commit: `4c226137477c4d6cb3907c2397361d8ad45f7a26`
-- Remediation status: Complete across all 11 Master Remediation Phases (Phases 1–11)
+- Verification date: 2026-10-07
+- Final implementation base commit: `57e0eb4b282ee7f715a5fb18e7c46a95d80f7b4c`
+- Working-tree state: target-state remediation is implemented and verified locally but intentionally uncommitted
+- Remediation status: Local engineering gates complete; external XM lifecycle acceptance pending
 - Release status: **READY FOR XM DEMO ACCEPTANCE; NOT XM DEMO ACCEPTED**
 
 This status means the automated engineering gates pass. It is not a trading
@@ -29,7 +30,13 @@ Research Manager
       v
 Forex Trader Proposal
       v
-Deterministic Risk Engine
+Deterministic Risk Policy
+      v
+Effective Allowed Risk
+      v
+Single Position-Sizing Engine
+      v
+Portfolio / Margin / Broker Validation
       v
 LONG / SHORT / NO_TRADE
       |
@@ -58,9 +65,9 @@ There is no automated Forex broker-order submission path.
 | Gate | Result |
 | --- | --- |
 | `ruff check .` | PASS — 0 errors across all repository files |
-| `pytest -q -m "not e2e"` | PASS — 2,295 passed, 5 skipped, 6 deselected, 22 warnings, 88 subtests passed |
-| `pytest -q tests/test_browser_e2e.py` | PASS — 6 passed in 51.6s |
-| Total Automated Tests | PASS — 2,301 passed |
+| `pytest -q -m "not e2e"` | PASS — 2,378 passed, 5 skipped, 9 deselected, 20 warnings, 88 subtests passed |
+| `pytest -q tests/test_browser_e2e.py` | PASS — 9 passed, 2,383 deselected |
+| Total Automated Tests | PASS — 2,387 passed |
 | `python -m compileall tradingagents web cli tests` | PASS |
 | JavaScript syntax checks (`node -c web/static/app.js`) | PASS |
 | `git diff --check` | PASS — 0 whitespace or formatting errors |

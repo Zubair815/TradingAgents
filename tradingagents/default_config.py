@@ -200,6 +200,8 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # Applied when a new MT5 observation service is created. Changing this
     # while the service exists requires an application restart.
     "mt5_poll_interval_seconds": 3.0,
+    # Broker-deal day boundary used by daily-loss controls (UTC hour, 0-23).
+    "forex_daily_loss_reset_hour_utc": 0,
     # Data vendor configuration
     # Category-level configuration (default for all tools in category).
     # The configured value is the exact vendor chain — requests are NOT silently

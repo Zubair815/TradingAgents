@@ -171,38 +171,51 @@ def create_forex_risk_evaluator(
             broker_digits=(constraints.digits if constraints else None),
         )
 
-        # 3. Deterministic Position Sizing & Margin Validation
-        sizing_result: PositionSizingResult = s_engine.size_proposal(
-            proposal=proposal,
-            sizing_method=sizing_method,
-            account=account,
-            constraints=constraints,
-            atr_pips=(risk_context.market.atr_pips if risk_context else None),
-            open_positions=(risk_context.portfolio.open_positions if risk_context else None),
-            pending_exposures=(risk_context.portfolio.pending_exposures if risk_context else None),
-            conversions=(risk_context.conversions if risk_context else ()),
-            as_of_utc=(risk_context.as_of_utc if risk_context else None),
-            daily_realized_pnl=(risk_context.portfolio.realized_pnl_today if risk_context else None),
-            day_start_balance=(risk_context.portfolio.day_start_balance if risk_context else None),
-            daily_pnl_available=(
-                risk_context is not None
-                and risk_context.portfolio.daily_pnl_status.value == "AVAILABLE"
-            ),
-        )
+        # 3. Invoke the single sizing authority only after policy approval.
+        sizing_result: PositionSizingResult | None = None
+        if (
+            proposal.action != ForexAction.NO_TRADE
+            and risk_decision.decision in (ForexRiskDecisionAction.APPROVE, ForexRiskDecisionAction.MODIFY)
+        ):
+            sizing_result = s_engine.size_proposal(
+                proposal=proposal,
+                sizing_method=sizing_method,
+                account=account,
+                constraints=constraints,
+                atr_pips=(risk_context.market.atr_pips if risk_context else None),
+                open_positions=(risk_context.portfolio.open_positions if risk_context else None),
+                pending_exposures=(risk_context.portfolio.pending_exposures if risk_context else None),
+                current_quote_price=proposal.entry_price,
+                conversions=(risk_context.conversions if risk_context else ()),
+                as_of_utc=(risk_context.as_of_utc if risk_context else None),
+                daily_realized_pnl=(risk_context.portfolio.realized_pnl_today if risk_context else None),
+                day_start_balance=(risk_context.portfolio.day_start_balance if risk_context else None),
+                daily_pnl_available=(
+                    risk_context is not None
+                    and risk_context.portfolio.daily_pnl_status.value == "AVAILABLE"
+                ),
+                effective_risk_percent=risk_decision.max_risk_percent,
+            )
 
-        if sizing_result_holder is not None:
-            sizing_result_holder["latest"] = sizing_result
+            if sizing_result_holder is not None:
+                sizing_result_holder["latest"] = sizing_result
+        elif sizing_result_holder is not None:
+            sizing_result_holder.pop("latest", None)
 
         # Reconcile sizing with risk decision
         if proposal.action == ForexAction.NO_TRADE:
             risk_decision.approved_lot_size = 0.0
             risk_decision.approved_action = ForexAction.NO_TRADE
         elif risk_decision.decision in (ForexRiskDecisionAction.APPROVE, ForexRiskDecisionAction.MODIFY):
-            if sizing_result.lot_size <= 0.0:
+            if sizing_result is None or sizing_result.lot_size <= 0.0:
                 risk_decision.decision = ForexRiskDecisionAction.REJECT
                 risk_decision.approved_action = ForexAction.NO_TRADE
                 risk_decision.approved_lot_size = 0.0
-                reason = sizing_result.rejection_reason or "Position sizing returned 0.0 lots (insufficient capital/excessive risk)."
+                reason = (
+                    sizing_result.rejection_reason
+                    if sizing_result is not None and sizing_result.rejection_reason
+                    else "Position sizing returned 0.0 lots (insufficient capital/excessive risk)."
+                )
                 risk_decision.risk_violations.append(f"Position Sizing Constraint: {reason}")
             else:
                 risk_decision.approved_lot_size = sizing_result.lot_size

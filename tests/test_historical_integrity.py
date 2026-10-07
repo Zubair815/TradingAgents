@@ -28,6 +28,7 @@ from tradingagents.backtest.historical_data import (
 )
 from tradingagents.backtest.historical_pipeline import (
     HistoricalForexPipelineConfig,
+    _pit_atr_pips,
     create_historical_forex_pipeline,
 )
 from tradingagents.dataflows.forex_context import historical_market_context, historical_market_scope
@@ -118,7 +119,7 @@ def test_analysis_receives_closed_bars_and_cannot_fetch_future():
     assert report.market_data_provenance["actual_end"] == bars[-1].close_time.isoformat()
 
 
-def test_historical_fills_at_observed_close_not_prior_open():
+def test_historical_fills_at_next_observation_not_decision_bar():
     bars, meta = sourced_bars()
     def callback(pair, cutoff, history):
         if len(history) == 1:
@@ -126,8 +127,8 @@ def test_historical_fills_at_observed_close_not_prior_open():
                                        take_profit_1=1.10, suggested_lot_size=0.1, reasoning="Close-time execution test")
     report = historical_run(bars, meta, callback)
     trade = report.result.trades[0]
-    assert trade.entry_time == bars[0].close_time
-    assert trade.entry_price > bars[0].close  # spread and slippage
+    assert trade.entry_time == bars[1].timestamp
+    assert trade.entry_price > bars[1].open  # spread and slippage
     assert trade.entry_price != bars[0].open
 
 
@@ -402,7 +403,7 @@ def test_historical_pipeline_receives_evolving_account_snapshot():
     assert agent.snapshots[0].balance == 10000.0
     assert agent.snapshots[0].leverage == 500.0
     assert agent.snapshots[1].balance == agent.snapshots[0].balance
-    assert agent.snapshots[1].equity < agent.snapshots[0].equity
+    assert agent.snapshots[1].equity > agent.snapshots[0].equity
     assert agent.snapshots[1].free_margin <= agent.snapshots[1].equity
     second_account, second_positions, _, second_cutoff = agent.deterministic_snapshots[1]
     assert second_account.used_margin > 0.0
@@ -411,6 +412,15 @@ def test_historical_pipeline_receives_evolving_account_snapshot():
     assert second_positions[0].risk_amount > 0.0
     assert second_positions[0].position_id
     assert second_cutoff == bars[1].close_time
+
+
+def test_historical_atr_is_point_in_time_and_requires_warmup():
+    bars, _meta = sourced_bars(15)
+    assert _pit_atr_pips(bars[:13], "EURUSD") is None
+    value_at_14 = _pit_atr_pips(bars[:14], "EURUSD")
+    value_at_15 = _pit_atr_pips(bars[:15], "EURUSD")
+    assert value_at_14 is not None and value_at_14 > 0
+    assert value_at_15 is not None and value_at_15 > 0
 
 
 def test_historical_cross_trade_fails_when_conversion_is_unavailable():
@@ -433,7 +443,7 @@ def test_historical_cross_trade_fails_when_conversion_is_unavailable():
         )
 
     config = AgentBacktestConfig(pair="EURJPY", timeframe="H1", max_analysis_points=1)
-    with pytest.raises(HistoricalDataUnavailable, match="JPY->USD"):
+    with pytest.raises(HistoricalDataUnavailable, match="JPY.*USD"):
         HistoricalForexAgentBacktester(config=config).run(
             bars,
             market_data_provenance=meta,

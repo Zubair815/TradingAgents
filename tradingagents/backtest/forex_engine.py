@@ -35,6 +35,7 @@ from tradingagents.forex.conversion import (
     resolve_conversion_rate,
 )
 from tradingagents.forex.pips import (
+    normalize_price,
     pip_size_for,
     pip_value_in_account_currency,
 )
@@ -42,6 +43,7 @@ from tradingagents.metrics.mfe_mae import parse_utc_timestamp
 from tradingagents.risk.sizing import (
     ForexAccountProfile,
     OpenPosition,
+    PendingExposure,
     calculate_required_margin,
 )
 
@@ -87,6 +89,14 @@ class ForexBacktestConfig:
     max_open_trades: int = 5
     max_account_risk_percent: float = 6.0
     execution_timeframe: str = "M15"
+    broker_digits: int | None = None
+    broker_point: float | None = None
+    broker_pip_size: float | None = None
+    broker_contract_size: float = 100000.0
+    broker_volume_min: float = 0.01
+    broker_volume_max: float = 100.0
+    broker_volume_step: float = 0.01
+    broker_assumption_source: str = "CONFIGURED_ASSUMPTION"
     results_dir: Path | str = Path("reports/backtest")
 
 
@@ -294,6 +304,35 @@ class ForexBacktestEngine:
         self.filled_orders_count: int = 0
         self.expired_orders_count: int = 0
 
+    def _digits(self, pair: str) -> int:
+        if self.config.broker_digits is not None:
+            return self.config.broker_digits
+        return 3 if pip_size_for(pair) == 0.01 else 5
+
+    def _pip_size(self, pair: str) -> float:
+        return self.config.broker_pip_size or pip_size_for(pair)
+
+    def _normalize_price(self, pair: str, price: float) -> float:
+        return normalize_price(price, self._digits(pair), self.config.broker_point)
+
+    def _pip_value(
+        self,
+        pair: str,
+        lots: float,
+        price: float,
+        as_of_utc: datetime,
+    ) -> float:
+        return pip_value_in_account_currency(
+            pair=pair,
+            lot_size=lots,
+            account_currency=self.config.account_currency,
+            current_quote_price=price,
+            conversions=self.conversion_rates,
+            as_of_utc=as_of_utc,
+            max_conversion_age=self.max_conversion_age,
+            contract_size=self.config.broker_contract_size,
+        )
+
     def reset(self) -> None:
         """Reset internal state to initial deposit."""
         self.balance = self.config.initial_balance
@@ -324,6 +363,7 @@ class ForexBacktestEngine:
                 entry_price=t.entry_price,
                 leverage=self.config.leverage,
                 account_currency=self.config.account_currency,
+                contract_size=self.config.broker_contract_size,
                 conversions=self.conversion_rates,
                 as_of_utc=self._as_of_utc or t.entry_time,
                 max_conversion_age=self.max_conversion_age,
@@ -351,16 +391,8 @@ class ForexBacktestEngine:
         positions: list[OpenPosition] = []
         for trade in self.open_trades:
             observation_time = cutoff or trade.entry_time
-            stop_pips = abs(trade.entry_price - trade.stop_loss) / pip_size_for(trade.pair)
-            pip_value = pip_value_in_account_currency(
-                trade.pair,
-                trade.lots,
-                self.config.account_currency,
-                trade.entry_price,
-                self.conversion_rates,
-                observation_time,
-                self.max_conversion_age,
-            )
+            stop_pips = abs(trade.entry_price - trade.stop_loss) / self._pip_size(trade.pair)
+            pip_value = self._pip_value(trade.pair, trade.lots, trade.entry_price, observation_time)
             positions.append(
                 OpenPosition(
                     position_id=trade.trade_id,
@@ -373,6 +405,33 @@ class ForexBacktestEngine:
                 )
             )
         return tuple(positions)
+
+    def pending_exposure_snapshot(
+        self, as_of_utc: datetime | None = None
+    ) -> tuple[PendingExposure, ...]:
+        """Return objective reserved risk for orders existing at the cutoff."""
+        cutoff = as_of_utc or self._as_of_utc
+        exposures: list[PendingExposure] = []
+        for order in self.pending_orders:
+            stop_pips = abs(order.entry_price - order.stop_loss) / self._pip_size(order.pair)
+            observation_time = cutoff or order.created_time
+            risk_amount = self._pip_value(
+                order.pair, order.lots, order.entry_price, observation_time
+            ) * stop_pips
+            exposures.append(
+                PendingExposure(
+                    order_id=order.order_id,
+                    pair=order.pair,
+                    action=order.action,
+                    order_type=str(order.order_type),
+                    lots=order.lots,
+                    trigger_price=order.entry_price,
+                    stop_loss=order.stop_loss,
+                    reserved_risk=round(risk_amount, 2),
+                    setup_time=order.created_time,
+                )
+            )
+        return tuple(exposures)
 
     def _usd_cost_in_account_currency(self, amount_usd: float, as_of_utc: datetime) -> float:
         """Convert USD-denominated broker costs at the event timestamp."""
@@ -388,7 +447,7 @@ class ForexBacktestEngine:
 
     def _update_open_positions_excursions(self, candle: ForexBar, pair: str) -> None:
         """Update intrabar MFE/MAE excursions for all open positions on this pair."""
-        pip_sz = pip_size_for(pair)
+        pip_sz = self._pip_size(pair)
         for t in self.open_trades:
             if t.pair != pair:
                 continue
@@ -423,7 +482,7 @@ class ForexBacktestEngine:
         lower_tf_candles: Sequence[ForexBar] | None = None,
     ) -> list[BacktestTrade]:
         """Evaluate whether active positions touched stop loss or take profit during the bar."""
-        pip_sz = pip_size_for(pair)
+        pip_sz = self._pip_size(pair)
         settled_this_bar: list[BacktestTrade] = []
         still_open: list[BacktestTrade] = []
 
@@ -540,16 +599,8 @@ class ForexBacktestEngine:
         reason: TradeExitReason | str,
     ) -> None:
         """Calculate realized PnL, close position, and credit account cash balance."""
-        pip_sz = pip_size_for(trade.pair)
-        pip_val = pip_value_in_account_currency(
-            pair=trade.pair,
-            lot_size=trade.lots,
-            account_currency=self.config.account_currency,
-            current_quote_price=exit_price,
-            conversions=self.conversion_rates,
-            as_of_utc=exit_time,
-            max_conversion_age=self.max_conversion_age,
-        )
+        pip_sz = self._pip_size(trade.pair)
+        pip_val = self._pip_value(trade.pair, trade.lots, exit_price, exit_time)
 
         if trade.action == ForexAction.LONG:
             pips = (exit_price - trade.entry_price) / pip_sz
@@ -562,7 +613,7 @@ class ForexBacktestEngine:
         gross = round(pips * pip_val, 2)
         net = round(gross - trade.commission - trade.swap, 2)
 
-        trade.exit_price = round(exit_price, 5)
+        trade.exit_price = self._normalize_price(trade.pair, exit_price)
         trade.exit_time = exit_time
         trade.exit_reason = reason
         trade.status = TradeStatus.CLOSED
@@ -590,7 +641,7 @@ class ForexBacktestEngine:
 
     def _process_pending_orders(self, candle: ForexBar, pair: str) -> list[BacktestTrade]:
         """Check expiry and execution triggers for pending limit/stop orders."""
-        pip_sz = pip_size_for(pair)
+        pip_sz = self._pip_size(pair)
         spread_price = self.config.default_spread_pips * pip_sz
         slip_price = self.config.default_slippage_pips * pip_sz
         newly_filled: list[BacktestTrade] = []
@@ -660,6 +711,7 @@ class ForexBacktestEngine:
                     entry_price=fill_price,
                     leverage=self.config.leverage,
                     account_currency=self.config.account_currency,
+                    contract_size=self.config.broker_contract_size,
                     conversions=self.conversion_rates,
                     as_of_utc=candle.timestamp,
                     max_conversion_age=self.max_conversion_age,
@@ -668,13 +720,11 @@ class ForexBacktestEngine:
                     still_pending.append(po)
                     continue
 
-                spread_cost = self.config.default_spread_pips * pip_value_in_account_currency(
-                    pair, po.lots, self.config.account_currency, fill_price,
-                    self.conversion_rates, candle.timestamp, self.max_conversion_age,
+                spread_cost = self.config.default_spread_pips * self._pip_value(
+                    pair, po.lots, fill_price, candle.timestamp
                 )
-                slip_cost = self.config.default_slippage_pips * pip_value_in_account_currency(
-                    pair, po.lots, self.config.account_currency, fill_price,
-                    self.conversion_rates, candle.timestamp, self.max_conversion_age,
+                slip_cost = self.config.default_slippage_pips * self._pip_value(
+                    pair, po.lots, fill_price, candle.timestamp
                 )
                 comm_cost = self._usd_cost_in_account_currency(
                     self.config.commission_per_lot_usd * po.lots,
@@ -694,9 +744,13 @@ class ForexBacktestEngine:
                     pair=pair,
                     action=po.action,
                     entry_time=candle.timestamp,
-                    entry_price=round(fill_price, 5),
-                    stop_loss=round(po.stop_loss, 5),
-                    take_profit=round(po.take_profit, 5) if po.take_profit is not None else None,
+                    entry_price=self._normalize_price(pair, fill_price),
+                    stop_loss=self._normalize_price(pair, po.stop_loss),
+                    take_profit=(
+                        self._normalize_price(pair, po.take_profit)
+                        if po.take_profit is not None
+                        else None
+                    ),
                     lots=po.lots,
                     proposal_id=getattr(po.proposal, "proposal_id", None),
                     setup_type=po.proposal.setup_type.value if hasattr(po.proposal.setup_type, "value") else str(po.proposal.setup_type),
@@ -760,8 +814,16 @@ class ForexBacktestEngine:
             return None
 
         pair = proposal.pair
-        pip_sz = pip_size_for(pair)
-        lots = proposal.suggested_lot_size or 0.1
+        pip_sz = self._pip_size(pair)
+        lots = proposal.suggested_lot_size
+        if lots is None or lots <= 0:
+            return None
+        if lots < self.config.broker_volume_min or lots > self.config.broker_volume_max:
+            return None
+        step_ratio = round(lots / self.config.broker_volume_step, 8)
+        lots = math.floor(step_ratio) * self.config.broker_volume_step
+        if lots < self.config.broker_volume_min:
+            return None
 
         stop_loss = proposal.stop_loss if proposal.stop_loss is not None else (
             candle.open - 0.0050 if proposal.action == ForexAction.LONG else candle.open + 0.0050
@@ -782,10 +844,14 @@ class ForexBacktestEngine:
                 pair=pair,
                 action=proposal.action,
                 order_type=OrderType.from_str(getattr(proposal, "order_type", OrderType.MARKET)),
-                entry_price=round(target_entry, 5),
-                stop_loss=round(stop_loss, 5),
+                entry_price=self._normalize_price(pair, target_entry),
+                stop_loss=self._normalize_price(pair, stop_loss),
                 lots=lots,
-                take_profit=round(take_profit, 5) if take_profit is not None else None,
+                take_profit=(
+                    self._normalize_price(pair, take_profit)
+                    if take_profit is not None
+                    else None
+                ),
                 created_time=candle.timestamp,
                 valid_until=valid_until_dt,
                 status="PENDING",
@@ -801,6 +867,7 @@ class ForexBacktestEngine:
             entry_price=candle.open,
             leverage=self.config.leverage,
             account_currency=self.config.account_currency,
+            contract_size=self.config.broker_contract_size,
             conversions=self.conversion_rates,
             as_of_utc=candle.timestamp,
             max_conversion_age=self.max_conversion_age,
@@ -820,13 +887,11 @@ class ForexBacktestEngine:
             fill_price = candle.open - (spread_price / 2.0) - slip_price
 
         # Track friction costs
-        spread_cost = self.config.default_spread_pips * pip_value_in_account_currency(
-            pair, lots, self.config.account_currency, fill_price,
-            self.conversion_rates, candle.timestamp, self.max_conversion_age,
+        spread_cost = self.config.default_spread_pips * self._pip_value(
+            pair, lots, fill_price, candle.timestamp
         )
-        slip_cost = self.config.default_slippage_pips * pip_value_in_account_currency(
-            pair, lots, self.config.account_currency, fill_price,
-            self.conversion_rates, candle.timestamp, self.max_conversion_age,
+        slip_cost = self.config.default_slippage_pips * self._pip_value(
+            pair, lots, fill_price, candle.timestamp
         )
         comm_cost = self._usd_cost_in_account_currency(
             self.config.commission_per_lot_usd * lots,
@@ -847,9 +912,13 @@ class ForexBacktestEngine:
             pair=pair,
             action=proposal.action,
             entry_time=candle.timestamp,
-            entry_price=round(fill_price, 5),
-            stop_loss=round(stop_loss, 5),
-            take_profit=round(take_profit, 5) if take_profit is not None else None,
+            entry_price=self._normalize_price(pair, fill_price),
+            stop_loss=self._normalize_price(pair, stop_loss),
+            take_profit=(
+                self._normalize_price(pair, take_profit)
+                if take_profit is not None
+                else None
+            ),
             lots=lots,
             proposal_id=getattr(proposal, "proposal_id", None),
             setup_type=proposal.setup_type.value if hasattr(proposal.setup_type, "value") else str(proposal.setup_type),
@@ -889,34 +958,34 @@ class ForexBacktestEngine:
         new_proposals: list[ForexTraderProposal] | None = None,
         lower_tf_candles: Sequence[ForexBar] | None = None,
     ) -> None:
-        """Execute a single discrete-time simulation step on a new incoming bar."""
+        """Execute one bar using only proposals created before this observation."""
         self._as_of_utc = candle.timestamp
-        # 1. Update excursion extremes for open trades
+
+        # 1. Proposals passed to this step were created after an earlier bar.
+        # MARKET orders enter at this bar's open; LIMIT/STOP orders become
+        # eligible to inspect this bar only after they have been queued here.
+        if new_proposals:
+            for proposal in new_proposals:
+                self.execute_proposal(proposal, candle)
+
+        # 2. Update excursion extremes for open trades
         self._update_open_positions_excursions(candle, pair)
 
-        # 2. Check pending limit/stop orders for fills or expiration
+        # 3. Check pending limit/stop orders for fills or expiration
         self._process_pending_orders(candle, pair)
 
-        # 3. Check and apply daily swap rollover
+        # 4. Check and apply daily swap rollover
         self._apply_swap_rollover(candle)
 
-        # 4. Evaluate intrabar stop loss and take profit hits
+        # 5. Evaluate intrabar stop loss and take profit hits
         self._check_and_settle_intrabar_exits(candle, pair, lower_tf_candles=lower_tf_candles)
-
-        # 5. Process new trade proposals (MARKET orders fill, LIMIT/STOP queue)
-        if new_proposals:
-            for p in new_proposals:
-                self.execute_proposal(p, candle)
 
         # 6. Calculate floating unrealized equity
         floating_pnl = 0.0
-        pip_sz = pip_size_for(pair)
+        pip_sz = self._pip_size(pair)
         for t in self.open_trades:
             if t.pair == pair:
-                pv = pip_value_in_account_currency(
-                    pair, t.lots, self.config.account_currency, candle.close,
-                    self.conversion_rates, candle.timestamp, self.max_conversion_age,
-                )
+                pv = self._pip_value(pair, t.lots, candle.close, candle.timestamp)
                 if t.action == ForexAction.LONG:
                     pips = (candle.close - t.entry_price) / pip_sz
                 else:
@@ -960,8 +1029,16 @@ class ForexBacktestEngine:
 
         schedule = proposals_schedule or {}
         history_window: list[ForexBar] = []
+        queued_proposals: list[ForexTraderProposal] = []
 
         for _i, candle in enumerate(candles):
+            self.step(
+                candle=candle,
+                pair=pair,
+                new_proposals=queued_proposals or None,
+                lower_tf_candles=lower_tf_candles,
+            )
+            queued_proposals = []
             history_window.append(candle)
 
             # Point-in-time safe proposal generation: only past and current candle visible
@@ -976,12 +1053,7 @@ class ForexBacktestEngine:
                 if generated:
                     proposals_to_submit.extend(generated)
 
-            self.step(
-                candle=candle,
-                pair=pair,
-                new_proposals=proposals_to_submit,
-                lower_tf_candles=lower_tf_candles,
-            )
+            queued_proposals = proposals_to_submit
 
         # Force-close any open positions on last bar for final settlement
         if self.open_trades and candles:

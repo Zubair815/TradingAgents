@@ -1625,7 +1625,7 @@ class TestForexAnalysisRuns:
             violations = evaluated["forex_risk_decision"]["risk_violations"]
             assert any("Current spread (7.0 pips)" in item for item in violations)
             assert any("Spread-to-ATR ratio" in item for item in violations)
-            assert holder["latest"].recommended_lot_size % 0.03 == pytest.approx(0.0)
+            assert holder == {}
 
     def test_live_usdjpy_conversion_reaches_sizing(self, isolated_forex_env):
         _, _, observer = isolated_forex_env

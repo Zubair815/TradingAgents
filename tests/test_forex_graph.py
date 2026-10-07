@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import json
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from langchain_core.messages import AIMessage
@@ -58,6 +58,7 @@ from tradingagents.research.contracts import RunStatus
 from tradingagents.risk.engine import ForexRiskLimits
 from tradingagents.risk.sizing import (
     ForexAccountProfile,
+    ForexPositionSizingEngine,
     PositionSizingResult,
 )
 
@@ -322,6 +323,74 @@ class TestDeterministicForexRiskEvaluator:
         assert decision_dict["risk_reward_ratio"] == 1.75
         assert "latest" in holder
         assert holder["latest"].lot_size == decision_dict["approved_lot_size"]
+
+    def test_risk_policy_is_forwarded_to_exactly_one_sizing_call(self):
+        proposal = ForexTraderProposal(
+            pair="EURUSD",
+            action=ForexAction.LONG,
+            entry_price=1.08500,
+            stop_loss=1.08100,
+            take_profit_1=1.09300,
+            suggested_risk_percent=2.0,
+            reasoning="Valid setup requesting more than policy permits.",
+        )
+        limits = ForexRiskLimits(
+            max_risk_percent=1.0,
+            enforce_market_open=False,
+            enforce_news_blackout=False,
+        )
+        sizing = MagicMock(wraps=ForexPositionSizingEngine())
+
+        from tradingagents.graph.forex_graph import create_forex_risk_evaluator
+
+        result = create_forex_risk_evaluator(
+            risk_engine=None,
+            sizing_engine=sizing,
+            risk_limits=limits,
+            sizing_account=ForexAccountProfile(
+                equity=50_000.0,
+                max_single_trade_risk_percent=5.0,
+            ),
+        )({
+            "company_of_interest": "EURUSD",
+            "trade_date": "2026-03-04",
+            "forex_proposal": proposal.model_dump(),
+        })
+
+        sizing.size_proposal.assert_called_once()
+        assert sizing.size_proposal.call_args.kwargs["effective_risk_percent"] == 1.0
+        decision = result["forex_risk_decision"]
+        assert decision["decision"] == "MODIFY"
+        assert decision["max_risk_percent"] <= 1.0
+
+    def test_rejected_policy_never_invokes_sizing(self):
+        proposal = ForexTraderProposal(
+            pair="EURUSD",
+            action=ForexAction.LONG,
+            entry_price=1.08500,
+            stop_loss=1.08000,
+            take_profit_1=1.08700,
+            suggested_risk_percent=1.0,
+            reasoning="Sub-minimum reward setup.",
+        )
+        sizing = MagicMock(wraps=ForexPositionSizingEngine())
+
+        from tradingagents.graph.forex_graph import create_forex_risk_evaluator
+
+        result = create_forex_risk_evaluator(
+            sizing_engine=sizing,
+            risk_limits=ForexRiskLimits(
+                enforce_market_open=False,
+                enforce_news_blackout=False,
+            ),
+        )({
+            "company_of_interest": "EURUSD",
+            "trade_date": "2026-03-04",
+            "forex_proposal": proposal.model_dump(),
+        })
+
+        sizing.size_proposal.assert_not_called()
+        assert result["forex_risk_decision"]["approved_action"] == "NO_TRADE"
 
     def test_risk_evaluator_rejects_sub_1_rr(self):
         proposal = ForexTraderProposal(

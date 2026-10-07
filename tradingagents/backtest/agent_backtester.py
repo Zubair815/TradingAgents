@@ -17,8 +17,9 @@ import logging
 import uuid
 from collections.abc import Callable, Sequence
 from contextlib import nullcontext
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
+from inspect import signature
 from math import isfinite
 from typing import Any
 
@@ -268,11 +269,21 @@ class HistoricalForexAgentBacktester:
         proposals_skipped = 0
 
         history_window: list[ForexBar] = []
+        queued_proposals: list[ForexTraderProposal] = []
 
         for i, candle in enumerate(sorted_candles):
             if historical:
                 # Settle the completed bar before acting on information from its close.
-                engine.step(candle=candle, pair=pair, lower_tf_candles=lower_tf_candles)
+                try:
+                    engine.step(
+                        candle=candle,
+                        pair=pair,
+                        new_proposals=queued_proposals or None,
+                        lower_tf_candles=lower_tf_candles,
+                    )
+                except FXConversionUnavailable as exc:
+                    raise HistoricalDataUnavailable(str(exc)) from exc
+                queued_proposals = []
             history_window.append(candle)
             new_proposals: list[ForexTraderProposal] = []
 
@@ -289,16 +300,28 @@ class HistoricalForexAgentBacktester:
                         snapshot_setter(engine.account_snapshot())
                     context_setter = getattr(agent_pipeline_callable, "set_deterministic_snapshot", None)
                     if callable(context_setter):
-                        context_setter(
-                            engine.account_snapshot(),
-                            engine.open_position_snapshot(cutoff),
-                            tuple(
-                                rate
-                                for rate in self.config.conversion_rates
-                                if rate.observed_at is not None and rate.observed_at <= cutoff
-                            ),
-                            cutoff,
+                        account_state = engine.account_snapshot()
+                        position_state = engine.open_position_snapshot(cutoff)
+                        conversion_state = tuple(
+                            rate
+                            for rate in self.config.conversion_rates
+                            if rate.observed_at is not None and rate.observed_at <= cutoff
                         )
+                        if len(signature(context_setter).parameters) >= 5:
+                            context_setter(
+                                account_state,
+                                position_state,
+                                engine.pending_exposure_snapshot(cutoff),
+                                conversion_state,
+                                cutoff,
+                            )
+                        else:
+                            context_setter(
+                                account_state,
+                                position_state,
+                                conversion_state,
+                                cutoff,
+                            )
                     if historical:
                         with historical_market_scope(pair, candle_frame(pit_candles, provenance), cutoff):
                             proposal = agent_pipeline_callable(pair, cutoff, pit_candles)
@@ -354,13 +377,9 @@ class HistoricalForexAgentBacktester:
                         action_str = str(action_val)
 
                     if action_str == "APPROVE":
-                        if historical and proposal.action != ForexAction.NO_TRADE:
-                            self._require_historical_quote_conversion(pair, cutoff)
                         proposals_approved += 1
                         new_proposals.append(proposal)
                     elif action_str == "MODIFY":
-                        if historical and proposal.action != ForexAction.NO_TRADE:
-                            self._require_historical_quote_conversion(pair, cutoff)
                         proposals_modified += 1
                         new_proposals.append(proposal)
                     elif action_str == "REJECT":
@@ -370,11 +389,9 @@ class HistoricalForexAgentBacktester:
 
             # Discrete step execution on incoming bar
             if historical:
-                # Zero-latency close-price fill assumption, with normal costs and constraints.
-                execution_bar = replace(candle, timestamp=candle.close_time,
-                                        open=candle.close, high=candle.close, low=candle.close)
-                for proposal in new_proposals:
-                    engine.execute_proposal(proposal, execution_bar)
+                # Decisions made after this completed bar become eligible only
+                # when the next market observation arrives.
+                queued_proposals = new_proposals
             else:
                 engine.step(candle=candle, pair=pair, new_proposals=new_proposals or None,
                             lower_tf_candles=lower_tf_candles)

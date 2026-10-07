@@ -17,6 +17,7 @@ import pytest
 from tradingagents.forex.domain import MAJOR_PAIRS
 from tradingagents.forex.pips import (
     lot_size_from_risk,
+    normalize_price,
     pip_size_for,
     pip_value_in_account_currency,
     pips_between,
@@ -25,6 +26,26 @@ from tradingagents.forex.pips import (
     price_to_pips,
     risk_reward_ratio,
 )
+
+
+def test_normalize_price_uses_broker_digits_and_point():
+    assert normalize_price(1.234567, 5, 0.00001) == 1.23457
+    assert normalize_price(150.1236, 3, 0.001) == 150.124
+    assert normalize_price(1.2349, 3, 0.005) == 1.235
+
+
+def test_explicit_broker_contract_size_controls_pip_value_and_lot_size():
+    assert pip_value_in_account_currency(
+        "EURUSD", 1.0, "USD", contract_size=10_000.0
+    ) == pytest.approx(1.0)
+    standard = lot_size_from_risk(
+        10_000.0, 1.0, 1.1000, 1.0900, "EURUSD", contract_size=100_000.0
+    )
+    mini = lot_size_from_risk(
+        10_000.0, 1.0, 1.1000, 1.0900, "EURUSD", contract_size=10_000.0
+    )
+    assert mini["pip_value_per_lot"] == pytest.approx(standard["pip_value_per_lot"] / 10.0)
+    assert mini["lot_size"] == pytest.approx(standard["lot_size"] * 10.0)
 
 # ---------------------------------------------------------------------------
 # pip_size_for

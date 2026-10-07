@@ -31,6 +31,7 @@ from tradingagents.risk.sizing import (
     BrokerExecutionConstraints,
     ForexAccountProfile,
     OpenPosition,
+    PendingExposure,
 )
 
 
@@ -48,6 +49,38 @@ class HistoricalForexPipelineConfig:
     token_limits: int | None = None
     debate_enabled: bool = True
     memory_enabled: bool = False
+    broker_symbol: str | None = None
+    broker_digits: int | None = None
+    broker_point: float | None = None
+    broker_pip_size: float | None = None
+    broker_contract_size: float = 100000.0
+    broker_volume_min: float = 0.01
+    broker_volume_max: float = 100.0
+    broker_volume_step: float = 0.01
+    broker_assumption_source: str = "CONFIGURED_ASSUMPTION"
+
+
+def _pit_atr_pips(
+    candles: list[ForexBar], pair: str, period: int = 14
+) -> float | None:
+    """Return Wilder ATR using only bars already available at the cutoff."""
+    if len(candles) < period:
+        return None
+    true_ranges: list[float] = []
+    previous_close: float | None = None
+    for candle in candles:
+        ranges = [candle.high - candle.low]
+        if previous_close is not None:
+            ranges.extend(
+                (abs(candle.high - previous_close), abs(candle.low - previous_close))
+            )
+        true_ranges.append(max(ranges))
+        previous_close = candle.close
+    atr = sum(true_ranges[:period]) / period
+    for true_range in true_ranges[period:]:
+        atr = ((atr * (period - 1)) + true_range) / period
+    value = atr / pip_size_for(pair)
+    return value if value > 0 else None
 
 
 def create_historical_forex_pipeline(
@@ -65,6 +98,7 @@ def create_historical_forex_pipeline(
     expected_pair = normalize_forex_pair(config.pair)
     account_snapshot: ForexAccountProfile | None = None
     open_positions: tuple[OpenPosition, ...] = ()
+    pending_exposures: tuple[PendingExposure, ...] = ()
     conversion_snapshot: tuple[ForexConversionRate, ...] = ()
     snapshot_as_of: datetime | None = None
     audit_metadata: dict[str, Any] = {"applied_lesson_ids": []}
@@ -76,12 +110,14 @@ def create_historical_forex_pipeline(
     def set_deterministic_snapshot(
         account: ForexAccountProfile,
         positions: tuple[OpenPosition, ...],
+        pending: tuple[PendingExposure, ...],
         conversions: tuple[ForexConversionRate, ...],
         as_of_utc: datetime,
     ) -> None:
-        nonlocal account_snapshot, open_positions, conversion_snapshot, snapshot_as_of
+        nonlocal account_snapshot, open_positions, pending_exposures, conversion_snapshot, snapshot_as_of
         account_snapshot = account.model_copy(deep=True)
         open_positions = tuple(position.model_copy(deep=True) for position in positions)
+        pending_exposures = tuple(item.model_copy(deep=True) for item in pending)
         conversion_snapshot = tuple(conversions)
         snapshot_as_of = as_of_utc
 
@@ -97,6 +133,13 @@ def create_historical_forex_pipeline(
         last_bar = pit_candles[-1]
         observed_at = last_bar.close_time or last_bar.timestamp
         spread_pips = max(0.0, last_bar.spread_pips)
+        atr_pips = _pit_atr_pips(pit_candles, canonical_pair)
+        digits = config.broker_digits
+        if digits is None:
+            digits = 3 if pip_size_for(canonical_pair) == 0.01 else 5
+        point = config.broker_point
+        if point is None:
+            point = 10 ** (-digits)
         risk_context = ForexRiskContext(
             pair=canonical_pair,
             as_of_utc=cutoff,
@@ -105,16 +148,36 @@ def create_historical_forex_pipeline(
                 bid=last_bar.close,
                 ask=last_bar.close + spread_pips * pip_size_for(canonical_pair),
                 spread_pips=spread_pips,
-                atr_status=AvailabilityStatus.NOT_APPLICABLE,
+                atr_status=(
+                    AvailabilityStatus.AVAILABLE
+                    if atr_pips is not None
+                    else AvailabilityStatus.UNAVAILABLE
+                ),
+                atr_pips=atr_pips,
                 source=f"historical:{last_bar.data_source}",
                 observed_at=observed_at,
             ),
             account=account_snapshot,
             broker=BrokerExecutionConstraints(
-                broker_symbol=last_bar.broker_symbol or canonical_pair,
-                pip_size=pip_size_for(canonical_pair),
+                broker_symbol=(
+                    last_bar.broker_symbol
+                    or config.broker_symbol
+                    or canonical_pair
+                ),
+                digits=digits,
+                point=point,
+                pip_size=config.broker_pip_size or pip_size_for(canonical_pair),
+                contract_size=config.broker_contract_size,
+                min_volume=config.broker_volume_min,
+                max_volume=config.broker_volume_max,
+                volume_step=config.broker_volume_step,
             ),
-            portfolio=ForexPortfolioContext(open_positions=open_positions),
+            portfolio=ForexPortfolioContext(
+                open_positions=open_positions,
+                pending_orders_status=AvailabilityStatus.AVAILABLE,
+                pending_order_count=len(pending_exposures),
+                pending_exposures=pending_exposures,
+            ),
             conversions=conversion_snapshot,
         )
 

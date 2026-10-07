@@ -27,9 +27,10 @@ The current workspace was verified with the repository's supported Windows virtu
 D:\TradingAgents\.venv\Scripts\python.exe -m pytest -q -m "not e2e"
 ```
 
-Result on 2026-10-03 at HEAD `4c226137477c4d6cb3907c2397361d8ad45f7a26`
-plus the completed Forex remediation: `2295 passed, 5 skipped, 6 deselected, 0 failed,
-22 warnings, 88 subtests passed`. Local Chromium E2E also passed (`6 passed`).
+Result on 2026-10-07 from baseline HEAD `57e0eb4b282ee7f715a5fb18e7c46a95d80f7b4c`
+plus the uncommitted target-state remediation: `2378 passed, 5 skipped, 9 deselected,
+0 failed, 20 warnings, 88 subtests passed`. Local Chromium E2E also passed
+(`9 passed`).
 Ruff, compileall, JavaScript syntax, and whitespace checks passed. Current-worktree
 GitHub CI is not available until the remediation is committed and pushed.
 
@@ -53,8 +54,10 @@ of profitable or statistically validated trading performance. See
 [the XM Demo checklist](docs/XM_MT5_DEMO_ACCEPTANCE.md) for the remaining manual
 acceptance gate.
 
-Historical decisions use completed-bar close-time execution, pending orders only
-become eligible on a later simulation step, and walk-forward periods receive only
+Historical decisions are produced after a completed observation and become
+eligible only on the next simulation observation; a final-bar proposal therefore
+remains unfilled. Pending orders only become eligible on a later simulation step,
+and walk-forward periods receive only
 real pre-period bars as warm-up context. Historical risk sizing uses the evolving
 simulated balance, equity, free margin, currency, and leverage. Live MT5 sizing
 uses the observed `margin_free` value (or a validated equity-minus-margin

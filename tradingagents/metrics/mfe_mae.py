@@ -15,7 +15,7 @@ import pandas as pd
 
 from tradingagents.agents.schemas_forex import ForexAction
 from tradingagents.database.models import TradeJournalRecord
-from tradingagents.forex.pips import pip_size_for
+from tradingagents.forex.pips import normalize_price, pip_size_for
 from tradingagents.metrics.models import TradeMfeMae
 
 logger = logging.getLogger(__name__)
@@ -88,6 +88,8 @@ def calculate_mfe_mae(
     retrieval_time_utc: str | None = None,
     is_available: bool = True,
     unavailable_reason: str | None = None,
+    broker_digits: int | None = None,
+    broker_point: float | None = None,
 ) -> TradeMfeMae:
     """Calculate Maximum Favorable and Adverse Excursions for a single trade.
 
@@ -329,6 +331,7 @@ def calculate_mfe_mae(
     dd_eff = max(0.0, min(100.0, round(((sl_pips - mae_pips) / sl_pips) * 100.0, 1)))
     exit_eff = max(0.0, min(100.0, exit_eff))
 
+    digits = broker_digits if broker_digits is not None else (3 if pip_sz == 0.01 else 5)
     return TradeMfeMae(
         trade_id=trade_id,
         pair=pair,
@@ -339,8 +342,8 @@ def calculate_mfe_mae(
         take_profit=take_profit,
         open_time_utc=open_dt.isoformat() if open_dt else None,
         close_time_utc=close_dt.isoformat() if close_dt else None,
-        mfe_price=round(mfe_price, 5),
-        mae_price=round(mae_price, 5),
+        mfe_price=normalize_price(mfe_price, digits, broker_point),
+        mae_price=normalize_price(mae_price, digits, broker_point),
         mfe_pips=round(mfe_pips, 1),
         mae_pips=round(mae_pips, 1),
         mfe_r=mfe_r,

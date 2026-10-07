@@ -89,7 +89,7 @@ from tradingagents.forex.application import (
     build_mt5_application_context,
 )
 from tradingagents.forex.domain import Timeframe, get_forex_pair, normalize_forex_pair
-from tradingagents.forex.pips import pip_size_for
+from tradingagents.forex.pips import normalize_price, pip_size_for
 from tradingagents.journal.lifecycle import LifecycleError, LifecycleTransitionError
 from tradingagents.journal.manager import ForexJournalManager
 from tradingagents.learning.manager import ForexLearningManager
@@ -394,6 +394,7 @@ _SETTINGS_KEYS = (
     "forex_max_spread_pips",
     "forex_news_blackout_minutes",
     "mt5_poll_interval_seconds",
+    "forex_daily_loss_reset_hour_utc",
 )
 
 _RESTART_REQUIRED_KEYS = frozenset({"mt5_poll_interval_seconds"})
@@ -2802,6 +2803,7 @@ async def run_backtest(
         }
 
         pip_sz = pip_size_for(norm_pair)
+        demo_digits = 3 if pip_sz == 0.01 else 5
         base_price = 1.0800 if "JPY" not in norm_pair else 150.00
 
         # Construct candles
@@ -2837,8 +2839,8 @@ async def run_backtest(
             last = pit_candles[-1]
             prev = pit_candles[-2]
             if last.close > last.open and prev.close > prev.open and (len(pit_candles) % 15 == 0):
-                sl = round(last.close - (15.0 * pip_sz), 5)
-                tp = round(last.close + (30.0 * pip_sz), 5)
+                sl = normalize_price(last.close - (15.0 * pip_sz), demo_digits)
+                tp = normalize_price(last.close + (30.0 * pip_sz), demo_digits)
                 return [
                     ForexTraderProposal(
                         pair=norm_pair,
@@ -2849,6 +2851,7 @@ async def run_backtest(
                         entry_price=last.close,
                         stop_loss=sl,
                         take_profit_1=tp,
+                        suggested_lot_size=0.1,
                         suggested_risk_percent=1.0,
                         reasoning="Backtest trend continuation strategy",
                     )

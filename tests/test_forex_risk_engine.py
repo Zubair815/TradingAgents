@@ -172,8 +172,7 @@ class TestValidProposalApproval:
         assert decision.take_profit == 1.09000
         assert decision.risk_reward_ratio == 1.67
         assert decision.max_risk_percent == 1.0
-        assert decision.approved_lot_size is not None
-        assert decision.approved_lot_size > 0.0
+        assert decision.approved_lot_size is None
         assert len(decision.risk_violations) == 0
         assert len(decision.risk_checks_passed) >= 5
 
@@ -197,8 +196,7 @@ class TestValidProposalApproval:
         assert decision.take_profit == 1.26400
         assert decision.risk_reward_ratio == 2.0
         assert decision.max_risk_percent == 1.0
-        assert decision.approved_lot_size is not None
-        assert decision.approved_lot_size > 0.0
+        assert decision.approved_lot_size is None
         assert len(decision.risk_violations) == 0
 
 
@@ -578,9 +576,8 @@ class TestEquityRiskClampingAndSizing:
         assert decision.max_risk_percent == 2.0  # Clamped to policy limit
         assert any("clamped from proposed 3.5%" in m for m in decision.modifications_required)
 
-    def test_deterministic_lot_size_calculation(self):
+    def test_policy_engine_does_not_calculate_competing_lot_size(self):
         engine = ForexRiskEngine()
-        # $20,000 equity, 1% risk ($200), 30 pips stop on EURUSD ($10/pip per std lot) -> ~0.67 lots
         proposal = make_valid_long_proposal(entry=1.08500, sl=1.08200)
 
         decision = engine.validate_proposal(
@@ -591,8 +588,8 @@ class TestEquityRiskClampingAndSizing:
             account_currency="USD",
         )
 
-        assert decision.approved_lot_size == 0.66
-        assert any("Authorized position size: 0.66" in c for c in decision.risk_checks_passed)
+        assert decision.approved_lot_size is None
+        assert not any("Authorized position size" in c for c in decision.risk_checks_passed)
 
 
 # ---------------------------------------------------------------------------

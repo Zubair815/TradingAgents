@@ -163,6 +163,7 @@ class MT5Position(BaseModel):
         conversions: Sequence[ForexConversionRate] = (),
         as_of_utc: datetime | None = None,
         max_conversion_age: timedelta | None = None,
+        contract_size: float | None = None,
     ) -> OpenPosition:
         """Convert MT5 position to an OpenPosition for portfolio correlation & risk aggregation."""
         normalized_pair = normalize_forex_pair(self.symbol)
@@ -180,6 +181,7 @@ class MT5Position(BaseModel):
                     conversions=conversions,
                     as_of_utc=as_of_utc,
                     max_conversion_age=max_conversion_age,
+                    contract_size=contract_size,
                 )
                 est_risk = round(stop_pips * pip_value, 2)
             except FXConversionUnavailable:
@@ -218,6 +220,7 @@ class MT5Order(BaseModel):
         conversions: Sequence[ForexConversionRate] = (),
         as_of_utc: datetime | None = None,
         max_conversion_age: timedelta | None = None,
+        contract_size: float | None = None,
     ) -> PendingExposure:
         """Convert MT5Order to PendingExposure for portfolio risk controls (PORT-010, PORT-011)."""
         normalized_pair = normalize_forex_pair(self.symbol)
@@ -236,6 +239,7 @@ class MT5Order(BaseModel):
                     conversions=conversions,
                     as_of_utc=as_of_utc,
                     max_conversion_age=max_conversion_age,
+                    contract_size=contract_size,
                 )
                 est_risk = round(stop_pips * pip_value, 2)
             except FXConversionUnavailable:

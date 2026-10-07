@@ -19,9 +19,9 @@ Enforces non-negotiable risk rules preventing LLM hallucination or over-leveragi
 6. Spread & Volatility Friction:
    - Rejects if live spread > max_spread_pips.
    - Rejects if spread / ATR > max_spread_atr_ratio.
-7. Account Equity Risk Clamping & Deterministic Lot Sizing:
+7. Account Equity Risk Policy:
    - Clamps proposed risk % to max_risk_percent.
-   - Calculates exact lot size using deterministic pip value and balance.
+   - Forwards the permitted risk allocation to the authoritative sizing engine.
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ from tradingagents.agents.schemas_forex import (
 from tradingagents.dataflows.forex_quality import DataInsufficientError
 from tradingagents.forex.calendar import evaluate_event_risk_regime
 from tradingagents.forex.domain import get_forex_pair
-from tradingagents.forex.pips import lot_size_from_risk, pip_size_for
+from tradingagents.forex.pips import pip_size_for
 from tradingagents.forex.sessions import is_market_open, is_weekend
 
 logger = logging.getLogger(__name__)
@@ -450,7 +450,7 @@ class ForexRiskEngine:
                 )
 
         # -------------------------------------------------------------------
-        # 8. Equity Risk Clamping & Deterministic Lot Sizing
+        # 8. Equity Risk Policy
         # -------------------------------------------------------------------
         raw_risk = (
             proposal.suggested_risk_percent
@@ -481,36 +481,10 @@ class ForexRiskEngine:
             eff_risk = round(eff_risk * news_risk_scale, 2)
             checks_passed.append(f"Risk scaled to {eff_risk:.2f}% due to approaching macroeconomic event.")
 
-        # Compute authorized lot size if account balance is provided
+        # Lot size is intentionally unresolved here. The graph invokes
+        # ForexPositionSizingEngine exactly once after policy approval, with
+        # ``eff_risk`` carried in ``max_risk_percent``.
         approved_lot_size: float | None = None
-        if (
-            account_balance is not None
-            and account_balance > 0
-            and proposal.entry_price is not None
-            and proposal.stop_loss is not None
-            and len(violations) == 0
-        ):
-            try:
-                sizing = lot_size_from_risk(
-                    account_equity=account_balance,
-                    risk_percent=eff_risk,
-                    entry_price=proposal.entry_price,
-                    stop_loss_price=proposal.stop_loss,
-                    pair=proposal.pair,
-                    account_currency=account_currency,
-                    current_quote_price=proposal.entry_price,
-                )
-                approved_lot_size = sizing["lot_size"]
-                checks_passed.append(
-                    f"Authorized position size: {approved_lot_size:.2f} standard lots "
-                    f"(${sizing['actual_risk']:.2f} risk on ${account_balance:,.2f} equity)."
-                )
-            except Exception as e:
-                logger.warning("Lot sizing calculation failed: %s", e)
-                approved_lot_size = 0.0
-                violations.append(f"Position sizing data insufficient: {e}")
-        else:
-            approved_lot_size = proposal.suggested_lot_size if len(violations) == 0 else 0.0
 
         # -------------------------------------------------------------------
         # 9. Final Decision Determination & Synthesis

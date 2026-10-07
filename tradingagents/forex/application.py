@@ -130,15 +130,16 @@ def build_mt5_application_context(
             as_of_utc=as_of_utc,
             max_conversion_age=max_conversion_age,
         )
-        pending_exposures = (
-            observer.to_pending_exposures(
-                account_currency=account.currency,
-                conversions=conversions,
-                as_of_utc=as_of_utc,
-                max_conversion_age=max_conversion_age,
+        pending_builder = getattr(observer, "to_pending_exposures", None)
+        if not callable(pending_builder):
+            raise DataInsufficientError(
+                "MT5 pending-order exposure is unavailable"
             )
-            if hasattr(observer, "to_pending_exposures")
-            else []
+        pending_exposures = pending_builder(
+            account_currency=account.currency,
+            conversions=conversions,
+            as_of_utc=as_of_utc,
+            max_conversion_age=max_conversion_age,
         )
 
         daily_rule_enabled = (
@@ -152,7 +153,12 @@ def build_mt5_application_context(
         trading_day_start = None
         if daily_rule_enabled:
             try:
-                daily_pnl, trading_day_start = observer.get_daily_realized_pnl(as_of_utc)
+                daily_pnl, trading_day_start = observer.get_daily_realized_pnl(
+                    as_of_utc,
+                    reset_hour_utc=int(
+                        get_config().get("forex_daily_loss_reset_hour_utc", 0)
+                    ),
+                )
                 day_start_balance = account.balance - daily_pnl
                 daily_pnl_source = "MT5 deal history"
                 daily_pnl_status = AvailabilityStatus.AVAILABLE

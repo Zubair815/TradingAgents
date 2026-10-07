@@ -24,7 +24,7 @@ import json
 import logging
 import uuid
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Any
@@ -460,12 +460,18 @@ class ForexWalkForwardValidator:
         interval = max(1, int(cfg_snap.get("sampling_interval") or 1))
         max_points = cfg_snap.get("max_analysis_points")
         analyses = 0
+        queued_proposals: list[ForexTraderProposal] = []
 
         for index, candle in enumerate(period_candles):
             # First process the newly-arrived bar.  This permits pending orders
             # created by an earlier decision to trigger, but never lets a decision
             # made after this bar closed inspect this bar retroactively for fills.
-            engine.step(candle=candle, pair=norm_pair)
+            engine.step(
+                candle=candle,
+                pair=norm_pair,
+                new_proposals=queued_proposals or None,
+            )
+            queued_proposals = []
             history.append(candle)
 
             if agent_pipeline_callable is None:
@@ -482,17 +488,7 @@ class ForexWalkForwardValidator:
             if proposal is None:
                 continue
 
-            # MARKET orders use the first price that exists at the decision time:
-            # the completed bar close.  LIMIT/STOP orders are only queued here and
-            # cannot inspect this completed bar's high/low.
-            execution_bar = replace(
-                candle,
-                timestamp=decision_time,
-                open=candle.close,
-                high=candle.close,
-                low=candle.close,
-            )
-            engine.execute_proposal(proposal, execution_bar)
+            queued_proposals = [proposal]
 
         if engine.open_trades:
             last_bar = period_candles[-1]
