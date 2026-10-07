@@ -134,7 +134,23 @@ def test_native_mt5_reads_are_serialized_across_observer_threads():
             return value
 
         def account_info(self):
-            return self._read({"login": 1, "currency": "USD"})
+            return self._read({
+                "login": 1,
+                "name": "Concurrency Fixture",
+                "server": "Fixture-Demo",
+                "currency": "USD",
+                "leverage": 100,
+                "balance": 10_000.0,
+                "equity": 10_000.0,
+                "profit": 0.0,
+                "margin": 0.0,
+                "margin_free": 10_000.0,
+                "margin_level": 0.0,
+                "margin_so_call": 100.0,
+                "margin_so_so": 50.0,
+                "trade_mode": 0,
+                "trade_allowed": True,
+            })
 
         def history_deals_get(self, *args, **kwargs):
             return self._read(())

@@ -30,6 +30,7 @@ from tradingagents.agents.schemas_forex import (
     ForexRiskDecisionAction,
     ForexTraderProposal,
     OrderType,
+    SetupType,
 )
 from tradingagents.backtest.ablation import (
     AblationConfigVariant,
@@ -290,7 +291,7 @@ def test_ablation_pipeline_factory_invocation() -> None:
                     take_profit=history[-1].close + 0.0040,
                     risk_reward_ratio=2.0,
                     risk_percent=1.0,
-                    setup_type="TEST",
+                    setup_type=SetupType.PULLBACK,
                     execution_timeframe="H1",
                     confidence=70.0,
                     reasoning="Test reasoning",

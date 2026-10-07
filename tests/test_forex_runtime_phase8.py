@@ -220,7 +220,7 @@ class TestConfigurationRestartTruthfulness:
         self, client, isolated_settings
     ):
         mock_runtime = MagicMock()
-        mock_runtime.service.poll_interval = 5.0
+        mock_runtime.service.poll_interval = config_module.get_config()["mt5_poll_interval_seconds"]
 
         with patch("web.forex_routes._forex_runtime", mock_runtime):
             # Patch purely dynamic settings
@@ -244,7 +244,7 @@ class TestConfigurationRestartTruthfulness:
         self, client, isolated_settings
     ):
         mock_runtime = MagicMock()
-        mock_runtime.service.poll_interval = 5.0
+        mock_runtime.service.poll_interval = config_module.get_config()["mt5_poll_interval_seconds"]
 
         with patch("web.forex_routes._forex_runtime", mock_runtime):
             # Patch MT5 poll interval
@@ -264,12 +264,13 @@ class TestConfigurationRestartTruthfulness:
         self, client, isolated_settings
     ):
         mock_runtime = MagicMock()
-        mock_runtime.service.poll_interval = 5.0
+        active_poll = config_module.get_config()["mt5_poll_interval_seconds"]
+        mock_runtime.service.poll_interval = active_poll
 
         with patch("web.forex_routes._forex_runtime", mock_runtime):
             # Submitting the current value should NOT trigger restart_required
             resp = client.patch("/api/forex/settings", json={
-                "mt5_poll_interval_seconds": 5.0,
+                "mt5_poll_interval_seconds": active_poll,
             })
             assert resp.status_code == 200
             assert resp.json()["restart_required"] is False

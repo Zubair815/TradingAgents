@@ -15,8 +15,9 @@ PROFILE = tempfile.mkdtemp(prefix="ta_inspect_")
 os.environ["USERPROFILE"] = PROFILE
 os.environ["HOME"] = PROFILE
 
-import uvicorn
-import web.server as server
+import uvicorn  # noqa: E402
+
+import web.server as server  # noqa: E402
 
 PORT = 8731
 BASE = f"http://127.0.0.1:{PORT}"
@@ -44,7 +45,7 @@ else:
 print("PROFILE:", PROFILE)
 print("SERVER UP:", BASE)
 
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright  # noqa: E402
 
 SEED_JS = r"""
 async () => {

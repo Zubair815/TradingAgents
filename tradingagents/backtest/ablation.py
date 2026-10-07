@@ -49,6 +49,7 @@ from typing import Any
 from tradingagents.agents.schemas_forex import (
     ForexRiskDecisionAction,
     ForexTraderProposal,
+    SetupType,
 )
 from tradingagents.backtest.agent_backtester import (
     AgentBacktestConfig,
@@ -688,7 +689,7 @@ class ForexAblationRunner:
                                 take_profit=tp,
                                 risk_reward_ratio=round(tp_dist / sl_dist, 2),
                                 risk_percent=1.0,
-                                setup_type="ABLATION_PULLBACK",
+                                setup_type=SetupType.PULLBACK,
                                 execution_timeframe=self.timeframe,
                                 confidence=75.0 if variant.enable_memory else 65.0,
                                 reasoning="Deterministic ablation pullback setup",

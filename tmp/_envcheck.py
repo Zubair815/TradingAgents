@@ -1,4 +1,5 @@
-import importlib.util as u, os, glob
+import importlib.util as u
+import os
 
 for name in ("playwright", "httpx", "fastapi", "uvicorn", "pydantic", "starlette"):
     print(name, bool(u.find_spec(name)))
