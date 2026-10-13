@@ -81,6 +81,7 @@ from tradingagents.dataflows.config import (
     reset_runtime_settings,
     save_runtime_settings,
 )
+from tradingagents.dataflows.forex_context import prepare_live_forex_context
 from tradingagents.dataflows.forex_data import ForexBar
 from tradingagents.dataflows.forex_quality import DataInsufficientError
 from tradingagents.forex import ForexTradingAgentsGraph
@@ -93,6 +94,7 @@ from tradingagents.forex.pips import normalize_price, pip_size_for
 from tradingagents.journal.lifecycle import LifecycleError, LifecycleTransitionError
 from tradingagents.journal.manager import ForexJournalManager
 from tradingagents.learning.manager import ForexLearningManager
+from tradingagents.llm_clients.response_validation import IncompleteResponseError
 from tradingagents.llm_clients.usage import UsageTracker, track_usage
 from tradingagents.metrics.manager import ForexMetricsManager
 from tradingagents.mt5.errors import MT5Error
@@ -146,6 +148,58 @@ _expired_forex_runs: dict[str, dict[str, Any]] = {}
 _expired_backtests: dict[str, dict[str, Any]] = {}
 _FOREX_RETENTION_POLICY = DEFAULT_RETENTION_POLICY
 _last_forex_prune_at: float | None = None
+_forex_history_loaded = False
+
+
+def _persist_forex_run(run_id: str) -> None:
+    """Persist a safe snapshot without making the in-memory SSE cache authoritative."""
+    with _lock:
+        run = dict(_forex_runs.get(run_id) or {})
+        report = _forex_completed_reports.get(run_id)
+        report = dict(report) if report is not None else None
+    if run and run.get("persist_history") is True:
+        run.setdefault("run_id", run_id)
+        run.setdefault("run_type", "forex")
+        try:
+            get_journal().save_dashboard_analysis_run(run, report)
+        except Exception:
+            logger.exception("Could not persist dashboard run %s", run_id)
+
+
+def _load_persisted_forex_history() -> None:
+    """Hydrate history once and fail closed any run interrupted by a restart."""
+    global _forex_history_loaded
+    with _lock:
+        if _forex_history_loaded:
+            return
+    now = datetime.now(timezone.utc).isoformat()
+    persisted = get_journal().list_dashboard_analysis_runs(
+        run_type="forex",
+        limit=_FOREX_RETENTION_POLICY.terminal_max_count,
+    )
+    with _lock:
+        _forex_history_loaded = True
+    interrupted: list[str] = []
+    with _lock:
+        for run, report in persisted:
+            run_id = str(run.get("run_id") or "")
+            if not run_id or run_id in _forex_runs:
+                continue
+            run["persist_history"] = True
+            if str(run.get("status", "")).lower() not in TERMINAL_STATUSES:
+                run.update(
+                    status="failed",
+                    finished_at=now,
+                    error="Analysis was interrupted when the dashboard server stopped.",
+                    error_code="SERVER_RESTARTED",
+                )
+                interrupted.append(run_id)
+            _forex_runs[run_id] = run
+            _forex_run_events.setdefault(run_id, [])
+            if report is not None:
+                _forex_completed_reports[run_id] = report
+    for run_id in interrupted:
+        _persist_forex_run(run_id)
 
 
 def _prune_expired_forex_runs(*, now: float | None = None) -> list[str]:
@@ -165,7 +219,13 @@ def _prune_expired_forex_runs(*, now: float | None = None) -> list[str]:
             )
             if is_terminal:
                 terminal_ids.append(run_id)
-                if stamp is None or current - stamp > _FOREX_RETENTION_POLICY.terminal_max_age_seconds:
+                # Persisted dashboard history is durable user evidence.  Keep it
+                # visible across restarts and beyond the transient 24-hour cache
+                # window; the bounded terminal count below still limits memory.
+                if run.get("persist_history") is not True and (
+                    stamp is None
+                    or current - stamp > _FOREX_RETENTION_POLICY.terminal_max_age_seconds
+                ):
                     expired.add(run_id)
             elif stamp is None or current - stamp > _FOREX_RETENTION_POLICY.stale_active_seconds:
                 run["status"] = "stale"
@@ -342,6 +402,7 @@ def set_forex_dependencies(
 def reset_forex_state() -> None:
     """Reset all in-memory runs, events, backtests, and dependency singletons."""
     global _journal, _journal_mgr, _analytics_mgr, _metrics_mgr, _learning_mgr, _mt5_observer, _forex_runtime
+    global _forex_history_loaded
     with _lock:
         for cancel_event in _forex_cancellations.values():
             cancel_event.set()
@@ -376,6 +437,7 @@ def reset_forex_state() -> None:
         _expired_backtests.clear()
         _forex_analysis_threads.clear()
         _forex_cancellations.clear()
+        _forex_history_loaded = False
 
 
 _SETTINGS_KEYS = (
@@ -445,6 +507,7 @@ def _provider_secret_is_configured(provider: str | None) -> bool:
         "google": ("GOOGLE_API_KEY", "GEMINI_API_KEY"),
         "anthropic": ("ANTHROPIC_API_KEY",),
         "deepseek": ("DEEPSEEK_API_KEY",),
+        "groq": ("GROQ_API_KEY",),
         "ollama": (),
     }
     return provider == "ollama" or any(os.environ.get(name) for name in env_names.get(provider or "", ()))
@@ -881,6 +944,7 @@ def _emit_fx_event(run_id: str, event_type: str, data: dict[str, Any]) -> None:
         events = _forex_run_events.setdefault(run_id, [])
         evt["_seq"] = int(events[-1].get("_seq", -1)) + 1 if events else 0
         append_bounded(events, evt, _FOREX_RETENTION_POLICY.event_max_count)
+    _persist_forex_run(run_id)
 
 
 def _safe_model_dump(obj: Any) -> Any:
@@ -1920,6 +1984,8 @@ def _run_forex_analysis(run_id: str, req: ForexAnalysisRequest) -> None:
             config["quick_think_llm"] = req.quick_model
         if req.deep_model:
             config["deep_think_llm"] = req.deep_model
+        if req.max_tokens is not None:
+            config["max_tokens"] = req.max_tokens
         if getattr(req, "research_depth", None):
             config["research_depth"] = req.research_depth
             debate_rounds = {"quick": 1, "deep": 3, "comprehensive": 5}[req.research_depth]
@@ -1975,10 +2041,11 @@ def _run_forex_analysis(run_id: str, req: ForexAnalysisRequest) -> None:
         risk_kwargs["max_daily_loss_percent"] = req.max_daily_loss_percent
         risk_kwargs["max_daily_loss_amount"] = req.max_daily_loss_amount
 
+        analysts = tuple(req.analysts) if req.analysts else ("forex_technical", "forex_macro", "forex_news")
+
         risk_limits = ForexRiskLimits(**risk_kwargs)
         journal = get_journal()
 
-        analysts = tuple(req.analysts) if req.analysts else ("forex_technical", "forex_macro", "forex_news")
         graph = ForexTradingAgentsGraph(
             selected_analysts=analysts,
             config=config,
@@ -2241,8 +2308,24 @@ def _run_forex_analysis(run_id: str, req: ForexAnalysisRequest) -> None:
 
     except Exception as exc:
         if isinstance(exc, DataInsufficientError):
+            if "future or stale quote" in str(exc).lower():
+                error_msg = (
+                    "The live MT5 quote is unavailable because the market is closed, "
+                    "the quote is stale, or its timestamp is ahead of this computer."
+                )
+                error_code = "MT5_QUOTE_UNAVAILABLE"
+            else:
+                error_msg = str(exc)
+                error_code = "DATA_INSUFFICIENT"
+        elif isinstance(exc, IncompleteResponseError):
             error_msg = str(exc)
-            error_code = "DATA_INSUFFICIENT"
+            error_code = "LLM_OUTPUT_INCOMPLETE"
+        elif isinstance(exc, ValueError) and "tokens-per-minute limit" in str(exc):
+            error_msg = (
+                "The next agent prompt exceeds the configured Groq free-tier token budget. "
+                "Use Quick research depth or reduce selected analysts."
+            )
+            error_code = "LLM_REQUEST_TOO_LARGE"
         else:
             error_msg = "The Forex analysis provider failed. Please retry."
             error_code = "PROVIDER_ERROR"
@@ -2267,17 +2350,66 @@ def _run_forex_analysis(run_id: str, req: ForexAnalysisRequest) -> None:
                 "message": f"Forex analysis failed: {error_msg}",
             },
         )
-        logger.error("Forex analysis failed for run %s (%s)", run_id, type(exc).__name__)
+        logger.error(
+            "Forex analysis failed for run %s (%s)",
+            run_id,
+            type(exc).__name__,
+            exc_info=True,
+        )
+        logging.getLogger("uvicorn.error").error(
+            "Forex analysis failed for run %s (%s)",
+            run_id,
+            type(exc).__name__,
+            exc_info=True,
+        )
 
 
 def _forex_worker_entry(run_id: str, req: ForexAnalysisRequest) -> None:
     """Track worker lifetime so shutdown never closes its journal underneath it."""
+    # Older dashboard clients sent today's date-only value for a live run.
+    # Date-only cutoffs mean midnight UTC, so normalize that legacy request to
+    # the current instant. Explicit historical dates remain unchanged.
+    if (
+        req.account_source == "mt5"
+        and isinstance(req.date, str)
+        and len(req.date) == 10
+        and req.date == datetime.now(timezone.utc).date().isoformat()
+    ):
+        req = req.model_copy(update={"date": datetime.now(timezone.utc).isoformat()})
     tracker = UsageTracker(
         run_id=run_id,
         provider=req.provider or get_runtime_config().get("llm_provider"),
         model=req.quick_model or get_runtime_config().get("quick_think_llm"),
     )
     try:
+        # Acquire mandatory live news/calendar inputs before entering the graph
+        # or making any paid model call.  Pin the successfully observed cutoff
+        # onto a copy so all downstream tools query the same snapshot.
+        if req.date is None and "forex_news" in req.analysts:
+            try:
+                cutoff = prepare_live_forex_context(req.pair)
+                req = req.model_copy(update={"date": cutoff})
+            except DataInsufficientError as exc:
+                error_msg = str(exc)
+                with _lock:
+                    if run_id in _forex_runs:
+                        _forex_runs[run_id].update(
+                            status="failed",
+                            finished_at=datetime.now(timezone.utc).isoformat(),
+                            error=error_msg,
+                            error_code="DATA_INSUFFICIENT",
+                        )
+                _emit_fx_event(
+                    run_id,
+                    "error",
+                    {
+                        "run_id": run_id,
+                        "error": error_msg,
+                        "code": "DATA_INSUFFICIENT",
+                        "message": f"Forex analysis failed: {error_msg}",
+                    },
+                )
+                return
         with track_usage(tracker):
             _run_forex_analysis(run_id, req)
     finally:
@@ -2290,6 +2422,7 @@ def _forex_worker_entry(run_id: str, req: ForexAnalysisRequest) -> None:
             if run_id in _forex_completed_reports:
                 _forex_completed_reports[run_id]["usage"] = usage
             _forex_analysis_threads.discard(threading.current_thread())
+        _persist_forex_run(run_id)
 
 
 @router.post("/analyze")
@@ -2342,6 +2475,7 @@ async def start_forex_analysis(
         "report_id": None,
         "report_path": None,
         "usage": UsageTracker(run_id=run_id).summary(),
+        "persist_history": True,
     }
 
     with _lock:
@@ -2349,6 +2483,7 @@ async def start_forex_analysis(
         _forex_run_events[run_id] = []
         _forex_cancellations[run_id] = threading.Event()
         _prune_expired_forex_runs()
+    _persist_forex_run(run_id)
 
     worker = threading.Thread(
         target=_forex_worker_entry,
@@ -2376,6 +2511,7 @@ async def start_forex_analysis(
 @router.get("/runs")
 async def list_forex_runs():
     """List all Forex agent analysis runs."""
+    _load_persisted_forex_history()
     _prune_expired_forex_runs()
     def _sort_key(run: dict[str, Any]) -> tuple[float, str]:
         started = run.get("started_at")
@@ -2420,6 +2556,7 @@ async def cancel_forex_run(run_id: str):
 @router.get("/runs/{run_id}")
 async def get_forex_run(run_id: str):
     """Get metadata and report for a specific Forex analysis run."""
+    _load_persisted_forex_history()
     _prune_expired_forex_runs()
     with _lock:
         if run_id not in _forex_runs:
@@ -2430,6 +2567,7 @@ async def get_forex_run(run_id: str):
 @router.get("/runs/{run_id}/events")
 async def stream_forex_events(run_id: str, request: Request):
     """Server-Sent Events (SSE) streaming endpoint for live agent node progress."""
+    _load_persisted_forex_history()
     _prune_expired_forex_runs()
     with _lock:
         if run_id not in _forex_runs:
@@ -2487,6 +2625,7 @@ async def stream_forex_events_alias(run_id: str, request: Request):
 @router.get("/analyze/{run_id}/report")
 async def get_forex_report_alias(run_id: str):
     """Compatibility alias for /runs/{run_id} report retrieval."""
+    _load_persisted_forex_history()
     _prune_expired_forex_runs()
     with _lock:
         if run_id not in _forex_runs:
@@ -2501,6 +2640,7 @@ async def get_forex_report_alias(run_id: str):
 @router.get("/analyze/{run_id}/status")
 async def get_forex_status_alias(run_id: str):
     """Compatibility alias for run status inspection."""
+    _load_persisted_forex_history()
     _prune_expired_forex_runs()
     with _lock:
         if run_id not in _forex_runs:
@@ -3378,8 +3518,19 @@ async def get_dashboard_overview(
     account_available = False
     if is_conn:
         try:
-            acc = conn.get_account_info() if hasattr(conn, "get_account_info") else None
+            acc = mt5.get_account_info()
             if acc:
+                # Initialization may attach to the account already active in the
+                # terminal without explicit login/server arguments. In that case
+                # the authoritative identity is the observed account snapshot,
+                # not the connection manager's optional request parameters.
+                observed_server = str(getattr(acc, "server", "") or "").strip()
+                observed_login = getattr(acc, "login", None)
+                if observed_server:
+                    server_str = observed_server
+                if observed_login is not None:
+                    masked_login = mask_account_login(observed_login)
+
                 def optional_number(value):
                     if value is None:
                         return None
@@ -3405,7 +3556,7 @@ async def get_dashboard_overview(
     positions_available = False
     if is_conn:
         try:
-            positions = conn.get_positions() if hasattr(conn, "get_positions") else []
+            positions = mt5.get_open_positions()
             open_positions = [_safe_model_dump(p) for p in positions]
             positions_available = True
         except Exception:
@@ -3415,7 +3566,7 @@ async def get_dashboard_overview(
     orders_available = False
     if is_conn:
         try:
-            orders = conn.get_orders() if hasattr(conn, "get_orders") else []
+            orders = mt5.get_pending_orders()
             pending_orders = [_safe_model_dump(o) for o in orders]
             orders_available = True
         except Exception:
@@ -3484,6 +3635,7 @@ async def get_dashboard_overview(
         if getattr(t, "status", None) == TradeStatus.CLOSED or getattr(t, "close_time_utc", None)
     ]
     perf = ForexPerformanceEngine().calculate_metrics(closed_trades)
+    has_performance_evidence = bool(closed_trades)
     is_adequate = len(closed_trades) >= 30
     sample_warning = (
         None if is_adequate
@@ -3491,12 +3643,15 @@ async def get_dashboard_overview(
     )
 
     performance_summary = {
-        "expectancy": perf.expectancy,
-        "profit_factor": perf.profit_factor,
-        "average_r": perf.average_r,
-        "max_drawdown_pct": perf.maximum_drawdown_pct,
-        "win_rate": perf.win_rate,
-        "win_rate_pct": perf.win_rate_pct,
+        # Zero is a valid calculated result only when at least one closed trade exists.
+        # With no observations these statistics are undefined, so fail closed instead
+        # of presenting synthetic zero-performance evidence in the dashboard.
+        "expectancy": perf.expectancy if has_performance_evidence else None,
+        "profit_factor": perf.profit_factor if has_performance_evidence else None,
+        "average_r": perf.average_r if has_performance_evidence else None,
+        "max_drawdown_pct": perf.maximum_drawdown_pct if has_performance_evidence else None,
+        "win_rate": perf.win_rate if has_performance_evidence else None,
+        "win_rate_pct": perf.win_rate_pct if has_performance_evidence else None,
         "trade_count": perf.trade_count,
         "net_profit": perf.net_profit,
         "is_sample_size_adequate": is_adequate,

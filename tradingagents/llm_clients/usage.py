@@ -35,6 +35,24 @@ def _usage_mapping(response: Any) -> dict[str, Any] | None:
     return None
 
 
+def _response_identity(response: Any) -> tuple[str | None, str | None]:
+    """Return provider/model reported for this specific response, when present."""
+    metadata = getattr(response, "response_metadata", None)
+    if not isinstance(metadata, dict):
+        return None, None
+
+    provider = metadata.get("model_provider") or metadata.get("provider")
+    model = (
+        metadata.get("model_name")
+        or metadata.get("model")
+        or metadata.get("model_id")
+    )
+    return (
+        str(provider) if provider else None,
+        str(model) if model else None,
+    )
+
+
 @dataclass
 class UsageTracker:
     """Aggregate actual provider-reported token usage for one application run."""
@@ -64,6 +82,11 @@ class UsageTracker:
         if total_tokens <= 0 and input_tokens <= 0 and output_tokens <= 0:
             return
 
+
+        response_provider, response_model = _response_identity(response)
+        provider = response_provider or self.provider
+        model = response_model or self.model
+
         response_id = getattr(response, "id", None) or f"object:{id(response)}"
         signature_payload = {
             "response_id": response_id,
@@ -72,7 +95,7 @@ class UsageTracker:
             "total": total_tokens,
             "cached": cached_tokens,
             "reasoning": reasoning_tokens,
-            "model": self.model,
+            "model": model,
         }
         signature = hashlib.sha256(
             json.dumps(signature_payload, sort_keys=True).encode("utf-8")
@@ -80,8 +103,8 @@ class UsageTracker:
         record = {
             "usage_id": signature,
             "run_id": self.run_id,
-            "provider": self.provider,
-            "model": self.model,
+            "provider": provider,
+            "model": model,
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
             "total_tokens": total_tokens,

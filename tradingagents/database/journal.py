@@ -111,6 +111,78 @@ class ForexTradeJournal:
                 self._mem_conn.close()
             self._mem_conn = None
 
+    def save_dashboard_analysis_run(
+        self,
+        run: dict[str, Any],
+        report: dict[str, Any] | None = None,
+    ) -> None:
+        """Upsert restart-safe dashboard run metadata and an optional report."""
+        run_id = str(run["run_id"])
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            conn = self._get_connection()
+            should_close = conn != self._mem_conn
+            try:
+                with conn:
+                    conn.execute(
+                        """
+                        INSERT INTO dashboard_analysis_runs (
+                            run_id, run_type, status, run_json, report_json,
+                            started_at_utc, finished_at_utc, updated_at_utc
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(run_id) DO UPDATE SET
+                            status=excluded.status,
+                            run_json=excluded.run_json,
+                            report_json=COALESCE(excluded.report_json, dashboard_analysis_runs.report_json),
+                            finished_at_utc=excluded.finished_at_utc,
+                            updated_at_utc=excluded.updated_at_utc
+                        """,
+                        (
+                            run_id,
+                            str(run.get("run_type") or "forex"),
+                            str(run.get("status") or "unknown"),
+                            json.dumps(run, sort_keys=True, default=str),
+                            json.dumps(report, sort_keys=True, default=str) if report is not None else None,
+                            str(run.get("started_at") or now),
+                            run.get("finished_at"),
+                            now,
+                        ),
+                    )
+            finally:
+                if should_close:
+                    conn.close()
+
+    def list_dashboard_analysis_runs(
+        self,
+        *,
+        run_type: str | None = None,
+        limit: int = 500,
+    ) -> list[tuple[dict[str, Any], dict[str, Any] | None]]:
+        """Return newest persisted dashboard runs with their optional reports."""
+        with self._lock:
+            conn = self._get_connection()
+            should_close = conn != self._mem_conn
+            try:
+                if run_type:
+                    rows = conn.execute(
+                        """SELECT run_json, report_json FROM dashboard_analysis_runs
+                           WHERE run_type=? ORDER BY started_at_utc DESC LIMIT ?""",
+                        (run_type, max(1, int(limit))),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        """SELECT run_json, report_json FROM dashboard_analysis_runs
+                           ORDER BY started_at_utc DESC LIMIT ?""",
+                        (max(1, int(limit)),),
+                    ).fetchall()
+                return [
+                    (json.loads(row[0]), json.loads(row[1]) if row[1] else None)
+                    for row in rows
+                ]
+            finally:
+                if should_close:
+                    conn.close()
+
     def save_llm_usage(self, records: list[dict[str, Any]]) -> int:
         """Persist de-duplicated provider token counters; never stores content."""
         if not records:

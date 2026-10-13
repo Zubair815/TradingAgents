@@ -48,6 +48,7 @@ class AnalysisRequest(Record):
     provider: str | None = None
     quick_model: str | None = None
     deep_model: str | None = None
+    max_tokens: int | None = Field(default=None, ge=512, le=100_000)
     account_balance: float | None = Field(default=None, gt=0)
     account_equity: float | None = Field(default=None, gt=0)
     account_free_margin: float | None = Field(default=None, ge=0)

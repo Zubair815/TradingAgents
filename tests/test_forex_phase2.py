@@ -91,6 +91,26 @@ def test_weekend_gap_allowed_but_stale_weekend_data_rejected():
         validate_candles(candles(), Timeframe.H1, as_of="2026-03-14T12:00Z", max_age_seconds=7200)
 
 
+def test_monday_daily_series_waits_for_next_daily_close_before_stale():
+    frame = pd.DataFrame({
+        "Date": pd.to_datetime(["2026-10-08T21:00:00Z"]),
+        "Open": [1.16],
+        "High": [1.17],
+        "Low": [1.15],
+        "Close": [1.165],
+        "Volume": [100],
+    })
+
+    result = validate_candles(
+        frame,
+        Timeframe.D1,
+        as_of="2026-10-12T18:30:00Z",
+        max_age_seconds=Timeframe.D1.seconds * 2,
+    )
+
+    assert len(result) == 1
+
+
 @pytest.mark.parametrize("bid,ask,stamp,detail", [
     (0, 1.08, CUTOFF, "prices"), (1.08, 1.07, CUTOFF, "prices"),
     (1.08, 1.081, CUTOFF, "spread"),
@@ -119,6 +139,29 @@ def test_mt5_default_and_explicit_labeled_fallback(monkeypatch):
         with pytest.raises(DataInsufficientError, match="corrupt"):
             fetch_forex_candles("EURUSD", observer=observer, as_of=CUTOFF, allow_fallback=True)
         assert fallback.call_count == 1
+
+
+def test_historical_spread_uses_sanity_bound_not_live_entry_limit(monkeypatch):
+    observed = {}
+    source = candles().assign(spread_pips=12.0)
+    monkeypatch.setattr(
+        "tradingagents.dataflows.forex_data._fetch_yahoo_candles",
+        Mock(return_value=source),
+    )
+
+    def capture(frame, timeframe, **kwargs):
+        observed.update(kwargs)
+        return frame
+
+    monkeypatch.setattr("tradingagents.dataflows.forex_data.validate_candles", capture)
+    with config_scope({
+        "forex_market_source": "yahoo",
+        "forex_max_spread_pips": 5.0,
+        "forex_quote_sanity_max_spread_pips": 1000.0,
+    }):
+        fetch_forex_candles("EURUSD", as_of=CUTOFF)
+
+    assert observed["max_spread_pips"] == 1000.0
 
 
 def test_required_timeframe_failure_propagates(monkeypatch):

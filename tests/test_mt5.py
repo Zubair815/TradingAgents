@@ -684,6 +684,22 @@ class TestMT5ObserverTicksAndCandles:
         assert tick.spread_pips == pytest.approx(1.2, 0.2)
         assert tick.time.tzinfo == timezone.utc
 
+    def test_xm_tick_normalizes_broker_wall_clock_epoch(self):
+        mock_api = MockMT5API()
+        broker_wall = datetime(2026, 10, 8, 3, 39, 1, tzinfo=timezone.utc)
+        mock_api.symbol_info_tick = MagicMock(return_value=MagicMock(
+            time=int(broker_wall.timestamp()), bid=1.08500, ask=1.08512,
+            last=0.0, volume=0.0, flags=1122,
+        ))
+        manager = MT5ConnectionManager(mt5_api=mock_api, server="XMGlobal-MT5 2")
+        observer = MT5Observer(connection=manager)
+
+        with patch("tradingagents.dataflows.forex_quality.datetime") as clock:
+            clock.now.return_value = datetime(2026, 10, 8, 0, 39, 2, tzinfo=timezone.utc)
+            tick = observer.get_current_tick("EURUSD")
+
+        assert tick.time == datetime(2026, 10, 8, 0, 39, 1, tzinfo=timezone.utc)
+
     def test_get_candles(self):
         mock_api = MockMT5API()
         mgr = MT5ConnectionManager(mt5_api=mock_api)

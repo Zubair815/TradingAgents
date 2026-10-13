@@ -61,16 +61,29 @@ def sample_process_resources() -> ProcessResources:
                 ("PrivateUsage", ctypes.c_size_t),
             ]
 
-        process = ctypes.windll.kernel32.GetCurrentProcess()
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        psapi = ctypes.WinDLL("psapi", use_last_error=True)
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel32.GetProcessHandleCount.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        kernel32.GetProcessHandleCount.restype = wintypes.BOOL
+        psapi.GetProcessMemoryInfo.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(ProcessMemoryCountersEx),
+            wintypes.DWORD,
+        ]
+        psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
+
+        process = kernel32.GetCurrentProcess()
         counters = ProcessMemoryCountersEx()
         counters.cb = ctypes.sizeof(counters)
-        if ctypes.windll.psapi.GetProcessMemoryInfo(
-            process, ctypes.byref(counters), counters.cb
-        ):
-            rss_bytes = int(counters.WorkingSetSize)
-            private_bytes = int(counters.PrivateUsage)
+        if not psapi.GetProcessMemoryInfo(process, ctypes.byref(counters), counters.cb):
+            raise OSError(ctypes.get_last_error(), "GetProcessMemoryInfo failed")
+        rss_bytes = int(counters.WorkingSetSize)
+        private_bytes = int(counters.PrivateUsage)
+        if rss_bytes <= 0:
+            raise OSError("GetProcessMemoryInfo returned an invalid working-set size")
         handles = wintypes.DWORD()
-        if ctypes.windll.kernel32.GetProcessHandleCount(process, ctypes.byref(handles)):
+        if kernel32.GetProcessHandleCount(process, ctypes.byref(handles)):
             handle_count = int(handles.value)
     else:
         import resource

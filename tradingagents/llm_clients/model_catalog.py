@@ -96,6 +96,8 @@ _MINIMAX_MODELS: dict[str, list[ModelOption]] = {
 MODEL_OPTIONS: ProviderModeOptions = {
     "openai": {
         "quick": [
+            ("GPT-6 Luna - Lowest-cost focused model", "gpt-6-luna"),
+            ("GPT-6.1 Sol - Near-frontier quality", "gpt-6.1-sol"),
             ("GPT-5.6 Luna - Fast, cost-efficient frontier", "gpt-5.6-luna"),
             ("GPT-5.6 Terra - Balances intelligence and cost", "gpt-5.6-terra"),
             ("GPT-5.4 Mini - Fast, strong coding and tool use", "gpt-5.4-mini"),
@@ -103,6 +105,8 @@ MODEL_OPTIONS: ProviderModeOptions = {
         ],
         "deep": [
             ("GPT-6 Astra - Latest frontier reasoning", "gpt-6-astra"),
+            ("GPT-6.1 Sol - Near-Astra quality at lower cost", "gpt-6.1-sol"),
+            ("GPT-6 Luna - Cost-efficient alternative", "gpt-6-luna"),
             ("GPT-5.6 - Frontier reasoning (Sol)", "gpt-5.6"),
             ("GPT-5.6 Terra - Balances intelligence and cost", "gpt-5.6-terra"),
             ("GPT-5.5 - Previous-gen frontier, 1M context", "gpt-5.5"),
@@ -217,7 +221,18 @@ MODEL_OPTIONS: ProviderModeOptions = {
             ("Custom model ID", "custom"),
         ],
     },
-    "groq": _CUSTOM_ONLY,
+    "groq": {
+        "quick": [
+            ("GPT-OSS 20B - Fast free-tier testing", "openai/gpt-oss-20b"),
+            ("GPT-OSS 120B - Stronger reasoning", "openai/gpt-oss-120b"),
+            ("Custom model ID", "custom"),
+        ],
+        "deep": [
+            ("GPT-OSS 120B - Stronger free-tier reasoning", "openai/gpt-oss-120b"),
+            ("GPT-OSS 20B - Faster alternative", "openai/gpt-oss-20b"),
+            ("Custom model ID", "custom"),
+        ],
+    },
     "nvidia": _CUSTOM_ONLY,
     # Bedrock model IDs / cross-region inference profile IDs are user-specified.
     "bedrock": _CUSTOM_ONLY,

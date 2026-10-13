@@ -45,6 +45,7 @@ __all__ = [
     "get_language_instruction",
     "create_msg_delete",
     "report_or_absent",
+    "prompt_excerpt",
     "get_portfolio_context_from_state",
 ]
 
@@ -230,6 +231,26 @@ def report_or_absent(text: str, source: str) -> str:
     if text:
         return text
     return f"(No {source} report in this run: it is not available, not an empty finding.)"
+
+
+def prompt_excerpt(text: str, *, max_chars: int = 6000) -> str:
+    """Bound downstream prompt context while retaining both conclusions and details.
+
+    Full reports remain in graph state and persistence. This only prevents a
+    later debate/manager prompt from exceeding hosted-model request limits.
+    """
+    cleaned = (text or "").strip()
+    if max_chars < 200:
+        raise ValueError("max_chars must be at least 200")
+    if len(cleaned) <= max_chars:
+        return cleaned
+    head_size = int(max_chars * 0.7)
+    tail_size = max_chars - head_size
+    return (
+        cleaned[:head_size].rstrip()
+        + "\n\n[... middle omitted from debate prompt; full report remains saved ...]\n\n"
+        + cleaned[-tail_size:].lstrip()
+    )
 
 
 def get_portfolio_context_from_state(state: Mapping[str, Any]) -> str:

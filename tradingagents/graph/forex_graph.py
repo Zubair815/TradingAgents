@@ -609,6 +609,9 @@ class ForexTradingAgentsGraph:
         self.risk_engine = risk_engine or ForexRiskEngine(default_limits=self.risk_limits)
         self.sizing_engine = sizing_engine or ForexPositionSizingEngine()
         self.risk_context = risk_context
+        self.account_source = (
+            "mt5" if risk_context is not None else "manual" if sizing_account is not None else "mt5"
+        )
         self.sizing_account = (
             risk_context.account if risk_context is not None else (sizing_account or ForexAccountProfile())
         )
@@ -842,6 +845,25 @@ class ForexTradingAgentsGraph:
         init_state["forex_context_timeframes"] = ctx_tf_strs
         init_state["timeframe"] = exec_tf_str
         init_state["higher_timeframes"] = ctx_tf_strs
+        graph_config = getattr(self, "config", {})
+        quick_llm = getattr(self, "quick_thinking_llm", None)
+        deep_llm = getattr(self, "deep_thinking_llm", None)
+        init_state["forex_quick_model"] = str(
+            getattr(quick_llm, "model_name", None)
+            or getattr(quick_llm, "model", None)
+            or graph_config.get("quick_think_llm")
+            or ""
+        )
+        init_state["forex_deep_model"] = str(
+            getattr(deep_llm, "model_name", None)
+            or getattr(deep_llm, "model", None)
+            or graph_config.get("deep_think_llm")
+            or ""
+        )
+        risk_limits = getattr(self, "risk_limits", None)
+        init_state["forex_min_rr"] = float(
+            getattr(risk_limits, "min_risk_reward_ratio", 1.5)
+        )
         init_state["forex_proposal_id"] = None
         init_state["forex_proposal"] = None
         init_state["forex_risk_decision"] = None
@@ -890,7 +912,7 @@ class ForexTradingAgentsGraph:
                         req_kwargs["account_leverage"] = self.risk_context.account.leverage
                     if self.risk_context.account.currency:
                         req_kwargs["account_currency"] = self.risk_context.account.currency
-                    if self.risk_context.source.value.lower() == "manual" and all(
+                    if self.account_source == "manual" and all(
                         k in req_kwargs for k in ("account_balance", "account_equity", "account_free_margin", "account_leverage", "account_currency")
                     ):
                         req_kwargs["account_source"] = "manual"
@@ -921,6 +943,9 @@ class ForexTradingAgentsGraph:
                 journal_obj.research.save_snapshot(snapshot)
             except Exception as res_exc:
                 logger.warning("Failed creating research run/snapshot: %s", res_exc)
+                run_id = None
+                snapshot_id = None
+                version_id = None
 
         init_state["forex_run_id"] = run_id
         init_state["forex_snapshot_id"] = snapshot_id

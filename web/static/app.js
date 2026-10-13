@@ -98,6 +98,7 @@
     analystToggles: $$('#analystToggles .analyst-toggle'),
     btnRun:         $('#btnRun'),
     btnCancelAnalysis: $('#btnCancelAnalysis'),
+    btnCancelPipeline: $('#btnCancelPipeline'),
     pipelineCard:   $('#pipelineCard'),
     pipelineContent:$('#pipelineContent'),
     reportContent:  $('#reportContent'),
@@ -307,6 +308,18 @@
     { id: 'trader', label: 'Trader Proposal', icon: '💼' },
     { id: 'risk_evaluator', label: 'Deterministic Risk Engine', icon: '🛡️' },
   ];
+  let activeForexPipelineNodes = FOREX_PIPELINE_NODES;
+
+  function selectedForexPipelineNodes(analysts) {
+    const analystStages = {
+      technical_analyst: 'forex_technical',
+      macro_analyst: 'forex_macro',
+      news_analyst: 'forex_news',
+    };
+    return FOREX_PIPELINE_NODES.filter(node => (
+      !analystStages[node.id] || analysts.includes(analystStages[node.id])
+    ));
+  }
 
   // ---- Init ----
   async function init() {
@@ -416,6 +429,7 @@
     DOM.provider.addEventListener('change', updateModelSelects);
     DOM.form.addEventListener('submit', handleSubmit);
     if (DOM.btnCancelAnalysis) DOM.btnCancelAnalysis.addEventListener('click', cancelActiveAnalysis);
+    if (DOM.btnCancelPipeline) DOM.btnCancelPipeline.addEventListener('click', cancelActiveAnalysis);
     DOM.reportModalClose.addEventListener('click', closeReportModal);
     DOM.reportOverlay.addEventListener('click', (e) => {
       if (e.target === DOM.reportOverlay) closeReportModal();
@@ -896,10 +910,10 @@
         DOM.apiKeyGroup.style.display = 'block';
       }
       DOM.serverDot.style.background = 'var(--green)';
-      DOM.serverStatus.textContent = 'Connected';
+      DOM.serverStatus.textContent = 'Dashboard Server: Connected';
     } catch (err) {
       DOM.serverDot.style.background = 'var(--red)';
-      DOM.serverStatus.textContent = 'Disconnected';
+      DOM.serverStatus.textContent = 'Dashboard Server: Disconnected';
       showToast('Failed to connect to server', 'error');
     }
   }
@@ -1435,10 +1449,13 @@
     const accountAvailable = mt5.account_available === true;
 
     if (DOM.dashServerBadge) {
-      DOM.dashServerBadge.textContent = `Server: ${mt5.server || 'None'}`;
+      DOM.dashServerBadge.textContent = `Server: ${isConn && mt5.server ? mt5.server : 'Unavailable'}`;
     }
     if (DOM.dashLoginBadge) {
-      DOM.dashLoginBadge.textContent = `Account: ${mt5.masked_login || 'Not Set'}`;
+      const maskedLogin = isConn && mt5.masked_login && mt5.masked_login !== 'Not Set'
+        ? mt5.masked_login
+        : 'Unavailable';
+      DOM.dashLoginBadge.textContent = `Account: ${maskedLogin}`;
     }
 
     if (isConn && accountAvailable && acc) {
@@ -3457,7 +3474,10 @@
       execution_timeframe: timeframe,
       timeframe: timeframe,
       context_timeframes: contextTimeframes,
-      date: DOM.tradeDate ? (DOM.tradeDate.value || null) : null,
+      // Forex analysis is live. Historical/date-pinned evaluation belongs to
+      // the backtest workflow; a YYYY-MM-DD value would mean midnight UTC and
+      // incorrectly make today's intraday candles appear unavailable.
+      date: new Date().toISOString(),
       account_balance: accountSource === 'manual' ? Number(DOM.accountBalance.value) : null,
       account_equity: accountSource === 'manual' ? Number(DOM.accountEquity.value) : null,
       account_free_margin: accountSource === 'manual' ? Number(DOM.accountFreeMargin.value) : null,
@@ -3502,8 +3522,9 @@
 
       currentRunId = data.run_id;
       activePipelineType = 'forex';
-      if (DOM.btnCancelAnalysis) DOM.btnCancelAnalysis.style.display = 'block';
-      showPipeline(pair, `${timeframe} • ${riskPct}% Risk`, FOREX_PIPELINE_NODES);
+      setCancelControls(true);
+      activeForexPipelineNodes = selectedForexPipelineNodes(selectedAnalysts);
+      showPipeline(pair, `${timeframe} • ${riskPct}% Risk`, activeForexPipelineNodes);
       connectForexSSE(data.run_id, pair);
       showToast(`Forex analysis started for ${pair}`, 'success');
 
@@ -3517,7 +3538,7 @@
   async function cancelActiveAnalysis() {
     if (!currentRunId || !activePipelineType) return;
     const cancellingType = activePipelineType;
-    if (DOM.btnCancelAnalysis) DOM.btnCancelAnalysis.disabled = true;
+    setCancelControls(true, true);
     try {
       const prefix = activePipelineType === 'forex' ? '/api/forex/runs' : '/api/runs';
       const response = await apiFetch(`${prefix}/${encodeURIComponent(currentRunId)}/cancel`, {
@@ -3540,7 +3561,7 @@
         showToast('Analysis cancellation requested', 'info');
       }
     } catch (error) {
-      if (DOM.btnCancelAnalysis) DOM.btnCancelAnalysis.disabled = false;
+      setCancelControls(true, false);
       showToast(error.message || 'Cancellation failed', 'error');
     }
   }
@@ -3869,7 +3890,7 @@
 
       currentRunId = data.run_id;
       activePipelineType = 'equities';
-      if (DOM.btnCancelAnalysis) DOM.btnCancelAnalysis.style.display = 'block';
+      setCancelControls(true);
       showPipeline(payload.ticker, payload.date || 'today', EQUITIES_PIPELINE_NODES);
       connectEquitiesSSE(data.run_id);
       showToast(`Analysis started for ${payload.ticker}`, 'success');
@@ -3919,12 +3940,58 @@
       el.classList.add('active');
     }
 
-    const nodesList = activePipelineType === 'forex' ? FOREX_PIPELINE_NODES : EQUITIES_PIPELINE_NODES;
+    const nodesList = activePipelineType === 'forex' ? activeForexPipelineNodes : EQUITIES_PIPELINE_NODES;
     const progress = progressVal || (completedNodes.size / nodesList.length);
     const bar = document.getElementById('progressBar');
     const pct = document.getElementById('progressPercent');
     if (bar) bar.style.width = `${Math.min(100, Math.round(progress * 100))}%`;
     if (pct) pct.textContent = `${Math.min(100, Math.round(progress * 100))}%`;
+  }
+
+  function renderPipelineTerminal(status, message) {
+    const normalized = String(status || 'failed').toLowerCase();
+    const title = document.querySelector('.pipeline-title');
+    const pct = document.getElementById('progressPercent');
+    const bar = document.getElementById('progressBar');
+    $$('.pipeline-node.active').forEach(el => el.classList.remove('active'));
+    if (title) {
+      title.textContent = normalized === 'completed'
+        ? 'Analysis completed'
+        : normalized === 'cancelled' ? 'Analysis cancelled' : 'Analysis failed';
+      title.title = message || '';
+    }
+    if (pct) pct.textContent = normalized === 'completed' ? '100%' : normalized.toUpperCase();
+    if (bar && normalized === 'completed') bar.style.width = '100%';
+    if (bar && normalized !== 'completed') bar.style.background = 'var(--red, #ef4444)';
+  }
+
+  async function reconcileForexRun(runId, { notify = false } = {}) {
+    try {
+      const response = await apiFetch(`/api/forex/runs/${encodeURIComponent(runId)}`);
+      if (!response.ok) return false;
+      const data = await response.json();
+      const run = data.run || {};
+      const status = String(run.status || '').toLowerCase();
+      if (!['completed', 'failed', 'cancelled', 'stale'].includes(status)) return false;
+      if (eventSource) {
+        eventSource.close();
+        eventSource = null;
+      }
+      renderPipelineTerminal(status, run.error);
+      if (status === 'completed' && data.report) {
+        await loadForexReport(runId);
+      } else {
+        const message = run.error || (status === 'cancelled'
+          ? 'Analysis cancelled. No new report was produced.'
+          : 'Forex analysis failed. No completed report is available.');
+        renderAnalysisFailure(message, status === 'cancelled' ? 'cancelled' : 'failed');
+        if (notify) showToast(message, status === 'cancelled' ? 'info' : 'error');
+      }
+      resetRunButton();
+      return true;
+    } catch (_) {
+      return false;
+    }
   }
 
   // ---- SSE: Forex ----
@@ -3937,9 +4004,9 @@
     eventSource = new EventSource(`/api/forex/runs/${encodeURIComponent(runId)}/events`);
 
     // Dynamic pipeline events
-    FOREX_PIPELINE_NODES.forEach((node, idx) => {
+    activeForexPipelineNodes.forEach((node, idx) => {
       eventSource.addEventListener(node.id, (e) => {
-        const progress = (idx + 1) / (FOREX_PIPELINE_NODES.length + 1);
+        const progress = (idx + 1) / (activeForexPipelineNodes.length + 1);
         updatePipelineStep(node.id, progress);
         try {
           const data = JSON.parse(e.data);
@@ -3961,7 +4028,7 @@
         eventSource = null;
       }
 
-      FOREX_PIPELINE_NODES.forEach(n => {
+      activeForexPipelineNodes.forEach(n => {
         const el = document.getElementById(`node-${n.id}`);
         if (el) { el.classList.remove('active'); el.classList.add('done'); }
       });
@@ -3990,9 +4057,11 @@
       try {
         const data = JSON.parse(e.data);
         const message = apiErrorMessage(data, data.message || 'Forex analysis failed');
+        renderPipelineTerminal('failed', message);
         showToast(message, 'error');
         renderAnalysisFailure(message);
       } catch (_) {
+        renderPipelineTerminal('failed', 'Forex analysis failed');
         showToast('Forex analysis stream error', 'error');
         renderAnalysisFailure('The Forex analysis progress stream failed. No completed report is available.');
       }
@@ -4005,18 +4074,21 @@
       }
       const pct = document.getElementById('progressPercent');
       if (pct) pct.textContent = 'Cancelled';
+      renderPipelineTerminal('cancelled', 'Analysis cancelled');
       resetRunButton();
       showToast('Forex analysis cancelled', 'info');
       renderAnalysisFailure('Analysis cancelled. No new report was produced.', 'cancelled');
       loadRuns();
     });
 
-    eventSource.onerror = () => {
+    eventSource.onerror = async () => {
       if (eventSource) {
         eventSource.close();
         eventSource = null;
       }
+      if (await reconcileForexRun(runId, { notify: true })) return;
       resetRunButton();
+      renderPipelineTerminal('failed', 'Connection to the Forex analysis progress stream was lost.');
       renderAnalysisFailure('Connection to the Forex analysis progress stream was lost.');
     };
   }
@@ -4181,6 +4253,63 @@
     }
   }
 
+  function renderReportMarkdown(markdown) {
+    const source = String(markdown || '').trim();
+    if (!source) return '<div class="report-empty">Not included in this run.</div>';
+    const inline = value => escapeText(value)
+      .replace(/`([^`]+)`/g, '<code>$1</code>')
+      .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+      .replace(/\*([^*]+)\*/g, '<em>$1</em>');
+    const lines = source.split(/\r?\n/);
+    const html = [];
+    let index = 0;
+    while (index < lines.length) {
+      const line = lines[index].trim();
+      if (!line) { index += 1; continue; }
+      if (/^\|.*\|$/.test(line) && index + 1 < lines.length && /^\|?[\s:|-]+\|?$/.test(lines[index + 1].trim())) {
+        const rows = [];
+        const cells = text => text.replace(/^\||\|$/g, '').split('|').map(cell => cell.trim());
+        const headers = cells(line);
+        index += 2;
+        while (index < lines.length && /^\|.*\|$/.test(lines[index].trim())) {
+          rows.push(cells(lines[index].trim()));
+          index += 1;
+        }
+        html.push(`<div class="report-table-wrap"><table class="report-markdown-table"><thead><tr>${headers.map(cell => `<th>${inline(cell)}</th>`).join('')}</tr></thead><tbody>${rows.map(row => `<tr>${row.map(cell => `<td>${inline(cell)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`);
+        continue;
+      }
+      const heading = line.match(/^(#{1,4})\s+(.+)$/);
+      if (heading) {
+        const level = Math.min(4, heading[1].length + 1);
+        html.push(`<h${level}>${inline(heading[2])}</h${level}>`);
+        index += 1;
+        continue;
+      }
+      if (/^[-*]\s+/.test(line)) {
+        const items = [];
+        while (index < lines.length && /^[-*]\s+/.test(lines[index].trim())) {
+          items.push(lines[index].trim().replace(/^[-*]\s+/, ''));
+          index += 1;
+        }
+        html.push(`<ul>${items.map(item => `<li>${inline(item)}</li>`).join('')}</ul>`);
+        continue;
+      }
+      if (/^\d+\.\s+/.test(line)) {
+        const items = [];
+        while (index < lines.length && /^\d+\.\s+/.test(lines[index].trim())) {
+          items.push(lines[index].trim().replace(/^\d+\.\s+/, ''));
+          index += 1;
+        }
+        html.push(`<ol>${items.map(item => `<li>${inline(item)}</li>`).join('')}</ol>`);
+        continue;
+      }
+      if (/^---+$/.test(line)) { html.push('<hr>'); index += 1; continue; }
+      html.push(`<p>${inline(line)}</p>`);
+      index += 1;
+    }
+    return html.join('');
+  }
+
   function renderForexReport(data) {
     const prop = data.proposal || {};
     const risk = data.risk_decision || {};
@@ -4191,15 +4320,24 @@
     const mem = data.memory || {};
     const prov = data.provenance || {};
     const reportText = data.report || data.final_decision || '';
+    const account = data.account_snapshot || {};
+    const usage = data.usage || {};
 
     // 1. Direction Determination
-    let action = (prop.action || data.signal || 'UNAVAILABLE').toUpperCase();
+    let action = (risk.approved_action || prop.action || data.signal || 'UNAVAILABLE').toUpperCase();
     if (risk.decision === 'REJECT') {
       action = 'REJECT';
     }
     const actionClass = action === 'LONG' ? 'long' : action === 'SHORT' ? 'short' : action === 'REJECT' ? 'reject' : 'no_trade';
+    const isNoTrade = action === 'NO_TRADE';
+    const executable = ['LONG', 'SHORT'].includes(action)
+      && prop.entry_price != null && prop.stop_loss != null && prop.take_profit_1 != null
+      && Number(risk.approved_lot_size || prop.suggested_lot_size || sizing.recommended_lot_size || 0) > 0;
     const decisionAction = risk.decision || 'UNAVAILABLE';
-    const decisionColor = decisionAction === 'APPROVE' ? 'var(--green)' : decisionAction === 'REJECT' ? 'var(--red)' : 'var(--amber)';
+    const decisionColor = isNoTrade ? 'var(--amber)' : decisionAction === 'APPROVE' ? 'var(--green)' : decisionAction === 'REJECT' ? 'var(--red)' : 'var(--amber)';
+    const riskLabel = isNoTrade && decisionAction === 'APPROVE'
+      ? 'Capital Preservation Approved'
+      : executable && decisionAction === 'APPROVE' ? 'Trade Approved' : `Risk Engine: ${decisionAction}`;
 
     // Risk Checks List
     const passedChecks = (risk.risk_checks_passed && risk.risk_checks_passed.length > 0)
@@ -4228,9 +4366,24 @@
       marginStr = `$${Number(sizing.margin_required).toFixed(2)}`;
     }
 
+    const researchPanels = [
+      ['technical', 'Technical', research.technical || data.technical_report],
+      ['macro', 'Macro', research.macro || data.macro_report],
+      ['news', 'News', research.news || data.news_report],
+      ['bull', 'Bull Case', research.bull_case || debate.bull_history],
+      ['bear', 'Bear Case', research.bear_case || debate.bear_history],
+      ['manager', 'Manager', research.manager_synthesis || debate.judge_decision],
+    ];
+    const lessonStatus = lessons.length
+      ? `${lessons.length} historical lesson${lessons.length === 1 ? '' : 's'} applied to this run.`
+      : 'No historical lessons were applied to this run.';
+    const plainDecision = isNoTrade
+      ? 'No executable trade was approved. Capital remains unallocated and risk is 0%.'
+      : executable ? `${action} trade approved with complete execution geometry.`
+        : 'The analysis produced a directional opinion, but no complete executable trade was approved.';
+
     DOM.reportContent.innerHTML = `
       <div class="decision-report-container">
-        <!-- 1. DIRECTION & HEADER BANNER -->
         <div class="decision-banner">
           <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
             <span class="direction-tag ${actionClass}">
@@ -4244,31 +4397,49 @@
                 </span>
               </h2>
               <div style="font-size:0.75rem; color:var(--text-muted); font-family:var(--font-mono); margin-top:2px;">
-                Order: ${escapeText(prop.order_type || 'Unavailable')} • Run ID: ${escapeText(data.run_id || '-')}
+                  ${executable ? `Order: ${escapeText(prop.order_type || 'Unavailable')} • ` : ''}Run ID: ${escapeText(data.run_id || '-')}
               </div>
             </div>
           </div>
           <div style="display:flex; align-items:center; gap:8px;">
             <span class="signal-badge" style="background:${decisionColor}20; color:${decisionColor}; border:1px solid ${decisionColor}; font-size:0.82rem; padding:6px 14px; font-weight:700;">
-              Risk Engine: ${escapeText(decisionAction)}
+              ${escapeText(riskLabel)}
             </span>
           </div>
         </div>
 
-        ${prop.trade_rationale_summary ? `
-          <div style="background:var(--bg-card); padding:1rem 1.25rem; border-radius:var(--radius-md); border-left:4px solid var(--cyan); border:1px solid var(--border); border-left-width:4px;">
-            <strong style="color:var(--cyan); font-size:0.82rem; text-transform:uppercase; letter-spacing:0.04em;">Executive Thesis:</strong>
-            <p style="margin:4px 0 0 0; font-size:0.88rem; color:var(--text-primary); line-height:1.5;">${escapeText(prop.trade_rationale_summary)}</p>
-            <span class="stat-sub">Model confidence: ${prop.confidence == null ? 'Unavailable' : escapeText(`${Number(prop.confidence).toFixed(1)}% raw score`)}</span>
-          </div>
-        ` : ''}
+        <div class="report-primary-tabs" role="tablist" aria-label="Decision report sections">
+          ${[['overview','Overview'],['trade','Trade Plan'],['market','Market'],['research','Research'],['risk','Risk & Audit']].map(([id,label], index) => `
+            <button type="button" class="report-primary-tab ${index === 0 ? 'active' : ''}" data-report-tab="${id}" role="tab" aria-selected="${index === 0}">${label}</button>
+          `).join('')}
+        </div>
 
-        <!-- 2. PROPOSAL GEOMETRY CARD -->
+        <section class="report-tab-panel active" data-report-panel="overview" role="tabpanel">
+          <div class="decision-section report-decision-summary">
+            <div class="report-kicker">Authoritative final decision</div>
+            <h3>${escapeText(action.replace('_', ' '))}</h3>
+            <p>${escapeText(plainDecision)}</p>
+            <div class="proposal-meta-grid">
+              <div class="proposal-meta-item"><span class="proposal-meta-label">Market bias</span><span class="proposal-meta-value">${escapeText(prop.setup_type || 'Unavailable')}</span></div>
+              <div class="proposal-meta-item"><span class="proposal-meta-label">Approved risk</span><span class="proposal-meta-value">${risk.max_risk_percent != null ? `${risk.max_risk_percent}%` : 'Unavailable'}</span></div>
+              <div class="proposal-meta-item"><span class="proposal-meta-label">Approved size</span><span class="proposal-meta-value">${risk.approved_lot_size != null ? `${risk.approved_lot_size} lots` : 'Unavailable'}</span></div>
+              <div class="proposal-meta-item"><span class="proposal-meta-label">Model confidence</span><span class="proposal-meta-value">${prop.confidence == null ? 'Unavailable' : `${Number(prop.confidence).toFixed(1)}%`}</span></div>
+            </div>
+          </div>
+          <div class="decision-section">
+            <div class="decision-section-title">Why this decision?</div>
+            ${passedChecks.length ? `<ul class="report-reason-list">${passedChecks.map(item => `<li>${escapeText(item)}</li>`).join('')}</ul>` : '<div class="report-empty">No concise deterministic explanation was stored.</div>'}
+            ${isNoTrade && prop.reasoning ? `<details class="candidate-idea"><summary>View unapproved candidate idea from the model</summary><div class="report-markdown">${renderReportMarkdown(prop.reasoning)}</div></details>` : ''}
+          </div>
+        </section>
+
+        <section class="report-tab-panel" data-report-panel="trade" role="tabpanel" hidden>
         <div class="decision-section">
           <div class="decision-section-title">
             <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
             Trade Proposal &amp; Execution Geometry
           </div>
+          ${!executable ? `<div class="no-executable-trade"><strong>No executable trade</strong><span>The structured decision contains no approved entry, stop, target, or positive position size. Any directional prices in agent prose are research candidates only.</span></div>` : `
           <div class="proposal-meta-grid">
             <div class="proposal-meta-item">
               <span class="proposal-meta-label">Entry Level</span>
@@ -4311,6 +4482,7 @@
               <span class="proposal-meta-sub">${sizing.margin_required != null ? 'Stored sizing result' : 'Unavailable'}</span>
             </div>
           </div>
+          `}
           <div style="display:grid; grid-template-columns:1fr 1fr; gap:0.75rem; margin-top:0.75rem;">
             <div class="proposal-meta-item">
               <span class="proposal-meta-label">Proposal Expiry</span>
@@ -4321,9 +4493,9 @@
               <span style="font-size:0.85rem; color:var(--amber);">${escapeText(prop.invalidation_condition || 'Unavailable')}</span>
             </div>
           </div>
-        </div>
+        </div></section>
 
-        <!-- 3. MULTI-TIMEFRAME CONTEXT CARD -->
+        <section class="report-tab-panel" data-report-panel="market" role="tabpanel" hidden>
         <div class="decision-section">
           <div class="decision-section-title">
             <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
@@ -4361,67 +4533,22 @@
               <span class="proposal-meta-sub">Economic blackout status</span>
             </div>
           </div>
-        </div>
+          ${data.technical_report ? `<details class="market-details"><summary>Detailed market and indicator evidence</summary><div class="report-markdown">${renderReportMarkdown(data.technical_report)}</div></details>` : ''}
+        </div></section>
 
-        <!-- 4. RESEARCH INTELLIGENCE GRID -->
+        <section class="report-tab-panel" data-report-panel="research" role="tabpanel" hidden>
         <div class="decision-section">
           <div class="decision-section-title">
             <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
             Multi-Agent Research Intelligence
           </div>
-          <div class="research-subgrid">
-            <div class="research-subcard">
-              <div class="research-subcard-title">
-                <span>📈 Technical Analysis</span>
-              </div>
-              <div class="research-subcard-body">
-                ${escapeText(research.technical || data.technical_report || 'Unavailable')}
-              </div>
-            </div>
-            <div class="research-subcard">
-              <div class="research-subcard-title">
-                <span>🏛️ Macroeconomic Analysis</span>
-              </div>
-              <div class="research-subcard-body">
-                ${escapeText(research.macro || data.macro_report || 'Unavailable')}
-              </div>
-            </div>
-            <div class="research-subcard">
-              <div class="research-subcard-title">
-                <span>📰 News &amp; Calendar Flows</span>
-              </div>
-              <div class="research-subcard-body">
-                ${escapeText(research.news || data.news_report || 'Unavailable')}
-              </div>
-            </div>
-            <div class="research-subcard">
-              <div class="research-subcard-title" style="color:var(--green);">
-                <span>🐂 Bull Thesis</span>
-              </div>
-              <div class="research-subcard-body">
-                ${escapeText(research.bull_case || debate.bull_history || 'Unavailable')}
-              </div>
-            </div>
-            <div class="research-subcard">
-              <div class="research-subcard-title" style="color:var(--red);">
-                <span>🐻 Bear Thesis</span>
-              </div>
-              <div class="research-subcard-body">
-                ${escapeText(research.bear_case || debate.bear_history || 'Unavailable')}
-              </div>
-            </div>
-            <div class="research-subcard">
-              <div class="research-subcard-title" style="color:var(--amber);">
-                <span>⚖️ Research Manager Synthesis</span>
-              </div>
-              <div class="research-subcard-body">
-                ${escapeText(research.manager_synthesis || debate.judge_decision || 'Unavailable')}
-              </div>
-            </div>
+          <div class="research-tabs" role="tablist" aria-label="Research agents">
+            ${researchPanels.map(([id,label], index) => `<button type="button" class="research-tab ${index === 0 ? 'active' : ''}" data-research-tab="${id}" role="tab" aria-selected="${index === 0}">${escapeText(label)}</button>`).join('')}
           </div>
-        </div>
+          ${researchPanels.map(([id,,content], index) => `<div class="research-panel ${index === 0 ? 'active' : ''}" data-research-panel="${id}" ${index === 0 ? '' : 'hidden'}><div class="report-markdown">${renderReportMarkdown(content)}</div></div>`).join('')}
+        </div></section>
 
-        <!-- 5. RISK ENGINE EVALUATION -->
+        <section class="report-tab-panel" data-report-panel="risk" role="tabpanel" hidden>
         <div class="decision-section">
           <div class="decision-section-title">
             <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
@@ -4451,14 +4578,13 @@
               `).join('')}
             </div>
           </div>
-          ${risk.executive_rationale ? `
+          ${risk.executive_rationale && !isNoTrade ? `
             <div style="background:var(--bg-primary); padding:0.75rem 1rem; border-radius:var(--radius-sm); border:1px solid var(--border); font-size:0.82rem; color:var(--text-secondary); line-height:1.5;">
-              <strong style="color:var(--text-bright);">Risk Rationale:</strong> ${escapeText(risk.executive_rationale)}
+              <strong style="color:var(--text-bright);">Risk Rationale:</strong><div class="report-markdown">${renderReportMarkdown(risk.executive_rationale)}</div>
             </div>
           ` : ''}
         </div>
 
-        <!-- 6. INSTITUTIONAL MEMORY CARD -->
         <div class="decision-section">
           <div class="decision-section-title">
             <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
@@ -4475,12 +4601,11 @@
             </div>
           ` : `
             <div style="font-size:0.82rem; color:var(--text-muted); font-style:italic;">
-              No applied lesson IDs were stored on this completed report.
+              ${lessons.length ? escapeText(lessonStatus) : 'No applied lesson IDs were stored on this completed report.'} This completed analysis is preserved as run evidence, but run evidence is not automatically a reusable lesson.
             </div>
           `}
         </div>
 
-        <!-- 7. DATA PROVENANCE CARD -->
         <div class="decision-section">
           <div class="decision-section-title">
             <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
@@ -4500,20 +4625,46 @@
               ⚙️ Synthesized: ${escapeText(prov.generated_at ? new Date(prov.generated_at).toLocaleString() : 'Unavailable')}
             </span>
           </div>
+          <div class="proposal-meta-grid report-audit-grid">
+            <div class="proposal-meta-item"><span class="proposal-meta-label">Account source</span><span class="proposal-meta-value">${escapeText(account.source || 'Unavailable')}</span></div>
+            <div class="proposal-meta-item"><span class="proposal-meta-label">Account currency</span><span class="proposal-meta-value">${escapeText(account.currency || 'Unavailable')}</span></div>
+            <div class="proposal-meta-item"><span class="proposal-meta-label">LLM calls</span><span class="proposal-meta-value">${usage.call_count != null ? usage.call_count : 'Unavailable'}</span></div>
+            <div class="proposal-meta-item"><span class="proposal-meta-label">Total tokens</span><span class="proposal-meta-value">${usage.total_tokens != null ? Number(usage.total_tokens).toLocaleString() : 'Unavailable'}</span></div>
+          </div>
         </div>
 
-        <!-- 8. EXPANDABLE RAW REPORT SYNTHESIS -->
         <details class="raw-report-details" style="background:var(--bg-card); border:1px solid var(--border); border-radius:var(--radius-md); padding:1rem 1.25rem;">
           <summary style="cursor:pointer; font-weight:600; color:var(--text-secondary); user-select:none; font-size:0.88rem; display:flex; align-items:center; gap:8px;">
             <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:16px; height:16px;"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-            View Complete Raw Synthesis Markdown &amp; Agent Deliberation
+            Show raw evidence and original model output
           </summary>
           <div class="report-content" style="margin-top:1rem; padding-top:1rem; border-top:1px solid var(--border);">
-            ${escapeHtml(reportText || 'No raw synthesis text available.')}
+            ${renderReportMarkdown(reportText || prop.reasoning || risk.executive_rationale || 'No raw synthesis text available.')}
           </div>
         </details>
+        </section>
       </div>
     `;
+
+    const activateTabs = (buttonSelector, panelAttribute, valueAttribute) => {
+      DOM.reportContent.querySelectorAll(buttonSelector).forEach(button => {
+        button.addEventListener('click', () => {
+          const value = button.dataset[valueAttribute];
+          DOM.reportContent.querySelectorAll(buttonSelector).forEach(item => {
+            const selected = item === button;
+            item.classList.toggle('active', selected);
+            item.setAttribute('aria-selected', String(selected));
+          });
+          DOM.reportContent.querySelectorAll(`[${panelAttribute}]`).forEach(panel => {
+            const selected = panel.getAttribute(panelAttribute) === value;
+            panel.classList.toggle('active', selected);
+            panel.hidden = !selected;
+          });
+        });
+      });
+    };
+    activateTabs('[data-report-tab]', 'data-report-panel', 'reportTab');
+    activateTabs('[data-research-tab]', 'data-research-panel', 'researchTab');
   }
 
   async function loadReport(runId) {
@@ -4571,6 +4722,12 @@
       eqRuns.forEach(r => { r.asset_type = r.asset_type || 'equities'; r.run_type = r.run_type || 'equities'; });
       fxRuns.forEach(r => { r.asset_type = 'forex'; r.run_type = 'forex'; });
       inMemoryRuns = [...fxRuns, ...eqRuns];
+      if (currentRunId && activePipelineType === 'forex') {
+        const active = fxRuns.find(run => run.run_id === currentRunId);
+        if (active && ['completed', 'failed', 'cancelled', 'stale'].includes(String(active.status).toLowerCase())) {
+          await reconcileForexRun(currentRunId);
+        }
+      }
       renderCombinedHistory();
     } catch (_) {}
   }
@@ -4721,12 +4878,16 @@
       <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
       Launch Analysis
     `;
-    if (DOM.btnCancelAnalysis) {
-      DOM.btnCancelAnalysis.style.display = 'none';
-      DOM.btnCancelAnalysis.disabled = false;
-    }
+    setCancelControls(false);
     currentRunId = null;
     activePipelineType = null;
+  }
+
+  function setCancelControls(visible, disabled = false) {
+    [DOM.btnCancelAnalysis, DOM.btnCancelPipeline].filter(Boolean).forEach(button => {
+      button.style.display = visible ? 'inline-flex' : 'none';
+      button.disabled = disabled;
+    });
   }
 
   // ---- Formatting Helpers ----

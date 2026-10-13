@@ -451,12 +451,18 @@ def test_dashboard_truthful_availability_pair_and_refresh_states(e2e_environment
 
         page.locator("#btnDashRefreshPositions").click()
         page.locator("#dashPositionsContainer").get_by_text("Unavailable: positions").wait_for()
+        assert page.locator("#dashServerBadge").inner_text() == "SERVER: FIXTURE-DEMO"
+        assert page.locator("#dashLoginBadge").inner_text() == "ACCOUNT: 654***"
         assert page.locator("#dashMargin").inner_text() == "Margin Used: Unavailable"
         assert page.locator("#dashLeverage").inner_text() == "Leverage: Unavailable"
         assert page.locator("#dashEventsContainer").get_by_text("Unavailable: economic calendar").is_visible()
         assert page.get_by_role("heading", name="Recent Decision Proposals").is_visible()
         assert page.get_by_role("heading", name="Today's Realized Result (UTC)").is_visible()
         assert page.locator("#dashTodayPnl").inner_text() == "+$0.00"
+        assert page.locator("#dashExpectancy").inner_text() == "Unavailable"
+        assert page.locator("#dashProfitFactor").inner_text() == "Unavailable"
+        assert page.locator("#dashAvgR").inner_text() == "Unavailable"
+        assert page.locator("#dashMaxDD").inner_text() == "Unavailable"
         ids = page.locator("#dashProposalsContainer tbody td:first-child")
         assert ids.count() == 2
         assert ids.nth(0).inner_text() != ids.nth(1).inner_text()
@@ -507,12 +513,12 @@ def test_analysis_form_sse_and_decision_report(e2e_environment):
         page.locator("#forexPair").select_option("USDJPY")
         page.locator("#forexTimeframe").select_option("M15")
         page.locator('[data-ctx-tf="W1"]').click()
-        page.locator('[data-fxanalyst="news"]').click()
         mandatory = page.locator(".mandatory-stage")
         assert mandatory.count() == 2
         assert all(mandatory.nth(index).is_disabled() for index in range(mandatory.count()))
         assert page.locator("#modeForex").get_attribute("aria-pressed") == "true"
         assert page.locator('[data-fxanalyst="news"]').get_attribute("aria-pressed") == "false"
+        assert not page.locator("#forexEconomicBlackout").is_checked()
         assert page.locator("#btnRun").is_enabled()
         invalid = page.evaluate("[...document.querySelectorAll('#analysisForm :invalid')].map(element => element.id)")
         assert invalid == []
@@ -526,19 +532,32 @@ def test_analysis_form_sse_and_decision_report(e2e_environment):
         assert payload["execution_timeframe"] == "M15"
         assert payload["context_timeframes"] == ["H4", "D1", "W1"]
         assert payload["analysts"] == ["forex_technical", "forex_macro"]
+        assert payload["economic_blackout"] is False
+        assert page.locator("#node-news_analyst").count() == 0
         report = page.locator("#reportContent").inner_text()
         assert "LONG" in report
-        assert "Higher-low confirmation" in report
-        assert "Rate differential stable" in report
-        assert "No high-impact conflict" in report
-        assert "RISK ENGINE: APPROVE" in report
-        assert "Model confidence: Unavailable" in report
-        assert "Model confidence: 0" not in report
+        assert "TRADE APPROVED" in report
+        assert "MODEL CONFIDENCE" in report
+        assert "0%" not in page.locator('[data-report-panel="overview"] .proposal-meta-item').last.inner_text()
         assert "London / New York Overlap" not in report
         assert "Upward momentum confirmed" not in report
         assert "Current Session" not in report
         assert "Analysis History" in page.locator("#analysisHistoryCard").inner_text()
         page.locator("#historyContent").get_by_text("USDJPY", exact=True).first.wait_for()
+        assert page.locator('[data-report-tab="overview"]').get_attribute("aria-selected") == "true"
+        page.locator('[data-report-tab="trade"]').click()
+        page.locator('[data-report-panel="trade"] .proposal-meta-grid').wait_for()
+        page.locator('[data-report-tab="research"]').click()
+        page.locator('[data-research-tab="technical"]').click()
+        technical_panel = page.locator('[data-research-panel="technical"]')
+        assert technical_panel.is_visible()
+        assert "Higher-low confirmation" in technical_panel.inner_text()
+        page.locator('[data-research-tab="macro"]').click()
+        assert "Rate differential stable" in page.locator('[data-research-panel="macro"]').inner_text()
+        page.locator('[data-research-tab="news"]').click()
+        assert "No high-impact conflict" in page.locator('[data-research-panel="news"]').inner_text()
+        page.locator('[data-report-tab="risk"]').click()
+        assert page.locator('[data-report-panel="risk"] .raw-report-details').is_visible()
 
 
 def test_manual_analysis_fields_and_payload(e2e_environment):
@@ -590,14 +609,47 @@ def test_analysis_cancellation_is_terminal_in_browser(e2e_environment):
             page.locator("#analysisForm").evaluate("form => form.requestSubmit()")
             cancel = page.locator("#btnCancelAnalysis")
             cancel.wait_for(state="visible")
-            cancel.click()
+            pipeline_cancel = page.locator("#btnCancelPipeline")
+            pipeline_cancel.wait_for(state="visible")
+            pipeline_cancel.click()
             page.get_by_text("Forex analysis cancelled", exact=True).wait_for()
             assert cancel.is_hidden()
+            assert pipeline_cancel.is_hidden()
             cancelled = page.evaluate(
                 "fetch('/api/forex/runs').then(r=>r.json()).then(d=>d.runs.find(x=>x.status==='cancelled'))"
             )
             assert cancelled["status"] == "cancelled"
             assert cancelled["finished_at"]
+    finally:
+        forex_routes._run_forex_analysis = original_worker
+
+
+def test_failed_analysis_replaces_running_pipeline_state(e2e_environment):
+    def failing_worker(run_id, _request, _shutdown_event=None):
+        message = "Deterministic provider failure"
+        forex_routes._forex_runs[run_id].update(
+            status="failed",
+            error=message,
+            finished_at=datetime.now(timezone.utc).isoformat(),
+        )
+        forex_routes._emit_fx_event(
+            run_id,
+            "error",
+            {"run_id": run_id, "message": message, "error": message},
+        )
+
+    original_worker = forex_routes._run_forex_analysis
+    forex_routes._run_forex_analysis = failing_worker
+    try:
+        with quality_page(e2e_environment) as page:
+            page.locator("#tab-analyze").click()
+            page.locator("#analysisForm").evaluate("form => form.requestSubmit()")
+            page.wait_for_function(
+                "document.querySelector('.pipeline-title')?.textContent === 'Analysis failed'"
+            )
+            assert page.locator("#progressPercent").inner_text() == "FAILED"
+            assert "Deterministic provider failure" in page.locator("#reportContent").inner_text()
+            assert page.locator("#btnRun").is_enabled()
     finally:
         forex_routes._run_forex_analysis = original_worker
 

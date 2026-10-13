@@ -43,6 +43,30 @@ def test_usage_tracker_reports_unavailable_instead_of_estimating():
     assert tracker.summary()["total_tokens"] == 0
 
 
+def test_usage_tracker_attributes_each_response_to_its_reported_model():
+    tracker = UsageTracker("run-mixed", provider="openai", model="quick-model")
+    with track_usage(tracker):
+        for model in ("gpt-6-luna", "gpt-6.1-sol"):
+            normalize_content(
+                AIMessage(
+                    content="ok",
+                    response_metadata={
+                        "model_provider": "openai",
+                        "model_name": model,
+                    },
+                    usage_metadata={
+                        "input_tokens": 5,
+                        "output_tokens": 2,
+                        "total_tokens": 7,
+                    },
+                )
+            )
+
+    records = tracker.records()
+    assert [record["model"] for record in records] == ["gpt-6-luna", "gpt-6.1-sol"]
+    assert {record["provider"] for record in records} == {"openai"}
+
+
 def test_usage_records_persist_and_aggregate(tmp_path):
     journal = ForexTradeJournal(tmp_path / "journal.db")
     tracker = UsageTracker("run-3", provider="google", model="gemini-test")

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="description" content="TradingAgents — Multi-Agent AI Forex & Equities Decision-Support Dashboard">
   <title>TradingAgents — AI Trading Terminal</title>
-  <link rel="stylesheet" href="/static/styles.css?v=2.12">
+  <link rel="stylesheet" href="/static/styles.css?v=2.13">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📊</text></svg>">
 </head>
 <body>
@@ -25,7 +25,7 @@
         </div>
         <div class="header-status">
           <div class="status-dot" id="serverDot"></div>
-          <span class="status-label" id="serverStatus">Connected</span>
+          <span class="status-label" id="serverStatus">Dashboard Server: Checking</span>
         </div>
       </div>
     </div>
@@ -87,8 +87,8 @@
               <option value="NZDUSD">NZDUSD</option><option value="EURGBP">EURGBP</option>
               <option value="EURJPY">EURJPY</option>
             </select>
-            <span class="badge-readonly" id="dashServerBadge">Server: --</span>
-            <span class="badge-readonly" id="dashLoginBadge">Login: --</span>
+            <span class="badge-readonly" id="dashServerBadge">Server: Unavailable</span>
+            <span class="badge-readonly" id="dashLoginBadge">Account: Unavailable</span>
             <span class="badge-readonly">Strict Read-Only</span>
           </div>
         </div>
@@ -203,22 +203,22 @@
             <div class="stat-cards" style="margin-bottom: 0;">
               <div class="stat-card">
                 <span class="stat-label">Expectancy</span>
-                <span class="stat-value" id="dashExpectancy" style="color:var(--cyan);">0.00R</span>
+                <span class="stat-value" id="dashExpectancy" style="color:var(--cyan);">Unavailable</span>
                 <span class="stat-sub">Risk multiple expectancy</span>
               </div>
               <div class="stat-card">
                 <span class="stat-label">Profit Factor</span>
-                <span class="stat-value" id="dashProfitFactor">0.00</span>
+                <span class="stat-value" id="dashProfitFactor">Unavailable</span>
                 <span class="stat-sub">Gross Win / Loss</span>
               </div>
               <div class="stat-card">
                 <span class="stat-label">Average R</span>
-                <span class="stat-value" id="dashAvgR" style="color:var(--green);">0.00R</span>
+                <span class="stat-value" id="dashAvgR" style="color:var(--green);">Unavailable</span>
                 <span class="stat-sub">Mean R multiple</span>
               </div>
               <div class="stat-card">
                 <span class="stat-label">Max Drawdown</span>
-                <span class="stat-value" id="dashMaxDD" style="color:var(--red);">0.0%</span>
+                <span class="stat-value" id="dashMaxDD" style="color:var(--red);">Unavailable</span>
                 <span class="stat-sub">Peak decline</span>
               </div>
             </div>
@@ -397,8 +397,8 @@
 
               <div class="form-group" style="margin-bottom: 1rem;">
                 <label style="display: flex; align-items: center; gap: 8px; font-size: 0.8rem; color: var(--text-secondary); cursor: pointer;">
-                  <input type="checkbox" id="forexEconomicBlackout" checked style="accent-color: var(--cyan); cursor: pointer;">
-                  <span>Enforce High-Impact Macro Blackout (±2h)</span>
+                  <input type="checkbox" id="forexEconomicBlackout" style="accent-color: var(--cyan); cursor: pointer;">
+                  <span>Enforce High-Impact Macro Blackout (requires calendar API)</span>
                 </label>
               </div>
 
@@ -411,8 +411,8 @@
                   <button type="button" class="analyst-toggle active" data-fxanalyst="macro" aria-pressed="true" title="Forex Macro Analyst">
                     <span class="dot"></span> Macro
                   </button>
-                  <button type="button" class="analyst-toggle active" data-fxanalyst="news" aria-pressed="true" title="Forex News Analyst">
-                    <span class="dot"></span> News
+                  <button type="button" class="analyst-toggle" data-fxanalyst="news" aria-pressed="false" title="Requires a configured Trading Economics calendar API">
+                    <span class="dot"></span> News (Calendar API)
                   </button>
                   <button type="button" class="analyst-toggle active mandatory-stage" data-fxanalyst="debate" aria-pressed="true" disabled title="Mandatory Bull/Bear Consensus Stage">
                     <span class="dot"></span> Debate (Mandatory)
@@ -498,6 +498,9 @@
               <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
               Agent Pipeline
             </h2>
+            <button type="button" class="btn-secondary btn-sm" id="btnCancelPipeline" style="display:none;">
+              Stop Analysis
+            </button>
           </div>
 
           <div id="pipelineContent">
@@ -1362,6 +1365,6 @@
   <div class="toast" id="toast"></div>
 
   <script src="/static/journal.js?v=2.8"></script>
-  <script src="/static/app.js?v=3.4"></script>
+  <script src="/static/app.js?v=3.9"></script>
 </body>
 </html>

@@ -142,6 +142,8 @@ class TestDashboardAuth:
         data = res.json()
         assert "session_token" not in data or data["session_token"] is None
         assert "tradingagents_session" not in fresh_client.cookies
+        groq = next(provider for provider in data["providers"] if provider["id"] == "groq")
+        assert groq["models"] == ["openai/gpt-oss-20b", "openai/gpt-oss-120b"]
 
         # Verify a fresh client cannot POST to /api/analyze using anything from /api/config
         with patch("web.server._run_analysis"):

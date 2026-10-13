@@ -139,6 +139,23 @@ def test_credentials_validation_and_exceptions_are_safe(isolated, caplog):
     assert secret not in client.get("/api/forex/mt5/status").text
 
 
+def test_validation_errors_identify_fields_without_echoing_values(isolated):
+    client = TestClient(server.app)
+    client.get("/")
+    secret = "SENTINEL_VALIDATION_VALUE"
+    response = client.post(
+        "/api/forex/analyze",
+        json={"pair": "BAD", "account_source": "manual", "password": secret},
+    )
+    assert response.status_code == 422
+    body = response.json()
+    assert body["error"]["code"] == "INVALID_REQUEST"
+    assert body["error"]["details"]["violations"]
+    fields = {item["field"] for item in body["error"]["details"]["violations"]}
+    assert "pair" in fields
+    assert secret not in response.text
+
+
 def test_mt5_password_consumed_once_and_omitted_on_terminal_reuse():
     api = MagicMock()
     api.initialize.return_value = True

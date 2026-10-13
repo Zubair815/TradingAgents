@@ -226,6 +226,26 @@ MIGRATIONS: list[dict[str, Any]] = [
         SELECT 1;
         """,
     },
+    {
+        "version": 6,
+        "description": "Persist dashboard analysis run history and completed reports",
+        "sql": """
+        CREATE TABLE IF NOT EXISTS dashboard_analysis_runs (
+            run_id TEXT PRIMARY KEY,
+            run_type TEXT NOT NULL,
+            status TEXT NOT NULL,
+            run_json TEXT NOT NULL,
+            report_json TEXT,
+            started_at_utc TEXT NOT NULL,
+            finished_at_utc TEXT,
+            updated_at_utc TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_dashboard_analysis_runs_started
+            ON dashboard_analysis_runs(started_at_utc DESC);
+        CREATE INDEX IF NOT EXISTS idx_dashboard_analysis_runs_status
+            ON dashboard_analysis_runs(status, updated_at_utc DESC);
+        """,
+    },
 ]
 
 

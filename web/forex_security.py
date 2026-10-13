@@ -1,6 +1,7 @@
 """Default-deny authentication and public-safe errors for every Forex route."""
 
 import logging
+import re
 
 from fastapi import HTTPException, Request
 from fastapi.exceptions import RequestValidationError
@@ -37,7 +38,7 @@ MESSAGES = {
     "MT5_DISCONNECTED": "MetaTrader 5 is not connected.",
     "MT5_CONNECTION_FAILED": "MetaTrader 5 connection failed.",
     "MT5_DATA_UNAVAILABLE": "MetaTrader 5 data is temporarily unavailable.",
-    "MT5_QUOTE_UNAVAILABLE": "The live MT5 quote is unavailable because the market is closed or the quote is stale.",
+    "MT5_QUOTE_UNAVAILABLE": "The live MT5 quote is unavailable because the market is closed, the quote is stale, or its timestamp is ahead of this computer.",
     "MT5_SYMBOL_UNAVAILABLE": "The requested MetaTrader 5 symbol is unavailable.",
     "PROPOSAL_NOT_FOUND": "Proposal not found",
     "TRADE_NOT_FOUND": "Trade not found",
@@ -54,8 +55,37 @@ MESSAGES = {
     "COST_CONFIRMATION_REQUIRED": "Explicit confirmation is required for this estimated provider cost.",
 }
 
+_SAFE_VALIDATION_FIELDS = {
+    "account_balance", "account_currency", "account_equity", "account_free_margin",
+    "account_leverage", "account_source", "action", "analysts", "context_timeframes",
+    "date", "date_from", "date_to", "deep_model", "economic_blackout",
+    "execution_timeframe", "higher_timeframes", "leverage", "login", "max_spread_pips",
+    "min_rr", "mode", "pair", "password", "path", "provider", "quick_model",
+    "research_depth", "risk_percent", "server", "timeframe",
+}
 
-def error_response(request, status, detail=None):
+
+def _safe_validation_details(exc: RequestValidationError) -> dict:
+    """Return actionable field/type metadata without echoing submitted values."""
+    violations: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    # FastAPI's RequestValidationError wrapper does not expose Pydantic's
+    # include_input/include_context flags, so copy only the safe keys below.
+    for item in exc.errors():
+        location = [str(part) for part in item.get("loc", ()) if part not in {"body", "query", "path"}]
+        message = str(item.get("msg", ""))
+        if not location:
+            location = sorted(set(re.findall(r"[a-z][a-z0-9_]*", message)) & _SAFE_VALIDATION_FIELDS)
+        field = ".".join(location) if location else "request"
+        error_type = str(item.get("type", "validation_error"))
+        key = (field, error_type)
+        if key not in seen:
+            seen.add(key)
+            violations.append({"field": field, "type": error_type})
+    return {"violations": violations}
+
+
+def error_response(request, status, detail=None, *, safe_details=None):
     path = request.url.path
     code = "INVALID_REQUEST" if status < 500 else "PROVIDER_ERROR"
     if status in (401, 403):
@@ -72,6 +102,8 @@ def error_response(request, status, detail=None):
     if isinstance(detail, dict) and detail.get("code") in MESSAGES:
         code = detail["code"]
     error = {"code": code, "message": MESSAGES[code], "details": {}}
+    if code == "INVALID_REQUEST" and isinstance(safe_details, dict):
+        error["details"] = safe_details
     if code in {"HISTORICAL_DATA_UNAVAILABLE", "HISTORICAL_CONTEXT_UNAVAILABLE"} and isinstance(detail, dict):
         safe_message = detail.get("message")
         if isinstance(safe_message, str) and safe_message:
@@ -104,9 +136,9 @@ class ForexRoute(APIRoute):
                 return response
             except HTTPException as exc:
                 return error_response(request, exc.status_code, exc.detail)
-            except RequestValidationError:
+            except RequestValidationError as exc:
                 # Validation errors contain input values, including credentials.
-                return error_response(request, 422)
+                return error_response(request, 422, safe_details=_safe_validation_details(exc))
             except Exception as exc:
                 logger.warning("Forex request failed (%s)", type(exc).__name__)
                 return error_response(request, 500)

@@ -68,6 +68,31 @@ class LocalCompatibleChatOpenAI(NormalizedChatOpenAI):
         return super().with_structured_output(schema, method=method, **kwargs)
 
 
+class GroqRateLimitedChatOpenAI(NormalizedChatOpenAI):
+    """Groq client with process-wide free-tier RPM/TPM pacing."""
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        from .rate_limit import estimate_chat_tokens, get_groq_limiter
+
+        limiter = get_groq_limiter(self.model_name)
+        max_output = self.max_tokens or self.max_completion_tokens or 512
+        reservation = limiter.acquire(
+            estimate_chat_tokens(messages, kwargs, output_reserve=min(int(max_output), 1024))
+        )
+        result = super()._generate(
+            messages,
+            stop=stop,
+            run_manager=run_manager,
+            **kwargs,
+        )
+        actual_tokens = 0
+        for generation in result.generations:
+            usage = getattr(generation.message, "usage_metadata", None) or {}
+            actual_tokens += int(usage.get("total_tokens") or 0)
+        limiter.reconcile(reservation, actual_tokens or None)
+        return result
+
+
 def _input_to_messages(input_: Any) -> list:
     """Normalise a langchain LLM input to a list of message objects.
 
@@ -222,7 +247,10 @@ OPENAI_COMPATIBLE_PROVIDERS: dict[str, ProviderSpec] = {
     "openrouter": ProviderSpec(base_url="https://openrouter.ai/api/v1"),
     "mistral":    ProviderSpec(base_url="https://api.mistral.ai/v1"),
     "kimi":       ProviderSpec(base_url="https://api.moonshot.ai/v1"),
-    "groq":       ProviderSpec(base_url="https://api.groq.com/openai/v1"),
+    "groq":       ProviderSpec(
+        base_url="https://api.groq.com/openai/v1",
+        chat_class=GroqRateLimitedChatOpenAI,
+    ),
     "nvidia":     ProviderSpec(base_url="https://integrate.api.nvidia.com/v1"),
     "ollama":     ProviderSpec(base_url="http://localhost:11434/v1", base_url_env="OLLAMA_BASE_URL",
                                key_optional=True, placeholder_key="ollama",

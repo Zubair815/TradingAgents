@@ -222,6 +222,26 @@ class ForexBacktestResult:
 
     def render_markdown_report(self) -> str:
         """Render a formatted institutional Markdown performance card."""
+        ratings_allowed = self.validated_strategy_performance and self.total_trades >= 30
+        return_rating = (
+            "OUTPERFORM" if self.total_return_pct >= 15 else "STABLE" if self.total_return_pct > 0 else "UNDERPERFORM"
+        ) if ratings_allowed else "Not assessed"
+        profit_factor_rating = (
+            "EXCELLENT" if self.profit_factor >= 1.6 else "ACCEPTABLE" if self.profit_factor >= 1.2 else "POOR"
+        ) if ratings_allowed else "Not assessed"
+        sharpe_rating = (
+            "TIER-1 ALPHA" if self.sharpe_ratio >= 1.5 else "SOLID" if self.sharpe_ratio >= 1.0 else "SUB-OPTIMAL"
+        ) if ratings_allowed else "Not assessed"
+        drawdown_rating = (
+            "CONTAINED" if self.max_drawdown_pct <= 10 else "ELEVATED RISK"
+        ) if ratings_allowed else "Not assessed"
+        benchmark = "Validated benchmark" if ratings_allowed else "Illustrative output only"
+        expectancy_description = (
+            "Validated-sample directional expectancy" if ratings_allowed else "Observed sample average"
+        )
+        edge_description = (
+            "Validated-sample expectancy" if ratings_allowed else "Observed sample result; no demonstrated edge"
+        )
         lines: list[str] = [
             "# Institutional Forex Backtest Performance Report",
             f"*Period: {self.start_date} to {self.end_date} | Mode: {self.mode} | Validated: {self.validated_strategy_performance}*",
@@ -233,11 +253,11 @@ class ForexBacktestResult:
             "|:---|:---:|:---:|:---|",
             f"| **Starting Capital** | `${self.initial_balance:,.2f}` | Baseline Deposit | — |",
             f"| **Final Balance** | `${self.final_balance:,.2f}` | Equity Capital | — |",
-            f"| **Total Net Return** | `+{self.total_return_pct:.2f}%` (`${self.total_net_profit:+,.2f}`) | `> +15.0%` | {'OUTPERFORM' if self.total_return_pct >= 15 else 'STABLE' if self.total_return_pct > 0 else 'UNDERPERFORM'} |",
-            f"| **Profit Factor** | `{self.profit_factor:.2f}` | `> 1.60` | {'EXCELLENT' if self.profit_factor >= 1.6 else 'ACCEPTABLE' if self.profit_factor >= 1.2 else 'POOR'} |",
-            f"| **Sharpe Ratio** | `{self.sharpe_ratio:.2f}` | `> 1.50` | {'TIER-1 ALPHA' if self.sharpe_ratio >= 1.5 else 'SOLID' if self.sharpe_ratio >= 1.0 else 'SUB-OPTIMAL'} |",
-            f"| **Sortino Ratio** | `{self.sortino_ratio:.2f}` | `> 2.00` | Downside Risk Adjusted |",
-            f"| **Maximum Drawdown** | `{self.max_drawdown_pct:.2f}%` (`${self.max_drawdown_cash:,.2f}`) | `< 10.0%` | {'CONTAINED' if self.max_drawdown_pct <= 10 else 'ELEVATED RISK'} |",
+            f"| **Total Net Return** | `{self.total_return_pct:+.2f}%` (`${self.total_net_profit:+,.2f}`) | {benchmark} | {return_rating} |",
+            f"| **Profit Factor** | `{self.profit_factor:.2f}` | {benchmark} | {profit_factor_rating} |",
+            f"| **Sharpe Ratio** | `{self.sharpe_ratio:.2f}` | {benchmark} | {sharpe_rating} |",
+            f"| **Sortino Ratio** | `{self.sortino_ratio:.2f}` | {benchmark} | {'Downside Risk Adjusted' if ratings_allowed else 'Not assessed'} |",
+            f"| **Maximum Drawdown** | `{self.max_drawdown_pct:.2f}%` (`${self.max_drawdown_cash:,.2f}`) | {benchmark} | {drawdown_rating} |",
             "",
             "## 2. Trade Expectancy & Pip Dynamics",
             "",
@@ -245,8 +265,8 @@ class ForexBacktestResult:
             "|:---|:---:|:---|",
             f"| **Total Executed Trades** | `{self.total_trades}` | {self.winning_trades} W / {self.losing_trades} L / {self.breakeven_trades} BE |",
             f"| **Win Rate** | `{self.win_rate_pct:.1f}%` | Loss Rate: `{self.loss_rate_pct:.1f}%` |",
-            f"| **Average R-Multiple** | `{self.avg_r_multiple:+.2f}R` | System directional expectancy |",
-            f"| **R-Expectancy / Trade** | `{self.expectancy_r:+.2f}R` | Mathematical edge per trade |",
+            f"| **Average R-Multiple** | `{self.avg_r_multiple:+.2f}R` | {expectancy_description} |",
+            f"| **R-Expectancy / Trade** | `{self.expectancy_r:+.2f}R` | {edge_description} |",
             f"| **Cash Expectancy** | `${self.expectancy_cash:+,.2f}` | Average monetary return per trade |",
             f"| **Total Pips Captured** | `{self.total_pips:+,.1f}` pips | Avg: `{self.avg_trade_pips:+.1f}` pips/trade |",
             "",

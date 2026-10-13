@@ -13,13 +13,14 @@ Validates:
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 
+import web.forex_routes as forex_routes
 from tradingagents.agents.schemas_forex import (
     ForexAction,
     ForexRiskDecision,
@@ -55,11 +56,97 @@ from web.forex_routes import (
     _forex_completed_reports,
     _forex_run_events,
     _forex_runs,
+    _forex_worker_entry,
     _run_forex_analysis,
     reset_forex_state,
     set_forex_dependencies,
 )
 from web.server import app
+
+
+def test_forex_analysis_history_survives_restart_for_all_terminal_states(
+    client, isolated_forex_env
+):
+    journal, _, _ = isolated_forex_env
+    now = datetime.now(timezone.utc).isoformat()
+    completed = {
+        "run_id": "fx_persisted_success",
+        "run_type": "forex",
+        "asset_type": "forex",
+        "pair": "EURUSD",
+        "date": now,
+        "started_at": now,
+        "finished_at": now,
+        "status": "completed",
+        "signal": "NO_TRADE",
+    }
+    failed = {
+        "run_id": "fx_persisted_failure",
+        "run_type": "forex",
+        "asset_type": "forex",
+        "pair": "GBPUSD",
+        "date": now,
+        "started_at": now,
+        "finished_at": now,
+        "status": "failed",
+        "error": "Provider unavailable",
+    }
+    interrupted = {
+        "run_id": "fx_persisted_running",
+        "run_type": "forex",
+        "asset_type": "forex",
+        "pair": "USDJPY",
+        "date": now,
+        "started_at": now,
+        "status": "running",
+    }
+    report = {"run_id": completed["run_id"], "pair": "EURUSD", "signal": "NO_TRADE"}
+    journal.save_dashboard_analysis_run(completed, report)
+    journal.save_dashboard_analysis_run(failed)
+    journal.save_dashboard_analysis_run(interrupted)
+
+    _forex_runs.clear()
+    _forex_run_events.clear()
+    _forex_completed_reports.clear()
+    forex_routes._forex_history_loaded = False
+
+    response = client.get("/api/forex/runs")
+    assert response.status_code == 200
+    runs = {run["run_id"]: run for run in response.json()["runs"]}
+    assert runs[completed["run_id"]]["status"] == "completed"
+    assert runs[failed["run_id"]]["status"] == "failed"
+    assert runs[interrupted["run_id"]]["status"] == "failed"
+    assert runs[interrupted["run_id"]]["error_code"] == "SERVER_RESTARTED"
+
+    detail = client.get(f"/api/forex/runs/{completed['run_id']}").json()
+    assert detail["report"] == report
+
+
+def test_persisted_forex_history_is_not_hidden_after_transient_age_limit(
+    client, isolated_forex_env
+):
+    journal, _, _ = isolated_forex_env
+    old = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+    run = {
+        "run_id": "fx_old_persisted_success",
+        "run_type": "forex",
+        "asset_type": "forex",
+        "pair": "EURUSD",
+        "date": old,
+        "started_at": old,
+        "finished_at": old,
+        "status": "completed",
+        "signal": "NO_TRADE",
+    }
+    journal.save_dashboard_analysis_run(run)
+
+    _forex_runs.clear()
+    forex_routes._forex_history_loaded = False
+
+    response = client.get("/api/forex/runs")
+
+    assert response.status_code == 200
+    assert run["run_id"] in {item["run_id"] for item in response.json()["runs"]}
 
 
 @pytest.fixture(autouse=True)
@@ -1771,6 +1858,90 @@ class TestForexAnalysisRuns:
             "error",
         ]
 
+    def test_stale_mt5_quote_has_actionable_failure_before_llm(
+        self, isolated_forex_env
+    ):
+        run_id = "fx_mt5_stale_quote"
+        _forex_runs[run_id] = {"status": "queued", "signal": None}
+        _forex_run_events[run_id] = []
+
+        with (
+            patch(
+                "web.forex_routes.build_mt5_application_context",
+                side_effect=DataInsufficientError("future or stale quote"),
+            ),
+            patch("web.forex_routes.ForexTradingAgentsGraph") as factory,
+        ):
+            _run_forex_analysis(
+                run_id,
+                ForexAnalysisRequest(pair="EURUSD", account_source="mt5"),
+            )
+
+        factory.assert_not_called()
+        assert _forex_runs[run_id]["status"] == "failed"
+        assert _forex_runs[run_id]["error_code"] == "MT5_QUOTE_UNAVAILABLE"
+        assert "market is closed" in _forex_runs[run_id]["error"].lower()
+
+    def test_live_news_preflight_fails_before_graph_and_llm_spend(
+        self, isolated_forex_env
+    ):
+        run_id = "fx_news_preflight_unavailable"
+        _forex_runs[run_id] = {"status": "queued", "signal": None}
+        _forex_run_events[run_id] = []
+        request = ForexAnalysisRequest(
+            pair="EURUSD",
+            account_source="manual",
+            account_balance=1000.0,
+            account_equity=1000.0,
+            account_free_margin=1000.0,
+            account_leverage=100.0,
+            account_currency="USD",
+            analysts=["forex_technical", "forex_macro", "forex_news"],
+        )
+
+        with (
+            patch(
+                "web.forex_routes.prepare_live_forex_context",
+                side_effect=DataInsufficientError(
+                    "TRADING_ECONOMICS_API_KEY is required for calendar coverage"
+                ),
+            ),
+            patch("web.forex_routes.ForexTradingAgentsGraph") as factory,
+        ):
+            _forex_worker_entry(run_id, request)
+
+        factory.assert_not_called()
+        assert _forex_runs[run_id]["status"] == "failed"
+        assert _forex_runs[run_id]["error_code"] == "DATA_INSUFFICIENT"
+        assert [event["type"] for event in _forex_run_events[run_id]] == ["error"]
+
+    def test_today_date_only_mt5_request_uses_live_cutoff(self, isolated_forex_env):
+        run_id = "fx_legacy_today_cutoff"
+        _forex_runs[run_id] = {"status": "queued", "signal": None}
+        _forex_run_events[run_id] = []
+        request = ForexAnalysisRequest(
+            pair="EURUSD",
+            account_source="mt5",
+            date=datetime.now(timezone.utc).date().isoformat(),
+            analysts=["forex_news"],
+        )
+        observed: dict[str, str | None] = {}
+
+        def capture(run_id_arg, normalized):
+            observed["run_id"] = run_id_arg
+            observed["date"] = normalized.date
+
+        with (
+            patch("web.forex_routes.prepare_live_forex_context") as prepare,
+            patch("web.forex_routes._run_forex_analysis", side_effect=capture),
+        ):
+            _forex_worker_entry(run_id, request)
+
+        prepare.assert_not_called()
+        assert observed["run_id"] == run_id
+        assert observed["date"] is not None
+        assert len(str(observed["date"])) > 10
+
     def test_omitted_account_source_defaults_to_mt5_without_balance_fallback(
         self, isolated_forex_env
     ):
@@ -2516,6 +2687,11 @@ class TestForexAnalystSelection:
                 return None
 
         monkeypatch.setattr(forex_routes, "ForexTradingAgentsGraph", MockGraph)
+        monkeypatch.setattr(
+            forex_routes,
+            "prepare_live_forex_context",
+            lambda _pair: datetime.now(timezone.utc).isoformat(),
+        )
         res = client.post(
             "/api/forex/analyze",
             json={
@@ -2851,6 +3027,12 @@ class TestDashboardOverview:
         assert "performance" in data
         perf = data["performance"]
         assert perf["trade_count"] == 0
+        assert perf["expectancy"] is None
+        assert perf["profit_factor"] is None
+        assert perf["average_r"] is None
+        assert perf["max_drawdown_pct"] is None
+        assert perf["win_rate"] is None
+        assert perf["win_rate_pct"] is None
         assert perf["is_sample_size_adequate"] is False
         assert "Sample size warning" in perf["sample_warning"]
         assert "30" in perf["sample_warning"]
@@ -2869,6 +3051,8 @@ class TestDashboardOverview:
         connection.is_connected.return_value = True
         connection.get_status.return_value = MT5ConnectionStatus.CONNECTED
         account = SimpleNamespace(
+            login=12345678,
+            server="Observed-Demo",
             balance=None,
             equity=None,
             margin=None,
@@ -2877,14 +3061,16 @@ class TestDashboardOverview:
             currency=None,
             leverage=None,
         )
-        connection.get_account_info.return_value = account
-        connection.get_positions.side_effect = RuntimeError("broker positions unavailable")
-        connection.get_orders.side_effect = RuntimeError("broker orders unavailable")
+        observer.get_account_info.return_value = account
+        observer.get_open_positions.side_effect = RuntimeError("broker positions unavailable")
+        observer.get_pending_orders.side_effect = RuntimeError("broker orders unavailable")
 
         response = client.get("/api/forex/dashboard/overview")
 
         assert response.status_code == 200
         mt5 = response.json()["mt5"]
+        assert mt5["server"] == "Observed-Demo"
+        assert mt5["masked_login"] == "123*****"
         assert mt5["account_available"] is True
         assert mt5["account"] == {
             "balance": None,
@@ -2964,7 +3150,9 @@ class TestDashboardOverview:
         mock_acc.profit = 450.0
         mock_acc.currency = "USD"
         mock_acc.leverage = 200
-        mock_conn.get_account_info.return_value = mock_acc
+        mock_acc.login = 88776655
+        mock_acc.server = "Demo-Server-01"
+        mock_observer.get_account_info.return_value = mock_acc
 
         mock_pos = MagicMock()
         mock_pos.model_dump.return_value = {
@@ -2975,8 +3163,8 @@ class TestDashboardOverview:
             "price_open": 1.0850,
             "profit": 450.0,
         }
-        mock_conn.get_positions.return_value = [mock_pos]
-        mock_conn.get_orders.return_value = []
+        mock_observer.get_open_positions.return_value = [mock_pos]
+        mock_observer.get_pending_orders.return_value = []
 
         # Add a closed trade today into journal
         now_iso = datetime.now(timezone.utc).isoformat()

@@ -173,7 +173,7 @@ def test_native_mt5_reads_are_serialized_across_observer_threads():
 def test_process_resource_sample_is_secret_free_and_well_formed():
     sample = sample_process_resources()
     assert sample.process_id > 0
-    assert sample.rss_bytes >= 0
+    assert sample.rss_bytes > 0
     assert sample.cpu_seconds >= 0
     assert sample.thread_count >= 1
     assert sample.log_file_count >= 0

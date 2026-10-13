@@ -335,7 +335,9 @@ class MT5Observer:
             code, desc = self.connection._get_last_error()
             raise MT5DataError(f"Failed to fetch tick for '{symbol}': {desc}", code=code)
 
-        dt = _parse_timestamp(_get_field(raw_tick, "time", 0))
+        account_info = mt5.account_info()
+        broker_server = self.connection.server or str(_get_field(account_info, "server", ""))
+        dt = _parse_broker_timestamp(_get_field(raw_tick, "time", 0), broker_server)
         bid = float(_get_field(raw_tick, "bid", 0.0))
         ask = float(_get_field(raw_tick, "ask", 0.0))
         last = float(_get_field(raw_tick, "last", 0.0))
@@ -369,7 +371,7 @@ class MT5Observer:
             spread_pips=spread_pips,
             flags=flags,
             source="MT5", broker_symbol=broker_sym,
-            broker=self.connection.server or str(_get_field(self.api.account_info(), "server", "unknown")),
+            broker=broker_server or "unknown",
             retrieved_at_utc=datetime.now(timezone.utc),
         )
 
@@ -377,9 +379,13 @@ class MT5Observer:
         if rates is None or len(rates) == 0:
             raise MT5DataError("No MT5 candle data returned")
         retrieved = datetime.now(timezone.utc)
+        account_info = self.api.account_info()
+        broker_server = self.connection.server or str(_get_field(account_info, "server", ""))
         bars = []
         for row in rates:
-            opened = _parse_timestamp(_extract_rate_val(row, "time", 0))
+            opened = _parse_broker_timestamp(
+                _extract_rate_val(row, "time", 0), broker_server
+            )
             closed = opened + timedelta(seconds=timeframe.seconds)
             if opened > retrieved:
                 raise DataInsufficientError("future MT5 candle timestamp")
@@ -394,7 +400,7 @@ class MT5Observer:
                 volume=float(_extract_rate_val(row, "tick_volume", 5)),
                 spread_pips=float(_extract_rate_val(row, "spread", 6)) * spec.point / spec.pip_size,
                 data_source="MT5", broker_symbol=spec.name, retrieved_at_utc=retrieved,
-                broker=self.connection.server or str(_get_field(self.api.account_info(), "server", "unknown")),
+                broker=broker_server or "unknown",
             ))
         if not bars:
             raise DataInsufficientError("no completed MT5 candles at cutoff")
@@ -410,7 +416,11 @@ class MT5Observer:
         spec = self.get_symbol_info(symbol)
         tf = Timeframe(str(timeframe).upper()) if not isinstance(timeframe, Timeframe) else timeframe
         cutoff = utc_timestamp(as_of) if as_of is not None else datetime.now(timezone.utc)
-        rates = self.api.copy_rates_from(spec.name, tf.mt5_timeframe, cutoff, count + 1)
+        broker_server = self.connection.server or str(
+            _get_field(self.api.account_info(), "server", "")
+        )
+        query_cutoff = _utc_to_broker_query_time(cutoff, broker_server)
+        rates = self.api.copy_rates_from(spec.name, tf.mt5_timeframe, query_cutoff, count + 1)
         return self._bars_from_rates(rates, spec, tf, cutoff)[-count:]
 
     @_serialized_mt5
@@ -422,7 +432,15 @@ class MT5Observer:
             raise ValueError("date_from must precede date_to")
         spec = self.get_symbol_info(symbol)
         tf = Timeframe(str(timeframe).upper()) if not isinstance(timeframe, Timeframe) else timeframe
-        rates = self.api.copy_rates_range(spec.name, tf.mt5_timeframe, start, cutoff)
+        broker_server = self.connection.server or str(
+            _get_field(self.api.account_info(), "server", "")
+        )
+        rates = self.api.copy_rates_range(
+            spec.name,
+            tf.mt5_timeframe,
+            _utc_to_broker_query_time(start, broker_server),
+            _utc_to_broker_query_time(cutoff, broker_server),
+        )
         return self._bars_from_rates(rates, spec, tf, cutoff, start)
 
     def fetch_multi_timeframe_data(self, symbol, timeframes=("M15", "H1", "H4", "D1"),

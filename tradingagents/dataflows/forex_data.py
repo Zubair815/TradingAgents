@@ -586,8 +586,16 @@ def fetch_forex_candles(symbol, timeframe=Timeframe.H1, count=100, as_of=None,
         data = data.tail(count)
     # Closed-market gaps are allowed; missing bars while the market is open are errors.
     age = None if end_date is not None else config.get("forex_candle_max_age_seconds", tf.seconds * 2)
-    data = validate_candles(data, tf, as_of=cutoff, max_age_seconds=age,
-                            max_spread_pips=config.get("forex_max_spread_pips", 5.0))
+    # A current-entry spread limit is not a historical-data validity rule:
+    # rollover/news candles can legitimately exceed it. The live quote and risk
+    # engine still enforce ``forex_max_spread_pips`` for the actual decision.
+    data = validate_candles(
+        data,
+        tf,
+        as_of=cutoff,
+        max_age_seconds=age,
+        max_spread_pips=config.get("forex_quote_sanity_max_spread_pips", 1000.0),
+    )
     data.attrs.update(last_bar_closed=True, as_of_utc=cutoff.isoformat(),
                       fallback=fallback_reason is not None, fallback_reason=fallback_reason)
     return data

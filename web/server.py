@@ -735,10 +735,14 @@ async def get_config():
             "google/gemini-2.5-flash",
             "anthropic/claude-3.5-sonnet",
         ]},
-        {"id": "openai", "name": "OpenAI", "models": ["gpt-4o", "gpt-4o-mini", "o3-mini", "gpt-5.6", "gpt-5.6-luna"]},
+        {"id": "openai", "name": "OpenAI", "models": ["gpt-6-luna", "gpt-6.1-sol", "gpt-6-astra", "gpt-5.6", "gpt-5.6-luna"]},
         {"id": "google", "name": "Google", "models": ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"]},
         {"id": "anthropic", "name": "Anthropic", "models": ["claude-sonnet-4-5", "claude-sonnet-4-6", "claude-3-5-haiku-20241022"]},
         {"id": "deepseek", "name": "DeepSeek", "models": ["deepseek-chat", "deepseek-reasoner"]},
+        {"id": "groq", "name": "Groq (Free tier available)", "models": [
+            "openai/gpt-oss-20b",
+            "openai/gpt-oss-120b",
+        ]},
         {"id": "ollama", "name": "Ollama (Local)", "models": ["qwen2.5:7b", "llama3.1:8b", "llama3", "mistral", "codestral"]},
     ]
     # Ensure configured models are always present in the active provider's models list

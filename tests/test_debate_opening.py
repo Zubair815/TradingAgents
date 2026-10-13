@@ -17,7 +17,7 @@ from tradingagents.agents.researchers.bull_researcher import create_bull_researc
 from tradingagents.agents.risk_mgmt.aggressive_debator import create_aggressive_debator
 from tradingagents.agents.risk_mgmt.conservative_debator import create_conservative_debator
 from tradingagents.agents.risk_mgmt.neutral_debator import create_neutral_debator
-from tradingagents.agents.utils.agent_utils import opponent_argument_or_opening
+from tradingagents.agents.utils.agent_utils import opponent_argument_or_opening, prompt_excerpt
 
 _REPORTS = {
     "company_of_interest": "AAPL", "asset_type": "stock",
@@ -61,6 +61,16 @@ def _risk_state(**responses):
 def test_helper_marks_empty_and_passes_through():
     assert "has not spoken yet" in opponent_argument_or_opening("", "bear analyst")
     assert opponent_argument_or_opening("  real point ", "bear") == "real point"
+
+
+@pytest.mark.unit
+def test_prompt_excerpt_bounds_context_and_preserves_both_ends():
+    source = "executive conclusion\n" + ("detail " * 2000) + "\nfinal risk caveat"
+    excerpt = prompt_excerpt(source, max_chars=1000)
+    assert len(excerpt) < 1100
+    assert excerpt.startswith("executive conclusion")
+    assert excerpt.endswith("final risk caveat")
+    assert "full report remains saved" in excerpt
 
 
 # --- researchers ------------------------------------------------------------

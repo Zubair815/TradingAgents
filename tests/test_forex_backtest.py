@@ -601,6 +601,11 @@ def test_scorecard_metrics_and_markdown_report():
     assert "Profit Factor" in md
     assert "Sharpe Ratio" in md
     assert "Execution Friction & Broker Drag" in md
+    assert "Illustrative output only" in md
+    assert "Not assessed" in md
+    assert "no demonstrated edge" in md
+    assert "TIER-1 ALPHA" not in md
+    assert "Mathematical edge per trade" not in md
 
 
 # ---------------------------------------------------------------------------

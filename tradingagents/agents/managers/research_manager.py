@@ -6,6 +6,7 @@ from tradingagents.agents.schemas import ResearchPlan, render_research_plan
 from tradingagents.agents.utils.agent_utils import (
     get_instrument_context_from_state,
     get_language_instruction,
+    prompt_excerpt,
 )
 from tradingagents.agents.utils.structured import (
     NO_EXTERNAL_TOOLS,
@@ -19,8 +20,10 @@ def create_research_manager(llm):
 
     def research_manager_node(state) -> dict:
         instrument_context = get_instrument_context_from_state(state)
-        history = state["investment_debate_state"].get("history", "")
-        past_context = (state.get("past_context") or "").strip()
+        history = prompt_excerpt(
+            state["investment_debate_state"].get("history", ""), max_chars=12000
+        )
+        past_context = prompt_excerpt((state.get("past_context") or "").strip(), max_chars=4000)
         past_section = f"\n\n---\n\n### Historical Lessons & Directives\n{past_context}" if past_context else ""
 
         investment_debate_state = state["investment_debate_state"]

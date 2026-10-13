@@ -181,6 +181,10 @@ class TestForexTraderAgent:
         state = {
             "company_of_interest": "EURUSD",
             "trade_date": "2026-03-04",
+            "forex_execution_timeframe": "M15",
+            "forex_quick_model": "gpt-6-luna",
+            "forex_deep_model": "gpt-6.1-sol",
+            "forex_min_rr": 2.0,
             "forex_technical_report": "Bullish structure above 1.0830",
             "forex_macro_report": "ECB hawkish stance",
             "forex_news_report": "No high-impact releases scheduled",
@@ -193,6 +197,9 @@ class TestForexTraderAgent:
         assert result["forex_proposal"]["action"] == "LONG"
         assert result["forex_proposal"]["entry_price"] == 1.08500
         assert result["forex_proposal"]["stop_loss"] == 1.08100
+        assert result["forex_proposal"]["timeframe"] == "M15"
+        assert result["forex_proposal"]["quick_model"] == "gpt-6-luna"
+        assert result["forex_proposal"]["deep_model"] == "gpt-6.1-sol"
         assert "FINAL FOREX PROPOSAL: **LONG**" in result["trader_investment_plan"]
 
     def test_trader_text_fallback_json_parsing(self):

@@ -2,6 +2,7 @@ from tradingagents.agents.utils.agent_utils import (
     get_instrument_context_from_state,
     get_language_instruction,
     opponent_argument_or_opening,
+    prompt_excerpt,
     report_or_absent,
 )
 from tradingagents.llm_clients.base_client import normalize_content
@@ -10,16 +11,18 @@ from tradingagents.llm_clients.base_client import normalize_content
 def create_bear_researcher(llm):
     def bear_node(state) -> dict:
         investment_debate_state = state["investment_debate_state"]
-        history = investment_debate_state.get("history", "")
+        history = prompt_excerpt(investment_debate_state.get("history", ""), max_chars=8000)
         bear_history = investment_debate_state.get("bear_history", "")
 
-        current_response = opponent_argument_or_opening(
+        current_response = prompt_excerpt(opponent_argument_or_opening(
             investment_debate_state.get("current_response", ""), "bull analyst"
+        ), max_chars=3500)
+        market_research_report = prompt_excerpt(report_or_absent(state["market_report"], "market"))
+        sentiment_report = prompt_excerpt(report_or_absent(state["sentiment_report"], "sentiment"))
+        news_report = prompt_excerpt(report_or_absent(state["news_report"], "news"), max_chars=3000)
+        fundamentals_report = prompt_excerpt(
+            report_or_absent(state["fundamentals_report"], "fundamentals"), max_chars=3000
         )
-        market_research_report = report_or_absent(state["market_report"], "market")
-        sentiment_report = report_or_absent(state["sentiment_report"], "sentiment")
-        news_report = report_or_absent(state["news_report"], "news")
-        fundamentals_report = report_or_absent(state["fundamentals_report"], "fundamentals")
         instrument_context = get_instrument_context_from_state(state)
         asset_type = state.get("asset_type", "stock")
         target_label = "stock" if asset_type == "stock" else "asset"

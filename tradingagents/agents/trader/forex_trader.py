@@ -219,6 +219,7 @@ def create_forex_trader(llm: Any):
         news_report = (state.get("forex_news_report") or "").strip()
         investment_plan = (state.get("investment_plan") or "").strip()
         past_context = (state.get("past_context") or "").strip()
+        minimum_rr = float(state.get("forex_min_rr") or 1.5)
 
         # Build grounded institutional prompt
         prompt_sections = [
@@ -250,7 +251,7 @@ def create_forex_trader(llm: Any):
             "2. State entry price and stop-loss as absolute numeric quote prices (e.g. 1.08500), NEVER as percentages or ranges.\n"
             "3. For LONG: entry_price > stop_loss and take_profit_1 > entry_price.\n"
             "4. For SHORT: entry_price < stop_loss and take_profit_1 < entry_price.\n"
-            "5. Aim for a verified Risk-to-Reward (R:R) ratio of at least 1.5:1 to TP1.\n"
+            f"5. Aim for a verified Risk-to-Reward (R:R) ratio of at least {minimum_rr:g}:1 to TP1.\n"
             "6. If market structure is unclear, conflicting, or high-impact news blackout risk is eminent, select NO_TRADE.\n"
             "7. Allocate risk between 0.5% and 2.0% of equity (default: 1.0%).\n"
             f"{NO_EXTERNAL_TOOLS}{get_language_instruction()}"
@@ -304,9 +305,16 @@ def create_forex_trader(llm: Any):
                 "prompt_version": getattr(proposal, "prompt_version", None) or "1.0.0",
                 "strategy_version": getattr(proposal, "strategy_version", None) or "1.0.0",
             }
-            model_name = getattr(llm, "model_name", None) or getattr(llm, "model", None)
-            if model_name and not getattr(proposal, "deep_model", None):
-                updates["deep_model"] = str(model_name)
+            quick_model = (
+                state.get("forex_quick_model")
+                or getattr(llm, "model_name", None)
+                or getattr(llm, "model", None)
+            )
+            deep_model = state.get("forex_deep_model")
+            if quick_model and not getattr(proposal, "quick_model", None):
+                updates["quick_model"] = str(quick_model)
+            if deep_model and not getattr(proposal, "deep_model", None):
+                updates["deep_model"] = str(deep_model)
             if selected_tf and proposal.timeframe != selected_tf:
                 updates["timeframe"] = selected_tf
             if applied_ids and not proposal.applied_lesson_ids:

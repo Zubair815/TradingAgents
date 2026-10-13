@@ -95,9 +95,16 @@ def validate_candles(df: pd.DataFrame, timeframe=None, *, as_of=None,
             if closed.empty:
                 raise DataInsufficientError("no closed candles")
             stale_from = closed.iloc[-1] + timedelta(seconds=max_age_seconds)
-            if stale_from < cutoff and (is_market_open(cutoff) or any(
-                    is_market_open(t.to_pydatetime()) for t in pd.date_range(stale_from, cutoff, freq="1h"))):
-                raise DataInsufficientError("stale candles")
+            if stale_from < cutoff:
+                # A market reopening does not instantly make a higher-timeframe
+                # series stale. The next candle must first have had enough time
+                # to close (notably Monday D1 after the weekend).
+                next_open = result["Date"].iloc[-1] + step
+                while next_open + step <= cutoff:
+                    probe = (next_open + pd.Timedelta(seconds=1)).to_pydatetime()
+                    if is_market_open(probe):
+                        raise DataInsufficientError("stale candles")
+                    next_open += step
         result.attrs["timeframe"] = tf.value
     return result.reset_index(drop=True)
 
