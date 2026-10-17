@@ -30,6 +30,7 @@ import json
 import logging
 import math
 import os
+import subprocess
 import threading
 import time
 import uuid
@@ -95,7 +96,11 @@ from tradingagents.journal.lifecycle import LifecycleError, LifecycleTransitionE
 from tradingagents.journal.manager import ForexJournalManager
 from tradingagents.learning.manager import ForexLearningManager
 from tradingagents.llm_clients.response_validation import IncompleteResponseError
-from tradingagents.llm_clients.usage import UsageTracker, track_usage
+from tradingagents.llm_clients.usage import (
+    RunBudgetExceededError,
+    UsageTracker,
+    track_usage,
+)
 from tradingagents.metrics.manager import ForexMetricsManager
 from tradingagents.mt5.errors import MT5Error
 from tradingagents.mt5.observer import MT5Observer
@@ -110,6 +115,42 @@ from tradingagents.risk.sizing import (
 
 logger = logging.getLogger("tradingagents.web.forex")
 
+
+def _software_revision() -> str | None:
+    """Return the exact Git revision when available without inventing provenance."""
+    configured = os.environ.get("TRADINGAGENTS_SOFTWARE_REVISION", "").strip()
+    if configured:
+        return configured
+    try:
+        revision = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=os.path.dirname(os.path.dirname(__file__)),
+            capture_output=True,
+            check=True,
+            text=True,
+            timeout=2,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return revision or None
+
+
+def _optional_positive_env(name: str) -> int | None:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("Ignoring invalid positive integer setting %s", name)
+        return None
+    return value if value > 0 else None
+
+from web.analysis_admission import (  # noqa: E402
+    AdmissionRejected,
+    AnalysisAdmissionController,
+    IdempotencyConflict,
+)
 from web.forex_security import ForexRoute, verify_forex_auth  # noqa: E402
 from web.retention import (  # noqa: E402
     DEFAULT_RETENTION_POLICY,
@@ -123,6 +164,8 @@ from web.retention import (  # noqa: E402
 
 router = APIRouter(prefix="/api/forex", tags=["forex"],
                    dependencies=[Depends(verify_forex_auth)], route_class=ForexRoute)
+
+_analysis_admission = AnalysisAdmissionController()
 
 # ---------------------------------------------------------------------------
 # Global State & Singletons (with thread-safe overrides for tests)
@@ -438,6 +481,7 @@ def reset_forex_state() -> None:
         _forex_analysis_threads.clear()
         _forex_cancellations.clear()
         _forex_history_loaded = False
+    _analysis_admission.reset()
 
 
 _SETTINGS_KEYS = (
@@ -1986,6 +2030,10 @@ def _run_forex_analysis(run_id: str, req: ForexAnalysisRequest) -> None:
             config["deep_think_llm"] = req.deep_model
         if req.max_tokens is not None:
             config["max_tokens"] = req.max_tokens
+        if req.quick_max_tokens is not None:
+            config["quick_max_tokens"] = req.quick_max_tokens
+        if req.deep_max_tokens is not None:
+            config["deep_max_tokens"] = req.deep_max_tokens
         if getattr(req, "research_depth", None):
             config["research_depth"] = req.research_depth
             debate_rounds = {"quick": 1, "deep": 3, "comprehensive": 5}[req.research_depth]
@@ -2045,6 +2093,11 @@ def _run_forex_analysis(run_id: str, req: ForexAnalysisRequest) -> None:
 
         risk_limits = ForexRiskLimits(**risk_kwargs)
         journal = get_journal()
+        analysis_cutoff = req.date or (
+            risk_context.as_of_utc.isoformat() if risk_context is not None else None
+        )
+        if analysis_cutoff is None:
+            analysis_cutoff = datetime.now(timezone.utc).isoformat()
 
         graph = ForexTradingAgentsGraph(
             selected_analysts=analysts,
@@ -2055,6 +2108,18 @@ def _run_forex_analysis(run_id: str, req: ForexAnalysisRequest) -> None:
             journal=journal,
             cancellation_check=lambda: _forex_cancel_requested(run_id),
             persistence_guard=lambda: _forex_proposal_persistence_guard(run_id),
+            analysis_request=req.model_copy(
+                update={
+                    "dashboard_run_id": run_id,
+                    "software_revision": _software_revision(),
+                    "date": analysis_cutoff,
+                    "account_balance": account.balance,
+                    "account_equity": account.equity,
+                    "account_free_margin": account.free_margin,
+                    "account_leverage": account.leverage,
+                    "account_currency": account.currency,
+                }
+            ),
             debug=True,
         )
 
@@ -2062,11 +2127,6 @@ def _run_forex_analysis(run_id: str, req: ForexAnalysisRequest) -> None:
             return
 
         seen_stages: set[str] = set()
-        analysis_cutoff = req.date or (
-            risk_context.as_of_utc.isoformat() if risk_context is not None else None
-        )
-        if analysis_cutoff is None:
-            analysis_cutoff = datetime.now(timezone.utc).isoformat()
         with _lock:
             if run_id in _forex_runs:
                 _forex_runs[run_id].update(
@@ -2175,6 +2235,7 @@ def _run_forex_analysis(run_id: str, req: ForexAnalysisRequest) -> None:
             return
 
         final_state = graph.get_state() or {}
+        canonical_run_id = final_state.get("forex_run_id")
         signal = graph.process_signal(final_state)
         proposal = graph.get_last_proposal()
         risk_decision = graph.get_last_risk_decision()
@@ -2213,6 +2274,7 @@ def _run_forex_analysis(run_id: str, req: ForexAnalysisRequest) -> None:
 
         report_payload = {
             "run_id": run_id,
+            "canonical_run_id": canonical_run_id,
             "pair": req.pair,
             "timeframe": exec_tf,
             "execution_timeframe": exec_tf,
@@ -2291,6 +2353,7 @@ def _run_forex_analysis(run_id: str, req: ForexAnalysisRequest) -> None:
                     proposal_id=proposal_id,
                     report_id=report_id,
                     report_path=str(report_path) if report_path else None,
+                    canonical_run_id=canonical_run_id,
                 )
 
         _emit_fx_event(
@@ -2302,11 +2365,17 @@ def _run_forex_analysis(run_id: str, req: ForexAnalysisRequest) -> None:
                 "signal": signal,
                 "proposal_id": proposal_id,
                 "report_id": report_id,
+                "canonical_run_id": canonical_run_id,
                 "message": f"Forex analysis complete: {signal}",
             },
         )
 
     except Exception as exc:
+        canonical_run_id = None
+        graph_obj = locals().get("graph")
+        graph_state = graph_obj.get_state() if graph_obj is not None else None
+        if isinstance(graph_state, dict):
+            canonical_run_id = graph_state.get("forex_run_id")
         if isinstance(exc, DataInsufficientError):
             if "future or stale quote" in str(exc).lower():
                 error_msg = (
@@ -2320,6 +2389,9 @@ def _run_forex_analysis(run_id: str, req: ForexAnalysisRequest) -> None:
         elif isinstance(exc, IncompleteResponseError):
             error_msg = str(exc)
             error_code = "LLM_OUTPUT_INCOMPLETE"
+        elif isinstance(exc, RunBudgetExceededError):
+            error_msg = str(exc)
+            error_code = "LLM_BUDGET_EXHAUSTED"
         elif isinstance(exc, ValueError) and "tokens-per-minute limit" in str(exc):
             error_msg = (
                 "The next agent prompt exceeds the configured Groq free-tier token budget. "
@@ -2338,6 +2410,7 @@ def _run_forex_analysis(run_id: str, req: ForexAnalysisRequest) -> None:
                     finished_at=datetime.now(timezone.utc).isoformat(),
                     error=error_msg,
                     error_code=error_code,
+                    canonical_run_id=canonical_run_id,
                 )
 
         _emit_fx_event(
@@ -2347,6 +2420,7 @@ def _run_forex_analysis(run_id: str, req: ForexAnalysisRequest) -> None:
                 "run_id": run_id,
                 "error": error_msg,
                 "code": error_code,
+                "canonical_run_id": canonical_run_id,
                 "message": f"Forex analysis failed: {error_msg}",
             },
         )
@@ -2366,6 +2440,14 @@ def _run_forex_analysis(run_id: str, req: ForexAnalysisRequest) -> None:
 
 def _forex_worker_entry(run_id: str, req: ForexAnalysisRequest) -> None:
     """Track worker lifetime so shutdown never closes its journal underneath it."""
+    with _lock:
+        admission_managed = threading.current_thread() in _forex_analysis_threads
+    if admission_managed and not _analysis_admission.start(
+        run_id, lambda: _forex_cancel_requested(run_id)
+    ):
+        with _lock:
+            _forex_analysis_threads.discard(threading.current_thread())
+        return
     # Older dashboard clients sent today's date-only value for a live run.
     # Date-only cutoffs mean midnight UTC, so normalize that legacy request to
     # the current instant. Explicit historical dates remain unchanged.
@@ -2380,6 +2462,12 @@ def _forex_worker_entry(run_id: str, req: ForexAnalysisRequest) -> None:
         run_id=run_id,
         provider=req.provider or get_runtime_config().get("llm_provider"),
         model=req.quick_model or get_runtime_config().get("quick_think_llm"),
+        max_total_tokens=req.max_run_tokens or _optional_positive_env(
+            "TRADINGAGENTS_MAX_RUN_TOKENS"
+        ),
+        max_calls=req.max_run_calls or _optional_positive_env(
+            "TRADINGAGENTS_MAX_RUN_LLM_CALLS"
+        ),
     )
     try:
         # Acquire mandatory live news/calendar inputs before entering the graph
@@ -2413,16 +2501,20 @@ def _forex_worker_entry(run_id: str, req: ForexAnalysisRequest) -> None:
         with track_usage(tracker):
             _run_forex_analysis(run_id, req)
     finally:
-        journal = get_journal()
-        journal.save_llm_usage(tracker.records())
-        usage = journal.get_llm_usage_summary(run_id)
-        with _lock:
-            if run_id in _forex_runs:
-                _forex_runs[run_id]["usage"] = usage
-            if run_id in _forex_completed_reports:
-                _forex_completed_reports[run_id]["usage"] = usage
-            _forex_analysis_threads.discard(threading.current_thread())
-        _persist_forex_run(run_id)
+        try:
+            journal = get_journal()
+            journal.save_llm_usage(tracker.records())
+            usage = journal.get_llm_usage_summary(run_id)
+            with _lock:
+                if run_id in _forex_runs:
+                    _forex_runs[run_id]["usage"] = usage
+                if run_id in _forex_completed_reports:
+                    _forex_completed_reports[run_id]["usage"] = usage
+                _forex_analysis_threads.discard(threading.current_thread())
+            _persist_forex_run(run_id)
+        finally:
+            if admission_managed:
+                _analysis_admission.release(run_id)
 
 
 @router.post("/analyze")
@@ -2443,6 +2535,39 @@ async def start_forex_analysis(
     ctx_tfs_list = list(ctx_tfs)
 
     run_id = f"fx_{uuid.uuid4().hex[:10]}"
+    idempotency_key = (request.headers.get("Idempotency-Key") or "").strip() or None
+    if idempotency_key and len(idempotency_key) > 128:
+        raise HTTPException(status_code=422, detail="Idempotency-Key must be 128 characters or fewer")
+    try:
+        admission = _analysis_admission.admit(
+            run_id,
+            idempotency_key=idempotency_key,
+            fingerprint=_analysis_admission.fingerprint(req.model_dump_json()),
+        )
+    except IdempotencyConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except AdmissionRejected as exc:
+        raise HTTPException(
+            status_code=429,
+            detail={"code": "ANALYSIS_CAPACITY_EXCEEDED", "message": str(exc)},
+            headers={"Retry-After": "5"},
+        ) from exc
+    if admission.duplicate:
+        with _lock:
+            existing = dict(_forex_runs.get(admission.run_id) or {})
+        return {
+            "run_id": admission.run_id,
+            "status": existing.get("status", "queued"),
+            "pair": existing.get("pair", req.pair),
+            "timeframe": existing.get("timeframe", exec_tf),
+            "execution_timeframe": existing.get("execution_timeframe", exec_tf),
+            "context_timeframes": existing.get("context_timeframes", ctx_tfs_list),
+            "analysts": existing.get("analysts", list(req.analysts)),
+            "run_type": "forex",
+            "asset_type": "forex",
+            "duplicate": True,
+            "message": "Existing Forex analysis returned for this idempotency key",
+        }
     now_iso = datetime.now(timezone.utc).isoformat()
     run_entry = {
         "run_id": run_id,
@@ -2459,6 +2584,11 @@ async def start_forex_analysis(
         "provider": req.provider or "",
         "quick_model": req.quick_model or "",
         "deep_model": req.deep_model or "",
+        "max_tokens": req.max_tokens,
+        "quick_max_tokens": req.quick_max_tokens,
+        "deep_max_tokens": req.deep_max_tokens,
+        "max_run_tokens": req.max_run_tokens,
+        "max_run_calls": req.max_run_calls,
         "account_balance": req.account_balance,
         "risk_percent": req.risk_percent,
         "research_depth": getattr(req, "research_depth", "deep"),

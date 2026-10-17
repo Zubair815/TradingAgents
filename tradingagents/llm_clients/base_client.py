@@ -3,6 +3,7 @@ from abc import ABC, abstractmethod
 from typing import Any
 
 from .response_validation import validate_response
+from .validators import model_status
 
 
 def normalize_content(response):
@@ -42,14 +43,23 @@ class BaseLLMClient(ABC):
 
     def warn_if_unknown_model(self) -> None:
         """Warn when the model is outside the known list for the provider."""
-        if self.validate_model():
+        status = model_status(self.get_provider_name(), self.model)
+        if status in {"supported", "legacy", "unverified"}:
             return
 
-        warnings.warn(
-            (
+        if status == "deprecated":
+            message = (
+                f"Model '{self.model}' is deprecated for provider "
+                f"'{self.get_provider_name()}'. Verify the provider's current replacement."
+            )
+        else:
+            message = (
                 f"Model '{self.model}' is not in the known model list for "
                 f"provider '{self.get_provider_name()}'. Continuing anyway."
-            ),
+            )
+
+        warnings.warn(
+            message,
             RuntimeWarning,
             stacklevel=2,
         )

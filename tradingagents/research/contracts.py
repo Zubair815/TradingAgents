@@ -39,6 +39,10 @@ class Record(BaseModel):
 
 
 class AnalysisRequest(Record):
+    # Optional linkage/trace fields are absent on legacy rows rather than
+    # reconstructed from present-day defaults.
+    dashboard_run_id: str | None = None
+    software_revision: str | None = None
     pair: str = "EURUSD"
     timeframe: str = "H1"
     execution_timeframe: str | None = None
@@ -49,6 +53,10 @@ class AnalysisRequest(Record):
     quick_model: str | None = None
     deep_model: str | None = None
     max_tokens: int | None = Field(default=None, ge=512, le=100_000)
+    quick_max_tokens: int | None = Field(default=None, ge=512, le=100_000)
+    deep_max_tokens: int | None = Field(default=None, ge=512, le=100_000)
+    max_run_tokens: int | None = Field(default=None, ge=1_000, le=10_000_000)
+    max_run_calls: int | None = Field(default=None, ge=1, le=10_000)
     account_balance: float | None = Field(default=None, gt=0)
     account_equity: float | None = Field(default=None, gt=0)
     account_free_margin: float | None = Field(default=None, ge=0)

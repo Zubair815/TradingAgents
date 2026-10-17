@@ -84,6 +84,16 @@ def validate_candles(df: pd.DataFrame, timeframe=None, *, as_of=None,
                 raise DataInsufficientError("timeframe mismatch")
             if current - previous == step:
                 continue
+            if tf is Timeframe.D1:
+                # Broker daily candles follow the broker's New York-close
+                # session. Their UTC open can move by one hour at DST and
+                # brokers legitimately omit full daily bars on market
+                # holidays. A gap of at most four calendar days is therefore
+                # a valid broker-session discontinuity, not fabricated data.
+                # Longer gaps still fail closed as incomplete history.
+                if current - previous <= pd.Timedelta(days=4, hours=1):
+                    continue
+                raise DataInsufficientError("missing daily candles / unexpected extended market gap")
             missing = pd.date_range(previous + step, current, freq=step, inclusive="left")
             if any(is_market_open(stamp.to_pydatetime()) for stamp in missing):
                 raise DataInsufficientError("missing candles / unexpected market gap")

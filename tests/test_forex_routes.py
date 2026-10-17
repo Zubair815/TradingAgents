@@ -2323,12 +2323,14 @@ class TestForexAnalysisRuns:
         with patch("web.forex_routes.ForexTradingAgentsGraph") as mock_graph_cls:
             mock_graph = MagicMock()
             mock_graph.stream.side_effect = RuntimeError("Broker connection timeout")
+            mock_graph.get_state.return_value = {"forex_run_id": "run_canonical_failure"}
             mock_graph_cls.return_value = mock_graph
 
             _run_forex_analysis(run_id, req)
 
         assert _forex_runs[run_id]["status"] == "failed"
         assert _forex_runs[run_id]["error"] == "The Forex analysis provider failed. Please retry."
+        assert _forex_runs[run_id]["canonical_run_id"] == "run_canonical_failure"
         event_types = [evt["type"] for evt in _forex_run_events[run_id]]
         assert "error" in event_types
 
@@ -2703,6 +2705,16 @@ class TestForexAnalystSelection:
                 "account_free_margin": 100000.0,
                 "account_leverage": 100.0,
                 "account_currency": "USD",
+                "provider": "anthropic",
+                "quick_model": "claude-haiku-4-5",
+                "deep_model": "claude-sonnet-5",
+                "max_tokens": 7000,
+                "quick_max_tokens": 2000,
+                "deep_max_tokens": 6000,
+                "max_run_tokens": 24000,
+                "max_run_calls": 8,
+                "research_depth": "quick",
+                "economic_blackout": False,
             },
         )
         assert res.status_code == 200
@@ -2711,6 +2723,17 @@ class TestForexAnalystSelection:
 
         time.sleep(0.15)
         assert captured_kwargs.get("selected_analysts") == ("forex_technical", "forex_news")
+        manifest = captured_kwargs["analysis_request"]
+        assert manifest.dashboard_run_id == res.json()["run_id"]
+        assert manifest.provider == "anthropic"
+        assert manifest.quick_model == "claude-haiku-4-5"
+        assert manifest.deep_model == "claude-sonnet-5"
+        assert manifest.quick_max_tokens == 2000
+        assert manifest.deep_max_tokens == 6000
+        assert manifest.max_run_tokens == 24000
+        assert manifest.max_run_calls == 8
+        assert manifest.research_depth == "quick"
+        assert manifest.economic_blackout is False
 
 
 # ---------------------------------------------------------------------------

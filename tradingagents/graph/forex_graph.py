@@ -597,6 +597,7 @@ class ForexTradingAgentsGraph:
         quick_thinking_llm: Any = None,
         deep_thinking_llm: Any = None,
         checkpointer: Any = None,
+        analysis_request: AnalysisRequest | None = None,
         debug: bool = False,
     ):
         _require_manual_execution(auto_record_trades)
@@ -634,9 +635,16 @@ class ForexTradingAgentsGraph:
         self.auto_record_trades = auto_record_trades
         self.cancellation_check = cancellation_check
         self.persistence_guard = persistence_guard
+        self.analysis_request = analysis_request
 
         # LLMs
         llm_kwargs = self._get_provider_kwargs()
+        quick_llm_kwargs = dict(llm_kwargs)
+        deep_llm_kwargs = dict(llm_kwargs)
+        if self.config.get("quick_max_tokens") is not None:
+            quick_llm_kwargs["max_tokens"] = int(self.config["quick_max_tokens"])
+        if self.config.get("deep_max_tokens") is not None:
+            deep_llm_kwargs["max_tokens"] = int(self.config["deep_max_tokens"])
         provider = self.config.get("llm_provider", "openai")
         backend_url = self.config.get("backend_url") or self.config.get("llm_backend_url")
         user_cfg = config or {}
@@ -664,7 +672,7 @@ class ForexTradingAgentsGraph:
                 provider=provider,
                 model=quick_model,
                 base_url=backend_url,
-                **llm_kwargs,
+                **quick_llm_kwargs,
             )
             self.quick_thinking_llm = quick_client.get_llm()
 
@@ -675,7 +683,7 @@ class ForexTradingAgentsGraph:
                 provider=provider,
                 model=deep_model,
                 base_url=backend_url,
-                **llm_kwargs,
+                **deep_llm_kwargs,
             )
             self.deep_thinking_llm = deep_client.get_llm()
 
@@ -891,7 +899,12 @@ class ForexTradingAgentsGraph:
                     version_id=version_id,
                 )
                 valid_analysts = [a for a in self.selected_analysts if a in {"forex_technical", "forex_macro", "forex_news"}] or ["forex_technical"]
-                req_kwargs: dict[str, Any] = {
+                req_kwargs: dict[str, Any] = (
+                    self.analysis_request.model_dump()
+                    if self.analysis_request is not None
+                    else {}
+                )
+                req_kwargs.update({
                     "pair": canon_pair,
                     "timeframe": exec_tf_str,
                     "execution_timeframe": exec_tf_str,
@@ -899,8 +912,25 @@ class ForexTradingAgentsGraph:
                     "higher_timeframes": tuple(ctx_tf_strs),
                     "date": t_date,
                     "analysts": valid_analysts,
-                    "account_source": "mt5",
-                }
+                    "provider": req_kwargs.get("provider") or self.config.get("llm_provider"),
+                    "quick_model": req_kwargs.get("quick_model") or self.config.get("quick_think_llm"),
+                    "deep_model": req_kwargs.get("deep_model") or self.config.get("deep_think_llm"),
+                    "max_tokens": req_kwargs.get("max_tokens") or self.config.get("max_tokens"),
+                    "quick_max_tokens": req_kwargs.get("quick_max_tokens")
+                    or self.config.get("quick_max_tokens"),
+                    "deep_max_tokens": req_kwargs.get("deep_max_tokens")
+                    or self.config.get("deep_max_tokens"),
+                    "research_depth": self.config.get(
+                        "research_depth", req_kwargs.get("research_depth", "deep")
+                    ),
+                    "min_rr": float(getattr(self.risk_limits, "min_risk_reward_ratio", 1.5)),
+                    "max_spread_pips": float(getattr(self.risk_limits, "max_spread_pips", 3.5)),
+                    "max_open_positions": int(getattr(self.risk_limits, "max_open_positions", 5)),
+                    "economic_blackout": bool(
+                        getattr(self.risk_limits, "enforce_news_blackout", True)
+                    ),
+                    "account_source": self.account_source,
+                })
                 if self.risk_context is not None:
                     if self.risk_context.account.balance > 0:
                         req_kwargs["account_balance"] = self.risk_context.account.balance
@@ -916,6 +946,14 @@ class ForexTradingAgentsGraph:
                         k in req_kwargs for k in ("account_balance", "account_equity", "account_free_margin", "account_leverage", "account_currency")
                     ):
                         req_kwargs["account_source"] = "manual"
+                elif self.account_source == "manual":
+                    req_kwargs.update(
+                        account_balance=self.sizing_account.balance,
+                        account_equity=self.sizing_account.equity,
+                        account_free_margin=self.sizing_account.free_margin,
+                        account_leverage=self.sizing_account.leverage,
+                        account_currency=self.sizing_account.currency,
+                    )
 
                 analysis_req = AnalysisRequest(**req_kwargs)
                 utc_cutoff = cutoff if cutoff.tzinfo is not None else cutoff.replace(tzinfo=timezone.utc)
@@ -1029,6 +1067,7 @@ class ForexTradingAgentsGraph:
             context_timeframes=context_timeframes,
             timeframe=timeframe,
         )
+        self.curr_state = dict(init_state)
         args = self.propagator.get_graph_args()
         graph_input = self._resolve_graph_input(init_state, thread_id, args)
 
@@ -1072,6 +1111,7 @@ class ForexTradingAgentsGraph:
             context_timeframes=context_timeframes,
             timeframe=timeframe,
         )
+        self.curr_state = dict(init_state)
         args = self.propagator.get_graph_args()
         graph_input = self._resolve_graph_input(init_state, thread_id, args)
 

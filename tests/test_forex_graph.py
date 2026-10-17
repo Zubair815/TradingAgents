@@ -54,7 +54,7 @@ from tradingagents.forex import (
     ForexTradingAgentsGraph,
 )
 from tradingagents.forex.calendar import TradingActionRecommendation
-from tradingagents.research.contracts import RunStatus
+from tradingagents.research.contracts import AnalysisRequest, RunStatus
 from tradingagents.risk.engine import ForexRiskLimits
 from tradingagents.risk.sizing import (
     ForexAccountProfile,
@@ -829,6 +829,8 @@ class TestForexGraphConfiguration:
                 "backend_url": "https://api.custom.com",
                 "temperature": 0.3,
                 "max_tokens": 4096,
+                "quick_max_tokens": 2048,
+                "deep_max_tokens": 6144,
                 "llm_max_retries": 5,
                 "anthropic_effort": "low",
             }
@@ -848,7 +850,7 @@ class TestForexGraphConfiguration:
             assert quick_call.kwargs.get("model") == "claude-haiku-4-5"
             assert quick_call.kwargs.get("base_url") == "https://api.custom.com"
             assert quick_call.kwargs.get("temperature") == 0.3
-            assert quick_call.kwargs.get("max_tokens") == 4096
+            assert quick_call.kwargs.get("max_tokens") == 2048
             assert quick_call.kwargs.get("max_retries") == 5
             assert quick_call.kwargs.get("effort") == "low"
 
@@ -857,6 +859,7 @@ class TestForexGraphConfiguration:
             assert deep_call.kwargs.get("provider") == "anthropic"
             assert deep_call.kwargs.get("model") == "claude-sonnet-4-5"
             assert deep_call.kwargs.get("base_url") == "https://api.custom.com"
+            assert deep_call.kwargs.get("max_tokens") == 6144
 
     def test_legacy_model_key_fallback(self):
         mock_client = MockChatModel()
@@ -914,6 +917,85 @@ class TestForexGraphConfiguration:
 
 
 class TestForexGraphDomainProvenance:
+    def test_canonical_run_preserves_exact_non_default_execution_manifest(self):
+        journal = ForexTradeJournal(db_path=":memory:")
+        request = AnalysisRequest(
+            dashboard_run_id="fx_manifest_123",
+            software_revision="a" * 40,
+            pair="EURUSD",
+            execution_timeframe="H1",
+            context_timeframes=("H4", "D1"),
+            analysts=["forex_technical"],
+            provider="groq",
+            quick_model="openai/gpt-oss-20b",
+            deep_model="openai/gpt-oss-120b",
+            max_tokens=3000,
+            research_depth="quick",
+            risk_percent=0.75,
+            min_rr=2.25,
+            max_spread_pips=2.5,
+            economic_blackout=False,
+            account_source="mt5",
+        )
+        limits = ForexRiskLimits(
+            default_risk_percent=0.75,
+            min_risk_reward_ratio=2.25,
+            max_spread_pips=2.5,
+            enforce_news_blackout=False,
+            enforce_market_open=False,
+        )
+        graph = ForexTradingAgentsGraph(
+            selected_analysts=("forex_technical",),
+            config={
+                "llm_provider": "groq",
+                "quick_think_llm": "openai/gpt-oss-20b",
+                "deep_think_llm": "openai/gpt-oss-120b",
+                "max_tokens": 3000,
+                "research_depth": "quick",
+            },
+            risk_limits=limits,
+            risk_context=MagicMock(
+                account=ForexAccountProfile(
+                    balance=1000.42,
+                    equity=999.10,
+                    free_margin=900.0,
+                    currency="USD",
+                    leverage=1000.0,
+                )
+            ),
+            journal=journal,
+            analysis_request=request,
+            quick_thinking_llm=MockChatModel(),
+            deep_thinking_llm=MockChatModel(),
+        )
+
+        state = graph.create_run_state(
+            "EURUSD",
+            trade_date="2026-10-15T17:36:17+00:00",
+            execution_timeframe="H1",
+            context_timeframes=("H4", "D1"),
+        )
+        stored = journal.research.get_run(state["forex_run_id"])
+
+        assert stored is not None
+        manifest = stored.request
+        assert manifest.dashboard_run_id == "fx_manifest_123"
+        assert manifest.software_revision == "a" * 40
+        assert manifest.provider == "groq"
+        assert manifest.quick_model == "openai/gpt-oss-20b"
+        assert manifest.deep_model == "openai/gpt-oss-120b"
+        assert manifest.max_tokens == 3000
+        assert manifest.research_depth == "quick"
+        assert manifest.economic_blackout is False
+        assert manifest.analysts == ["forex_technical"]
+        assert manifest.risk_percent == 0.75
+        assert manifest.min_rr == 2.25
+        assert manifest.max_spread_pips == 2.5
+        assert manifest.account_balance == 1000.42
+        assert manifest.account_equity == 999.10
+        assert manifest.account_free_margin == 900.0
+        assert manifest.account_leverage == 1000.0
+
     """Tests for DOM-009, DOM-011, and AGENT-007 run envelopes and provenance."""
 
     def test_create_run_state_generates_canonical_identities(self):

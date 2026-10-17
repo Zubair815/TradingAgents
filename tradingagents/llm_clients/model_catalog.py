@@ -248,12 +248,28 @@ def get_model_options(provider: str, mode: str) -> list[ModelOption]:
 # menu, and the explicit ID of a model listed under a shorter name. Known to
 # validation so a config naming one runs without an unknown-model warning.
 LEGACY_MODELS: dict[str, list[str]] = {
-    "openai": ["gpt-5.4", "gpt-5.6-sol"],
+    "openai": ["gpt-4.1", "gpt-5.4", "gpt-5.6-sol"],
     "xai": ["grok-4.20-0309-reasoning", "grok-4.20-0309-non-reasoning",
             "grok-4.20-multi-agent-0309"],
     "deepseek": ["deepseek-v4-flash"],
     "qwen": ["qwen3.7-max", "qwen3.7-plus", "qwen3.6-max", "qwen3.6-plus"],
-    "anthropic": ["claude-fable-5", "claude-opus-4-8", "claude-opus-4-7"],
+    "anthropic": [
+        "claude-fable-5",
+        "claude-opus-4-8",
+        "claude-opus-4-7",
+        "claude-opus-4-6",
+        "claude-opus-4-5",
+        "claude-sonnet-4-6",
+        "claude-sonnet-4-5",
+        "claude-sonnet-4-0",
+    ],
+    "google": ["gemini-flash-latest", "gemini-pro-latest"],
+}
+
+# Provider aliases documented as retired/deprecated remain recognized so an
+# older configuration is diagnosed accurately instead of called "unknown".
+DEPRECATED_MODELS: dict[str, list[str]] = {
+    "deepseek": ["deepseek-chat", "deepseek-reasoner"],
 }
 
 
@@ -267,6 +283,7 @@ def get_known_models() -> dict[str, list[str]]:
                 for _, value in options
             }
             | set(LEGACY_MODELS.get(provider, []))
+            | set(DEPRECATED_MODELS.get(provider, []))
         )
         for provider, mode_options in MODEL_OPTIONS.items()
     }

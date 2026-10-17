@@ -1,6 +1,8 @@
 """Isolated defaults; live provider tests require --run-integration."""
 
 import os
+import shutil
+import tempfile
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -30,6 +32,9 @@ def pytest_configure(config):
     for name in list(os.environ):
         if name.startswith("TRADINGAGENTS_"):
             env.delenv(name)
+    test_log_dir = tempfile.mkdtemp(prefix="tradingagents-test-logs-")
+    config.add_cleanup(lambda: shutil.rmtree(test_log_dir, ignore_errors=True))
+    env.setenv("TRADINGAGENTS_LOG_DIR", test_log_dir)
     if not live:
         for name in _API_KEY_ENV_VARS:
             env.setenv(name, "placeholder")

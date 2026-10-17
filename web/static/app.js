@@ -342,14 +342,20 @@
   // ---- Event Bindings ----
   function bindEvents() {
     // Tab switching for 9 subsystems
-    DOM.tabs.forEach(tab => {
-      tab.addEventListener('click', () => {
-        DOM.tabs.forEach(t => { t.classList.remove('active'); t.setAttribute('aria-selected', 'false'); });
+    const activatePrimaryTab = (tab, moveFocus = false) => {
+        DOM.tabs.forEach(t => {
+          t.classList.remove('active');
+          t.setAttribute('aria-selected', 'false');
+          t.setAttribute('tabindex', '-1');
+        });
         DOM.views.forEach(v => v.classList.remove('active'));
         tab.classList.add('active');
         tab.setAttribute('aria-selected', 'true');
+        tab.setAttribute('tabindex', '0');
         const viewEl = $(`#view-${tab.dataset.view}`);
         if (viewEl) viewEl.classList.add('active');
+        document.title = `${tab.textContent.trim()} | TradingAgents`;
+        if (moveFocus) tab.focus();
 
         stopMT5AutoRefresh();
         if (tab.dataset.view === 'dashboard') {
@@ -377,6 +383,23 @@
           loadRuns();
           loadHistory();
         }
+    };
+
+    DOM.tabs.forEach((tab, tabIndex) => {
+      tab.setAttribute('tabindex', tab.classList.contains('active') ? '0' : '-1');
+      tab.addEventListener('click', () => {
+        activatePrimaryTab(tab);
+      });
+      tab.addEventListener('keydown', event => {
+        const handledKeys = ['ArrowDown', 'ArrowUp', 'ArrowRight', 'ArrowLeft', 'Home', 'End'];
+        if (!handledKeys.includes(event.key)) return;
+        event.preventDefault();
+        let nextIndex = tabIndex;
+        if (event.key === 'Home') nextIndex = 0;
+        else if (event.key === 'End') nextIndex = DOM.tabs.length - 1;
+        else if (event.key === 'ArrowDown' || event.key === 'ArrowRight') nextIndex = (tabIndex + 1) % DOM.tabs.length;
+        else nextIndex = (tabIndex - 1 + DOM.tabs.length) % DOM.tabs.length;
+        activatePrimaryTab(DOM.tabs[nextIndex], true);
       });
     });
 

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="description" content="TradingAgents — Multi-Agent AI Forex & Equities Decision-Support Dashboard">
   <title>TradingAgents — AI Trading Terminal</title>
-  <link rel="stylesheet" href="/static/styles.css?v=2.13">
+  <link rel="stylesheet" href="/static/styles.css?v=3.0">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📊</text></svg>">
 </head>
 <body>
@@ -16,7 +16,7 @@
       <a href="/" class="logo">
         <img src="/static/hero.jpg" alt="Logo" class="logo-icon">
         <span class="logo-text">TradingAgents</span>
-        <span class="logo-badge">Institutional Terminal</span>
+        <span class="logo-badge">Market operations</span>
       </a>
       <div style="display: flex; align-items: center; gap: 1rem;">
         <div class="mt5-badge" id="mt5Badge" title="MetaTrader 5 strictly observed in read-only mode. Live orders are never executed.">
@@ -35,7 +35,7 @@
   <div class="app-container">
 
     <!-- ===== Navigation Tabs (9 Subsystems) ===== -->
-    <div class="tabs-wrapper">
+    <nav class="tabs-wrapper" aria-label="Primary subsystems">
       <div class="tabs" role="tablist">
         <button class="tab active" data-view="dashboard" role="tab" aria-selected="true" id="tab-dashboard">
           <span>📊</span> Dashboard
@@ -64,8 +64,15 @@
         <button class="tab" data-view="settings" role="tab" aria-selected="false" id="tab-settings">
           <span>⚙️</span> Settings
         </button>
+        <a class="btn-secondary btn-sm" href="/observer" target="_blank" rel="noopener" aria-label="Open Market Observer in a new tab" style="text-decoration:none; display:inline-flex; align-items:center; gap:0.4rem;">
+          <span>◉</span> Market Observer
+        </a>
       </div>
-    </div>
+      <div class="rail-policy" aria-label="Execution policy">
+        <span class="rail-policy-mark" aria-hidden="true">M</span>
+        <span><strong>Manual execution</strong><small>MT5 observation is read-only</small></span>
+      </div>
+    </nav>
 
     <!-- ================================================================= -->
     <!-- 1. DASHBOARD VIEW                                                 -->
@@ -284,7 +291,7 @@
             </button>
           </div>
 
-          <form id="analysisForm" autocomplete="off">
+          <form id="analysisForm" autocomplete="off" novalidate>
             <!-- Forex Controls -->
             <div id="forexControls">
               <div class="form-group" style="margin-bottom: 1rem;">
@@ -931,7 +938,7 @@
             <span>Historical Agent Backtest: Full point-in-time multi-agent execution. Zero lookahead leakage.</span>
           </div>
 
-          <form id="backtestForm" autocomplete="off">
+          <form id="backtestForm" autocomplete="off" novalidate>
             <div class="form-group" style="margin-bottom: 1rem;">
               <label class="form-label" for="btPair">Currency Pair</label>
               <select class="form-select" id="btPair">

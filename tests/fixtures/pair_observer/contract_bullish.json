@@ -1,0 +1,18 @@
+{
+  "fixture_schema_version": 1,
+  "provenance": "synthetic deterministic contract fixture; no broker data",
+  "as_of_utc": "2026-01-05T08:05:00Z",
+  "candle": {
+    "pair": "EURUSD",
+    "timeframe": "M5",
+    "open_time_utc": "2026-01-05T08:00:00Z",
+    "close_time_utc": "2026-01-05T08:05:00Z",
+    "open": 1.1000,
+    "high": 1.1020,
+    "low": 1.0990,
+    "close": 1.1015,
+    "tick_volume": 120,
+    "completed": true,
+    "source": "SYNTHETIC"
+  }
+}

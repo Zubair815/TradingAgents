@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from tradingagents.agents.schemas_forex import (
@@ -700,12 +700,31 @@ class TradeLifecycleManager:
             status=next_status,
         )
 
+        # Some Windows clocks return the same timestamp for several operations
+        # in one tick. Preserve a strict audit ordering instead of allowing a
+        # human decision to appear simultaneous with proposal creation/risk.
+        decision_time = datetime.now(timezone.utc)
+        prior_events = self.journal.get_events(proposal_id=proposal_id, limit=-1)
+        for prior in prior_events:
+            raw = prior.get("timestamp_utc")
+            if not raw:
+                continue
+            try:
+                stamp = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if stamp.tzinfo is None:
+                stamp = stamp.replace(tzinfo=timezone.utc)
+            if decision_time <= stamp:
+                decision_time = stamp + timedelta(microseconds=1)
+
         self.timeline.record_event(
             event_type=evt_type,
             proposal_id=proposal_id,
             actor=actor,
             description=desc,
             payload={"action": action_clean, "reason": reason},
+            timestamp_utc=decision_time,
         )
         return next_status
 

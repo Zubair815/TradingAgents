@@ -621,22 +621,34 @@ def _run_analysis_entry(run_id: str, req: AnalysisRequest) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     configure_bounded_logging()
-    logger.info("TradingAgents Web Dashboard starting")
+    logger.info(
+        "TradingAgents Web Dashboard starting pid=%s revision=%s",
+        os.getpid(),
+        os.environ.get("TRADINGAGENTS_SOFTWARE_REVISION", "unavailable"),
+    )
     from web.forex_routes import get_forex_runtime, reset_forex_state
+    from web.observer_assembly import shutdown_observer, start_observer_if_enabled
     runtime = get_forex_runtime()
     _shutdown_requested.clear()
     app.state.forex_runtime = runtime
     try:
         await asyncio.to_thread(runtime.start)
+        await asyncio.to_thread(start_observer_if_enabled)
         yield
     finally:
         _shutdown_requested.set()
         with _run_store_lock:
             analysis_threads = list(_analysis_threads)
+        logger.info(
+            "TradingAgents Web Dashboard shutdown requested reason=lifespan_finalizer "
+            "active_equity_workers=%s",
+            sum(thread.is_alive() for thread in analysis_threads),
+        )
         for thread in analysis_threads:
             await asyncio.to_thread(thread.join, 0.5)
+        await asyncio.to_thread(shutdown_observer)
         await asyncio.to_thread(reset_forex_state)
-        logger.info("TradingAgents Web Dashboard shutting down")
+        logger.info("TradingAgents Web Dashboard stopped pid=%s", os.getpid())
 
 
 app = FastAPI(
@@ -683,8 +695,10 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 # Mount Forex REST and SSE router (Phase 20)
 from web.forex_routes import router as forex_router  # noqa: E402
+from web.observer_routes import router as observer_router  # noqa: E402
 
 app.include_router(forex_router)
+app.include_router(observer_router)
 
 
 # ---------------------------------------------------------------------------
@@ -700,6 +714,18 @@ async def index(response: Response, request: Request):
         set_session_cookie(response, request)
     response.headers["Cache-Control"] = "no-store"
     return index_path.read_text(encoding="utf-8")
+
+
+@app.get("/observer", response_class=HTMLResponse)
+async def observer_page(response: Response, request: Request):
+    """Serve the standalone observer page without importing dashboard assets."""
+    page = STATIC_DIR / "observer" / "index.html"
+    if not page.exists():
+        raise HTTPException(status_code=500, detail="Observer frontend not built")
+    if not DASHBOARD_API_KEY and _local_browser(request):
+        set_session_cookie(response, request)
+    response.headers["Cache-Control"] = "no-store"
+    return page.read_text(encoding="utf-8")
 
 
 @app.post("/api/auth/session")

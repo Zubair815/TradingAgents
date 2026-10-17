@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Market Observer — TradingAgents</title>
+  <link rel="stylesheet" href="/static/observer/observer.css?v=3">
+</head>
+<body>
+  <a class="skip-link" href="#observerMain">Skip to observer</a>
+  <header class="topbar">
+    <div class="brand-block">
+      <p class="eyebrow">TRADINGAGENTS / READ-ONLY DESK</p>
+      <h1>Market Observer</h1>
+      <p class="subtitle">A chartless, multi-timeframe watch process for one MT5 pair.</p>
+    </div>
+    <a href="/" class="back"><span aria-hidden="true">←</span> Dashboard</a>
+  </header>
+  <main id="observerMain">
+    <section class="command-deck panel" aria-labelledby="pairHeading">
+      <div class="pair-lockup">
+        <div class="status-line"><span id="state" class="state" data-state="unavailable">Unavailable</span><span id="brokerState" class="broker-state">MT5 checking…</span><span id="runningIndicator" class="running-indicator" role="status" hidden><span class="spinner" aria-hidden="true"></span>Watching markets</span></div>
+        <h2 id="pairHeading"><span id="pair">—</span> <small>continuous watch</small></h2>
+        <p id="lastCycle" class="cycle-copy">No completed observation cycle.</p>
+      </div>
+      <div class="command-actions" aria-label="Observer controls">
+        <button id="start" type="button" class="button button-primary">Start watching</button>
+        <button id="reviewWeek" type="button" class="button button-primary" hidden>Review previous week</button>
+        <button id="stop" type="button" class="button button-danger">Stop watching</button>
+        <button id="refresh" type="button" class="button button-neutral">Refresh data</button>
+      </div>
+      <dl class="telemetry-strip">
+        <div><dt>Completed cycles</dt><dd id="cycleCount">—</dd></div><div><dt>Tracked levels</dt><dd id="levelCount">—</dd></div>
+        <div><dt>Stored alerts</dt><dd id="alertCount">—</dd></div><div><dt>Execution policy</dt><dd>Manual only</dd></div>
+      </dl>
+      <div id="weeklyReviewSummary" class="weekly-review-summary">No stored previous-week review for this pair.</div>
+    </section>
+    <div id="pageNotice" class="page-notice" role="status" aria-live="polite" hidden></div>
+    <div id="error" role="alert" class="page-notice page-notice-error" hidden></div>
+    <section class="panel structure-panel" aria-labelledby="structureHeading">
+      <div class="section-head"><div><p class="section-kicker">TOP-DOWN READ</p><h2 id="structureHeading">Market structure</h2></div><p>Higher timeframe context → execution timing</p></div>
+      <div id="structure" class="timeframe-tape empty" aria-live="polite">No structure evidence yet. Start the observer while MT5 is connected.</div>
+    </section>
+    <div class="workspace-grid">
+      <section class="panel levels-panel" aria-labelledby="levelsHeading">
+        <div class="section-head"><div><p class="section-kicker">MARKED INTERNALLY</p><h2 id="levelsHeading">Active levels</h2></div><span id="levelsShown" class="count-chip">0 shown</span></div>
+        <div id="levels" class="data-list empty" aria-live="polite">No levels detected yet.</div>
+      </section>
+      <section class="panel alerts-panel" aria-labelledby="alertsHeading">
+        <div class="section-head"><div><p class="section-kicker">EVIDENCE LEDGER</p><h2 id="alertsHeading">Observer alerts</h2></div><span class="evidence-label">Stored evidence only</span></div>
+        <div id="alerts" class="data-list empty" aria-live="polite">No alerts recorded. The observer will only add one when its setup rules qualify.</div>
+      </section>
+    </div>
+    <section class="panel settings-panel" aria-labelledby="settingsHeading">
+      <div class="section-head settings-head"><div><p class="section-kicker">WATCH PROFILE</p><h2 id="settingsHeading">Observer settings</h2></div><button id="resetSettings" type="button" class="button button-ghost">Reset defaults</button></div>
+      <form id="settingsForm" novalidate>
+        <div class="field"><label for="settingPair">Forex pair</label><select id="settingPair" name="pair" aria-describedby="pairHelp"><option value="EURUSD">EUR/USD</option><option value="GBPUSD">GBP/USD</option><option value="USDJPY">USD/JPY</option></select><small id="pairHelp">Select one of the three approved observer pairs.</small></div>
+        <div class="field"><label for="settingPoll">Poll interval</label><div class="input-unit"><input id="settingPoll" name="poll_seconds" type="number" min="5" max="3600" step="1" inputmode="numeric" aria-describedby="pollHelp pollError"><span>sec</span></div><small id="pollHelp">How often the internal watch cycle runs.</small><small id="pollError" class="field-error" role="alert"></small></div>
+        <div class="field"><label for="settingSpread">Maximum spread</label><div class="input-unit"><input id="settingSpread" name="max_spread_pips" type="number" min="0.1" max="50" step="0.1" inputmode="decimal" aria-describedby="spreadHelp spreadError"><span>pips</span></div><small id="spreadHelp">Wider quotes block setup eligibility.</small><small id="spreadError" class="field-error" role="alert"></small></div>
+        <div class="field"><label for="settingQuoteAge">Maximum quote age</label><div class="input-unit"><input id="settingQuoteAge" name="max_quote_age_seconds" type="number" min="5" max="3600" step="1" inputmode="numeric" aria-describedby="quoteAgeHelp quoteAgeError"><span>sec</span></div><small id="quoteAgeHelp">Older quotes are rejected as stale.</small><small id="quoteAgeError" class="field-error" role="alert"></small></div>
+        <fieldset class="toggle-group"><legend>Alert behavior</legend>
+          <label class="toggle-row"><input id="settingDeveloping" type="checkbox"><span><strong>Developing setups</strong><small>Notify before every condition is complete.</small></span></label>
+          <label class="toggle-row"><input id="settingReady" type="checkbox"><span><strong>Ready setups</strong><small>Notify when all technical gates qualify.</small></span></label>
+          <label class="toggle-row"><input id="settingNotifications" type="checkbox"><span><strong>Windows notifications</strong><small>Send a desktop notification when supported.</small></span></label>
+        </fieldset>
+        <div class="settings-actions"><button id="saveSettings" type="submit" class="button button-primary">Save settings</button><span id="settingsStatus" class="save-status" role="status" aria-live="polite"></span></div>
+      </form>
+      <aside class="safety-note"><strong>Observation only.</strong> This process never places, modifies, or closes trades and never calls an LLM.</aside>
+    </section>
+  </main>
+  <div id="toast" class="toast" role="status" aria-live="polite" aria-atomic="true" hidden></div>
+  <script src="/static/observer/observer.js?v=3" defer></script>
+</body>
+</html>

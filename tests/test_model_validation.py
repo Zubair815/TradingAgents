@@ -5,7 +5,7 @@ import pytest
 
 from tradingagents.llm_clients.base_client import BaseLLMClient
 from tradingagents.llm_clients.model_catalog import get_known_models
-from tradingagents.llm_clients.validators import validate_model
+from tradingagents.llm_clients.validators import model_status, validate_model
 
 
 class DummyLLMClient(BaseLLMClient):
@@ -98,3 +98,38 @@ def test_a_retired_model_id_still_runs_without_a_warning(provider, model):
     from tradingagents.llm_clients.validators import validate_model
 
     assert validate_model(provider, model)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("model", [
+    "claude-sonnet-4-6",
+    "claude-sonnet-4-5",
+    "claude-sonnet-4-0",
+])
+def test_supported_anthropic_compatibility_ids_do_not_warn(model):
+    client = DummyLLMClient("anthropic", model)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        client.get_llm()
+
+    assert caught == []
+
+
+def test_model_status_distinguishes_catalog_confidence():
+    assert model_status("openai", "gpt-6-luna") == "supported"
+    assert model_status("openai", "gpt-4.1") == "legacy"
+    assert model_status("deepseek", "deepseek-chat") == "deprecated"
+    assert model_status("openrouter", "provider/new-model") == "unverified"
+    assert model_status("openai", "not-a-real-openai-model") == "unknown"
+
+
+def test_deprecated_model_emits_specific_warning():
+    client = DummyLLMClient("deepseek", "deepseek-chat")
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        client.get_llm()
+
+    assert len(caught) == 1
+    assert "deprecated" in str(caught[0].message)

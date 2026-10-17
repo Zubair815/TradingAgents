@@ -1,5 +1,7 @@
+import logging
 import os
 import re
+import time
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
@@ -11,6 +13,8 @@ from .api_key_env import get_api_key_env
 from .base_client import BaseLLMClient, normalize_content
 from .capabilities import get_capabilities
 from .validators import validate_model
+
+logger = logging.getLogger(__name__)
 
 
 class NormalizedChatOpenAI(ChatOpenAI):
@@ -72,25 +76,58 @@ class GroqRateLimitedChatOpenAI(NormalizedChatOpenAI):
     """Groq client with process-wide free-tier RPM/TPM pacing."""
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
-        from .rate_limit import estimate_chat_tokens, get_groq_limiter
+        from .rate_limit import (
+            estimate_chat_tokens,
+            get_groq_limiter,
+            groq_recovery_attempts,
+            groq_transient_retry_delay,
+        )
 
         limiter = get_groq_limiter(self.model_name)
-        max_output = self.max_tokens or self.max_completion_tokens or 512
-        reservation = limiter.acquire(
-            estimate_chat_tokens(messages, kwargs, output_reserve=min(int(max_output), 1024))
+        max_output = (
+            getattr(self, "max_tokens", None)
+            or getattr(self, "max_completion_tokens", None)
+            or 512
         )
-        result = super()._generate(
+        estimated_tokens = estimate_chat_tokens(
             messages,
-            stop=stop,
-            run_manager=run_manager,
-            **kwargs,
+            kwargs,
+            output_reserve=min(int(max_output), 1024),
         )
-        actual_tokens = 0
-        for generation in result.generations:
-            usage = getattr(generation.message, "usage_metadata", None) or {}
-            actual_tokens += int(usage.get("total_tokens") or 0)
-        limiter.reconcile(reservation, actual_tokens or None)
-        return result
+        recovery_attempts = groq_recovery_attempts()
+
+        for attempt in range(recovery_attempts + 1):
+            reservation = limiter.acquire(estimated_tokens)
+            try:
+                result = super()._generate(
+                    messages,
+                    stop=stop,
+                    run_manager=run_manager,
+                    **kwargs,
+                )
+            except Exception as exc:
+                delay = groq_transient_retry_delay(exc)
+                if delay is None or attempt >= recovery_attempts:
+                    raise
+                logger.warning(
+                    "Groq minute rate limit reached for model %s; waiting %.0f seconds "
+                    "before recovery attempt %d/%d",
+                    self.model_name,
+                    delay,
+                    attempt + 1,
+                    recovery_attempts,
+                )
+                time.sleep(delay)
+                continue
+
+            actual_tokens = 0
+            for generation in result.generations:
+                usage = getattr(generation.message, "usage_metadata", None) or {}
+                actual_tokens += int(usage.get("total_tokens") or 0)
+            limiter.reconcile(reservation, actual_tokens or None)
+            return result
+
+        raise RuntimeError("Groq retry loop ended unexpectedly")
 
 
 def _input_to_messages(input_: Any) -> list:

@@ -323,7 +323,7 @@ class MT5Observer:
     # -----------------------------------------------------------------------
 
     @_serialized_mt5
-    def get_current_tick(self, symbol: str) -> MT5Tick:
+    def get_current_tick(self, symbol: str, *, max_age_seconds: int | None = None) -> MT5Tick:
         """Fetch the most recent market tick for a symbol."""
         self._ensure_connected()
         mt5 = self.api
@@ -351,7 +351,11 @@ class MT5Observer:
             ask,
             dt,
             pip_size=pip_sz,
-            max_age_seconds=settings.get("forex_quote_max_age_seconds", 30),
+            max_age_seconds=(
+                max_age_seconds
+                if max_age_seconds is not None
+                else settings.get("forex_quote_max_age_seconds", 30)
+            ),
             # Risk policy is enforced by ForexRiskEngine. This bound only rejects
             # structurally implausible observations before they enter context.
             max_spread_pips=settings.get("forex_quote_sanity_max_spread_pips", 1000.0),
@@ -526,7 +530,9 @@ class MT5Observer:
         mt5 = self.api
         kwargs: dict[str, Any] = {}
         if symbol:
-            kwargs["symbol"] = canonical_to_broker(normalize_forex_pair(symbol)) or symbol
+            # Resolve against the connected terminal instead of assuming a
+            # broker suffix (some XM accounts expose EURUSD, others EURUSDm).
+            kwargs["symbol"] = self.get_symbol_info(symbol).name
         if ticket:
             kwargs["ticket"] = ticket
 
@@ -601,7 +607,7 @@ class MT5Observer:
         mt5 = self.api
         kwargs: dict[str, Any] = {}
         if symbol:
-            kwargs["symbol"] = canonical_to_broker(normalize_forex_pair(symbol)) or symbol
+            kwargs["symbol"] = self.get_symbol_info(symbol).name
         if ticket:
             kwargs["ticket"] = ticket
 

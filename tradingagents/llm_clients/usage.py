@@ -13,6 +13,10 @@ from datetime import datetime, timezone
 from typing import Any
 
 
+class RunBudgetExceededError(RuntimeError):
+    """Provider usage crossed a configured run-level safety ceiling."""
+
+
 def _integer(mapping: dict[str, Any], *keys: str) -> int:
     for key in keys:
         value = mapping.get(key)
@@ -60,13 +64,29 @@ class UsageTracker:
     run_id: str
     provider: str | None = None
     model: str | None = None
+    max_total_tokens: int | None = None
+    max_calls: int | None = None
     _records: list[dict[str, Any]] = field(default_factory=list, init=False)
     _seen: set[str] = field(default_factory=set, init=False)
+    _observed: set[str] = field(default_factory=set, init=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False)
 
     def observe(self, response: Any) -> None:
+        response_id = getattr(response, "id", None) or f"object:{id(response)}"
+        call_budget_exceeded = False
+        with self._lock:
+            if response_id not in self._observed:
+                self._observed.add(response_id)
+                call_budget_exceeded = (
+                    self.max_calls is not None and len(self._observed) > self.max_calls
+                )
         usage = _usage_mapping(response)
         if usage is None:
+            if call_budget_exceeded:
+                raise RunBudgetExceededError(
+                    "LLM run call budget exceeded "
+                    f"({len(self._observed)} > {self.max_calls})"
+                )
             return
         input_details = usage.get("input_token_details") or {}
         output_details = usage.get("output_token_details") or {}
@@ -81,13 +101,10 @@ class UsageTracker:
             reasoning_tokens = reasoning_tokens or _integer(output_details, "reasoning")
         if total_tokens <= 0 and input_tokens <= 0 and output_tokens <= 0:
             return
-
-
         response_provider, response_model = _response_identity(response)
         provider = response_provider or self.provider
         model = response_model or self.model
 
-        response_id = getattr(response, "id", None) or f"object:{id(response)}"
         signature_payload = {
             "response_id": response_id,
             "input": input_tokens,
@@ -117,6 +134,17 @@ class UsageTracker:
                 return
             self._seen.add(signature)
             self._records.append(record)
+            total_tokens = sum(item["total_tokens"] for item in self._records)
+            if call_budget_exceeded:
+                raise RunBudgetExceededError(
+                    "LLM run call budget exceeded "
+                    f"({len(self._observed)} > {self.max_calls})"
+                )
+            if self.max_total_tokens is not None and total_tokens > self.max_total_tokens:
+                raise RunBudgetExceededError(
+                    "LLM run token budget exceeded "
+                    f"({total_tokens} > {self.max_total_tokens})"
+                )
 
     def records(self) -> list[dict[str, Any]]:
         with self._lock:

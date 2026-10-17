@@ -23,6 +23,34 @@ def _positive_int_env(name: str, default: int) -> int:
     return value
 
 
+def groq_transient_retry_delay(error: BaseException) -> float | None:
+    """Return the bounded recovery delay for a transient Groq minute limit.
+
+    Groq uses HTTP 429 when the current rolling RPM/TPM window is exhausted.
+    A full-window pause is intentionally conservative: the SDK has already
+    performed its short retries by the time this wrapper sees the exception.
+
+    HTTP 413 is deliberately excluded. Groq returns 413 when one request is
+    larger than the account's TPM allowance; waiting cannot make that payload
+    fit and retrying it would only consume another minute.
+    """
+    status_code = getattr(error, "status_code", None)
+    response = getattr(error, "response", None)
+    if status_code is None and response is not None:
+        status_code = getattr(response, "status_code", None)
+    if status_code != 429:
+        return None
+    message = str(error).lower()
+    if "rate limit" not in message and "rate_limit" not in message:
+        return None
+    return float(_positive_int_env("TRADINGAGENTS_GROQ_RATE_LIMIT_WAIT_SECONDS", 60))
+
+
+def groq_recovery_attempts() -> int:
+    """Number of full-window retries after the SDK's own short retry budget."""
+    return _positive_int_env("TRADINGAGENTS_GROQ_RATE_LIMIT_RECOVERY_RETRIES", 1)
+
+
 def estimate_chat_tokens(messages: list[Any], kwargs: dict[str, Any], output_reserve: int = 512) -> int:
     """Conservatively estimate billed tokens without retaining prompt content."""
     characters = 0
